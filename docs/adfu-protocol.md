@@ -598,3 +598,39 @@ endpoint stopped accepting writes. Physical reset required.
    the host handle may need closing and reopening. Descriptors were unchanged and the device
    did not re-enumerate, so this is less likely, but untested.
 
+## Upload verified; settle-time and fresh-handle also negative
+
+`write_mem 0x01010000` followed by `read_mem 0x01010000 0x40` returns the payload bytes
+**exactly**:
+
+```
+readback  8f48 8546 8f48 9049 0160 9049 904a 0020 ...
+source    8f48 8546 8f48 9049 0160 9049 904a 0020 ...
+```
+
+So the memory at `0x01010000` is real and writable, the upload lands correctly, and the
+load address is confirmed a fourth independent way. **The upload is not the problem.**
+
+Also tried: `switch 0x01010001`, then an 8-second settle (in case the payload re-initialises
+the USB controller), then a *fresh* libusb handle with 8-second timeouts, for `PollReady`,
+type-4 address read `0x32`, type-4 info read `0x42`, and the boot-ROM `adfu_info`.
+
+**All four: CBW write accepted, no data ever returned.**
+
+That combination — writes accepted but never answered, and the boot ROM also silent — means
+control has left the boot ROM but whatever is now running does not service the IN endpoint.
+The payload starts and stalls.
+
+## State of the problem
+
+Confirmed working: ADFU entry, payload upload (verified by readback), correct load address,
+and a handover that visibly changes CPU behaviour.
+
+Unsolved: getting the started payload to answer. Every host-side dialect recovered from the
+vendor DLL has been tried against it.
+
+The boot ROM is mask ROM inside the SoC and is in none of the files available, so the exact
+handover it expects cannot be recovered by static analysis. **A USB capture of the vendor
+tool on Windows is now the only route that can answer it** — it would show the precise byte
+sequence between upload and first successful read.
+
