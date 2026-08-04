@@ -125,3 +125,40 @@ and an **RDA5807M** FM tuner (corroborated by `device list` showing `FM (READY)`
 NVRAM `APP_RADIO_INFO`).
 
 A CH341A + SOIC-8 clip **cannot help here**. Don't buy one for this device.
+
+## `SdkCrypt.dll` is not the decryptor (and the .PYDs may not be encrypted)
+
+Assumed from its *filename* that `SdkCrypt.dll` decrypts the tool's Python modules. That
+was never evidenced, and checking it:
+
+- **No other file in the tool imports it** — no static linkage anywhere.
+- Export directory present but pefile resolves **no named symbols** (ordinal-only or malformed).
+- **No readable strings at all** — it is packed.
+- Imports only MSVCRT/KERNEL32/MSVCP60/ole32 — **no crypto APIs**.
+
+Separately, the premise that the `.PYD` modules are encrypted is also shaky. The FAT32
+chains are provably correct:
+
+```
+COMMONEX.PYD  clusters 40..69 EOC   (30 clusters = 122880 >= 121856 bytes)  contiguous
+UPGRADE.PYD   clusters  4..39 EOC   (36 clusters)
+```
+
+So the extraction is right, and the modules really do not begin with `MZ`. But their first
+bytes decode as valid x86 — `8b 15 a4 9e 01 10` = `mov edx,[0x10019ea4]`, referencing an
+imagebase-`0x10000000` address. They look like **headerless / transformed PE images**, not
+ciphertext. Note `UPGRADE.PYD` *does* start with a valid `MZ`, and the `MZ` found at
+cluster 35 lies inside `UPGRADE.PYD`'s own chain (an embedded PE), so the layout is
+self-consistent.
+
+Reconstructing loadable modules from these would mean rebuilding PE headers — possible in
+principle, but a large effort with no guarantee the ADFU call sequence is even in the
+module we pick.
+
+## `cmd 0x10` vs `cmd 0x11` — untestable against the boot ROM
+
+Both `CDB[0]=9` (cmd `0x10`) and `CDB[0]=8` (cmd `0x11`), with sector *and* byte addresses,
+return CSW **status 2** from the boot ROM. The revised memory-vs-storage reading in
+[adfu-protocol.md](adfu-protocol.md) is therefore neither confirmed nor refuted — the ROM
+rejects that whole command class until the payload runs.
+
