@@ -1,0 +1,5 @@
+*.bin
+*.db
+*.fw
+venv/
+__pycache__/
