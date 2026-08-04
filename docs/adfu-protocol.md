@@ -366,3 +366,87 @@ chosen by the caller. Resolving backends 2-4 and finding where `type` is set is 
 static step — it may well explain why our `cmd 0x10`/`0x11` probes were rejected: we were
 speaking the **type-0 dialect to a device that expects another**.
 
+---
+
+# RESOLVED: the tool uses backend **type 4**
+
+`ProductionCC.dll` constructs the transport with a literal:
+
+```
+1002752b  push  4
+1002752d  call  0x100dc8b8          ; operator new
+10027545  push  4                   <-- type = 4
+10027547  mov   ecx, [ebp-0x54]
+1002754a  call  dword ptr [CCommUSB ctor]
+```
+
+**`CCommUSB(4)`** — so backend **type 4** is the live one. Types 0 and 1 (which all the
+earlier analysis was based on) are not what the tool uses against a modern device.
+
+## All five backends (HardwareEx 2.10.13, imagebase 0x10000000)
+
+| type | alloc | inner ctor | vtable | ADFUWrite | ADFURead | write bound | read bound |
+|---|---|---|---|---|---|---|---|
+| 0 | `0x454` | `0x10001030` | `0x10023b3c` | `0x100012b0` | `0x10001880` | `0x47` | `0x42` |
+| 1 | `0x854` | `0x10003600` | `0x10023ca4` | `0x10003a30` | `0x10004030` | `0x25` | `0x21` |
+| 2 | `0x454` | `0x1000ed80` | `0x10023d8c` | `0x1000eea0` | `0x1000f3e0` | — | — |
+| 3 | none | — | — | — | — | null backend | |
+| **4** | `0x854` | `0x10010150` | `0x10023df4` | `0x100101c0` | `0x10010940` | **`0x3a`** | **`0x43`** |
+
+## type 4 — ADFUWrite (bound `0x3a`, idx `0x100108ac`, jmp `0x1001087c`)
+
+| cmds | CDB[0] |
+|---|---|
+| `0x00 0x01 0x02 0x04 0x05 0x06 0x08` | `5` |
+| `0x10` | `0xb0` |
+| **`0x14`** | **`8`** |
+| `0x1e` | `0xc9` |
+| `0x1f 0x38 0x39 0x3a` | `0xb0` |
+| `0x22 0x23 0x24` | `0xc9` |
+| `0x25 0x26` | `0xb0` |
+| **`0x32`** | **`0xb0`** |
+
+## type 4 — ADFURead (bound `0x43`, idx `0x10010e28`, jmp `0x10010e0c`)
+
+| cmds | CDB[0] | notes |
+|---|---|---|
+| `0x00 0x01 0x02 0x04 0x05 0x06 0x08` | `5` | takes `extra[0..3]` |
+| `0x1e` | `0xca` sub `0xf0` | length only, no address |
+| `0x27` | `0xca` sub `0xf1` | length only |
+| **`0x32`** | **`0xb0`** | **takes `extra[0..3]` — address-carrying** |
+| `0x42` | `0xca` sub `0xf6` | length only |
+| `0x43` | `0xca` sub `0xf5` | length only |
+
+## CRITICAL: type 4 uses a different CDB field layout
+
+In type 4 the `extra[0..3]` bytes go to **`CDB[1..4]`** (`ebp-0x30` … `ebp-0x2d`):
+
+```
+10010a8b  mov byte [ebp-0x31], 0xb0     ; CDB[0]
+10010a8f  mov eax,[ebp+0x14]            ; extra
+10010a94  mov byte [ebp-0x30], cl       ; CDB[1] = extra[0]
+10010a9d  mov byte [ebp-0x2f], al       ; CDB[2] = extra[1]
+10010aa6  mov byte [ebp-0x2e], dl       ; CDB[3] = extra[2]
+10010aaf  mov byte [ebp-0x2d], cl       ; CDB[4] = extra[3]
+```
+
+Type 0 placed the address at **`CDB[2..5]`**. **Our device probes used the type-0 layout —
+wrong offsets and wrong opcodes.** That is very likely why every attempt returned status 2.
+
+## Commands the tool actually hardcodes
+
+```
+ADFUWrite cmd 0x32   (ProductionCC 0x10015836)  -> type4 handler[10], CDB[0]=0xb0
+ADFUWrite cmd 0x14   (ProductionCC 0x100158a2)  -> type4 handler[2],  CDB[0]=8
+ADFURead  cmd 0x1F   (ProductionCC 0x1002a1c2)  -> not in type 4; type 1 only
+```
+
+## Best candidate for a flash dump
+
+**`ADFURead(cmd=0x32)`** — the only address-carrying read in type 4 (`CDB[0]=0xb0`,
+`CDB[1..4]=addr`). Paired with `ADFUWrite(cmd=0x32)` which has the identical layout, this
+looks like the address-set / bulk-transfer pair.
+
+Untested. This supersedes the earlier `cmd 0x11` recommendation, which came from the wrong
+backend.
+
