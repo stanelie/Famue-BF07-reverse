@@ -242,3 +242,60 @@ reacts, by rebooting) but does not start the LARK payload correctly.
 4. The FWU manifest lists `ADFUS.BIN | 1146880 | 8` — the trailing `8` is an unexplained
    parameter that may be the entry/mode selector.
 
+## The vendor tool's scripting API (ProductionPY.dll)
+
+`ProductionPY.dll` exposes the production flow to the tool's Python layer. Complete list
+of `Py_*` entry points:
+
+```
+Py_OpenDevice  Py_ReOpenDevice  Py_CloseDevice  Py_EjectDevice  Py_DetachDevice
+Py_SwitchToAdfu
+Py_DownloadMem      upload to RAM
+Py_UploadMem        read RAM
+Py_SwitchFW         -> CCommUSB::Switch        (CDB[0]=0x10)
+Py_CallEntry        -> CCommUSB::CallingEntry  (CDB[0]=0x20)
+Py_PollReady        -> CCommUSB::PollingReady
+Py_DownloadImage    write a flash image
+Py_Send  Py_Recv  Py_DoUserComm  Py_GetStatus  Py_SetCommTimeout
+Py_OpenFirmware  Py_CloseFirmware  Py_GetFirmwareBin  Py_ReadFileInFW  Py_GetImageSize
+Py_GetProductionConfig  Py_SetProductionConfig
+Py_UpdateProgress  Py_UpdateStatus  Py_UpdateCapacity  Py_ShowMessage
+```
+
+**Implied sequence:**
+`OpenDevice -> SwitchToAdfu -> DownloadMem(payload) -> SwitchFW / CallEntry -> PollReady
+-> DownloadImage / Send / Recv`
+
+This confirms `Switch`/`CallingEntry`/`PollingReady` are *script-level* steps, and that
+the payload is uploaded with **`Py_DownloadMem`**, not with the ATJ-style `write_mem` we
+borrowed from `actions_flash`.
+
+### Likely correction to the opcode semantics
+
+`Py_DownloadMem`/`Py_UploadMem` (memory) exist alongside `Py_DownloadImage` (flash), which
+suggests `CDB[0]` distinguishes *memory* from *storage*, with direction coming from the
+CBW `flags` byte — not "8 = READ, 9 = WRITE" as first assumed:
+
+| | `ADFURead` (flags 0x80) | `ADFUWrite` (flags 0x00) |
+|---|---|---|
+| cmd `0x10` -> `CDB[0]=9` | read **flash** | write **flash** |
+| cmd `0x11` -> `CDB[0]=8` | read **memory** | write **memory** |
+
+Evidence for this reading: `ADFURead` cmd `0x10` maps to `CDB[0]=9`, which makes no sense
+if 9 meant "write". And `ADFUWrite` cmds `0x46`/`0x47` are `CDB[0]=9` with `CDB[1]=0x70`/
+`0x71` — i.e. *variants* of the same storage operation.
+
+**Consequence: a flash dump may need `ADFURead(cmd=0x10)`, not `cmd=0x11`.** Both should
+be tried. The earlier `cmd 0x11` attempts returned CSW status 2, consistent with it being
+a memory op the boot ROM does not implement.
+
+### Still missing
+
+The parameter values for `SwitchFW` / `CallEntry` (16-bit each) and the exact
+`Py_DownloadMem` command encoding. Those live in the tool's Python modules, which are
+**encrypted on disk** (`SdkCrypt.dll`); `python27.zip` in the newer tool builds contains
+only the CPython stdlib (1101 files, no vendor scripts).
+
+Two remaining routes: reverse `SdkCrypt.dll` to decrypt the `.PYD` modules, or capture the
+tool's USB traffic on Windows.
+
