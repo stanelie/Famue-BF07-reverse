@@ -561,3 +561,40 @@ entered at `0x01010000` in ARM state. Compare `simple_exec`, which uses `addr | 
 
 **Try `switch 0x01010001`.** Untested.
 
+## Thumb-bit test and PollingReady — both negative
+
+`switch 0x01010001` (Thumb bit set) behaves the same as `0x01010000`: device stays
+enumerated as `10d6:10d6`, payload starts, then hangs.
+
+Progression of failure modes across the three load attempts is informative:
+
+| load addr | switch | result |
+|---|---|---|
+| `0x118000` | `0x118000` | device **reboots to normal mode** (payload faults, watchdog) |
+| `0x01010000` | `0x01010000` | stays in ADFU; **CBW writes fail** immediately |
+| `0x01010000` | `0x01010001` | stays in ADFU; **CBW writes succeed**, no response; then hangs |
+
+So the correct load address genuinely changes behaviour, and the Thumb bit changes it
+again — the device now accepts one or two CBWs before ceasing to drain the OUT endpoint.
+Something is executing; it just never replies.
+
+`PollingReady` (type 4, `CDB[0]=0xb0`, `CDB[1..4]=0`, 2-byte read, `flags=0x80`) was also
+tried as the missing handshake step. First two CBWs accepted, no data returned, then the
+endpoint stopped accepting writes. Physical reset required.
+
+## Remaining hypotheses
+
+1. **Missing entry setup.** The vendor uses `Py_DownloadMem` (not the ATJ `write_mem` we
+   borrow) and may write an argument block / buffer pointers before `Py_CallEntry`. For
+   ATJ2157 `actions_flash` writes args at `0x11fff0` with `code 0x11e000`, `buf 0x11a000`;
+   the LARK equivalents are unknown. The payload's own literals give
+   SP `0x01007ff0`, VTOR `0x01010100`, BSS `0x0101ba00..0x0101ff69`, entry `0x01012541` —
+   but nothing there identifies a host-supplied arg block, so it may be elsewhere.
+2. **Wrong BROM entry command.** `actions_flash`'s `switch` (`CMD_ADFU_SWITCH`) may not be
+   the mechanism LARK's boot ROM uses to hand over. `Py_CallEntry`/`Py_SwitchFW` are
+   *payload*-side (they use the CCommUSB CBW dialect), so the boot-ROM-side handover is
+   still unidentified.
+3. **Host must re-open after handover.** If the payload re-initialises the USB controller,
+   the host handle may need closing and reopening. Descriptors were unchanged and the device
+   did not re-enumerate, so this is less likely, but untested.
+
