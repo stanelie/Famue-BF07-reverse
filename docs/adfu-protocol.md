@@ -299,3 +299,70 @@ only the CPython stdlib (1101 files, no vendor scripts).
 Two remaining routes: reverse `SdkCrypt.dll` to decrypt the `.PYD` modules, or capture the
 tool's USB traffic on Windows.
 
+---
+
+# IMPORTANT CORRECTION: there are five backends, not one protocol
+
+Everything documented above was decoded from **backend type 0 only**. That was an error.
+
+`CCommUSB::CCommUSB(int type)` dispatches through a 5-way jump table and instantiates one
+of **five different transport classes, each with its own vtable and its own ADFU command
+set**. Slot 8 = ADFUWrite, slot 7 = ADFURead in every vtable, but they point at different
+implementations.
+
+In HardwareEx 2.10.13 (`imagebase 0x10000000`):
+
+| backend | alloc | inner ctor | vtable | ADFUWrite | ADFURead |
+|---|---|---|---|---|---|
+| type 0 | `0x454` | `0x10001030` | `0x10023b3c` | `0x100012b0` | `0x10001880` |
+| type 1 | `0x854` | `0x10003600` | `0x10023ca4` | `0x10003a30` | `0x10004030` |
+| types 2,3,4 | — | not yet resolved | — | — | — |
+
+**The ADFU code is byte-identical between tool 2.07.09 and 2.10.13** — same function
+addresses, same dispatch bounds, same tables. Newer tool ≠ newer protocol. The real
+variation is *across backends*, not versions.
+
+## type 0 (documented above)
+`ADFUWrite`: `cmp cmd, 0x47`, tables `0x100017d0`/`0x100017bc`, `cdb_len=0x10`
+`ADFURead` : `cmp cmd, 0x42`, tables `0x10001d98`/`0x10001d84`, `cdb_len=0x0c`
+Device-version branch on `[this+0x418]` vs **0x42**.
+
+## type 1 — a different protocol entirely
+`ADFUWrite`: `cmp cmd, 0x25`, tables `0x10003fb0`/`0x10003f8c`, `cdb_len=0x10`
+`ADFURead` : `cmp cmd, 0x21`, tables `0x100045c8`/`0x100045b0`, `cdb_len=0x10` (**not 0x0c**)
+Device-version branch on `[this+0x418]` vs **0x41**.
+
+ADFUWrite command map (CDB[0] per handler):
+
+| cmds | CDB[0] |
+|---|---|
+| `0x00 0x01 0x02 0x04 0x05 0x06 0x08` | `0x15` |
+| `0x1e` | `0xc9` |
+| `0x1f` | `0xb0` |
+| `0x20` | `0xb0` |
+| `0x22` | `0xc6` |
+| `0x23` | `0xc7` |
+| `0x24` | `0xc8` |
+| `0x25` | `0xb0` |
+| everything else | unsupported |
+
+ADFURead supports `0x00-0x02, 0x04-0x06, 0x08, 0x1e, 0x1f, 0x20, 0x21`.
+
+## Why this matters
+
+The hardcoded commands found at `ProductionCC.dll` call sites are **`0x32`, `0x14`
+(ADFUWrite) and `0x1F` (ADFURead)**. Against type 0 all three map to "return 0". But
+**`0x1F` is supported by type 1** — so ProductionCC is using **backend type 1** for at
+least some operations, and the type-0 tables documented above may be the wrong variant
+for this device entirely.
+
+`0x32` and `0x14` are supported by *neither* type 0 nor type 1, so at least one of the
+unresolved backends (2, 3, 4) is also in use.
+
+## Open question
+
+Which backend does a LARK device use? That is the `int type` argument to the constructor,
+chosen by the caller. Resolving backends 2-4 and finding where `type` is set is the next
+static step — it may well explain why our `cmd 0x10`/`0x11` probes were rejected: we were
+speaking the **type-0 dialect to a device that expects another**.
+
