@@ -450,3 +450,53 @@ looks like the address-set / bulk-transfer pair.
 Untested. This supersedes the earlier `cmd 0x11` recommendation, which came from the wrong
 backend.
 
+---
+
+# Structural conclusion: CCommUSB describes the PAYLOAD, not the boot ROM
+
+Tested on hardware, all against a device confirmed in ADFU with the boot ROM responding
+(`adfu_info` returns `CADFUD` before and after every attempt):
+
+| dialect | commands tried | result |
+|---|---|---|
+| type 0 | read `0x10`/`0x11`, sector+byte addr | **status 2** |
+| type 0 | `Switch` `CDB[0]=0x10`, `CallingEntry` `CDB[0]=0x20`, params 0/1 | **status 2** |
+| type 4 | info reads `0x1e/0x27/0x42/0x43` (`CDB[0]=0xca`, subs `f0/f1/f6/f5`) | **status 2** |
+| type 4 | address read `0x32` (`CDB[0]=0xb0`, addr in `CDB[1..4]`) | **status 2** |
+| type 4 | `CallingEntry` `CDB[0]=0xb0` + 32-bit param `0x118000`/`0x118001`/`0` | **status 2** |
+| type 4 | `Switch` `CDB[0]=0x10` + 32-bit param | **status 2** |
+
+Meanwhile the boot ROM **does** accept `actions_flash`'s ATJ-style commands — `adfu_info`
+(`0xcc`) and `write_mem 0x118000` both succeed.
+
+**Therefore: the entire `CCommUSB` command set — every backend, every dialect — is the
+protocol spoken by the *running payload*, not by the boot ROM.** None of it is reachable
+until `adfus.bin` is executing. All the reverse engineering above is correct but describes
+the wrong side of the handoff.
+
+## What this narrows the problem to
+
+Starting the payload is a **boot-ROM** operation, and the boot ROM speaks the ATJ dialect.
+`actions_flash` has exactly one such command (`CMD_ADFU_SWITCH`, via `switch <addr>`), and
+on LARK it reproducibly drops the device out of ADFU into a normal boot — consistent with
+the payload starting and immediately faulting.
+
+The most plausible remaining explanation is **missing entry setup**. For ATJ2157,
+`actions_flash`'s `nandread_init` writes an argument block before executing:
+
+```
+code_addr = 0x11e000   buf_addr = 0x11a000   args_addr = 0x11fff0
+```
+
+A bare `switch` provides none of that. The LARK `adfus.bin` may require an equivalent
+structure (stack pointer, buffer address, arg block) that the vendor tool sets up via
+`Py_DownloadMem` before calling `Py_CallEntry`.
+
+## Next steps, in order of cost
+
+1. **Disassemble the LARK `adfus.bin` entry code** (`0x118000`, 47608 bytes, ARM Thumb) to
+   see what it reads at startup — it begins `ldr r0,[pc,#0x23c]; mov sp,r0`, so at minimum
+   it takes a stack pointer from a literal. Determine whether it expects an arg block.
+2. **USB capture on Windows** — still definitive, and now with a much smaller question:
+   just the bytes between `DownloadMem` and the first successful read.
+
