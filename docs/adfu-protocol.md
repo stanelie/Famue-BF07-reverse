@@ -130,3 +130,78 @@ Sequence:
 
 **Unverified detail:** whether `CDB[2..5]` holds a *sector* or *byte* address. Probe at
 offset 0 and compare against known-good `dbg fread spi_flash 0x0` output before trusting it.
+
+---
+
+# Live results — what has actually been tried
+
+## USB endpoints (measured, not assumed)
+
+```
+device 10d6:10d6, 1 config, interface 0, class 0xff/0xff/0xff (vendor specific)
+  ep 0x81  IN   bulk  maxpkt 512
+  ep 0x02  OUT  bulk  maxpkt 512
+```
+
+**`EP_OUT` is `0x02`, not `0x01`.** Enumerate rather than assume — `actions_flash`
+hardcodes different values.
+
+## Confirmed: the framing is correct
+
+Sending a `cmd 0x11` flash-read CBW to the **boot ROM** (payload uploaded but not yet
+executed) returns a well-formed CSW:
+
+```
+55 53 42 53   "USBS"
+00 00 00 00   tag
+00 00 00 00   residue
+02            status = 2
+```
+
+Status `2` is exactly what `adfus.c` sets for an unsupported opcode
+(`default: usbs_error = 2;`). So CBW construction, endpoints and transport are all
+correct — **the boot ROM simply does not implement flash commands. The payload must be
+running.**
+
+## The payload handoff — why `actions_flash` fails here
+
+`actions_flash`'s `switch` sends the ATJ2157 `CMD_ADFU_SWITCH`. LARK does not honour it:
+the device silently leaves ADFU and boots normally (observed twice, reproducible).
+
+The vendor tool uses different commands entirely. From `CCommUSB::Switch` (`0x10001e40`)
+and `CCommUSB::CallingEntry` (`0x10001f80`), CBW base `ebp-0x3c` so `CDB[0]` = `ebp-0x2d`:
+
+| function | vtable | cdb_len | CDB[0] | CDB[1..2] |
+|---|---|---|---|---|
+| `Switch` | `+0x24` | `0x10` | **`0x10`** | 2-byte param from `arg[0..1]` |
+| `CallingEntry` | `+0x28` | `0x10` | **`0x20`** | 2-byte param from `arg[0..1]` |
+| `PollingReady` | `+0x2c` | — | — | — |
+| `SwitchToAdfu` | `+0x0c` | — | — | — |
+
+Crucially these put the opcode **directly in `CDB[0]`**, unlike `ADFUWrite`/`ADFURead`
+which map `cmd` through a dispatch table to `CDB[0] = 5/8/9/0xb0`.
+
+`CDB[0]=0x20` matches ATJ2127's documented `case 0x20: switch_addr = addr | 1;` — two
+independent sources agreeing that `0x20` is the execute/switch command.
+
+**Open question:** the parameter is only **2 bytes**, not a 32-bit address. Either the
+entry address is implicit (the payload always lives at `0x118000`) or it is a selector.
+Probe carefully.
+
+## Working sequence (next to try)
+
+1. `dbg reboot adfu` on the UART shell → `10d6:10d6`
+2. `actions_dump write_mem 0x118000 0 0 adfus.bin` — upload only, **no** `switch`
+   (this step works today)
+3. `CallingEntry`: CBW with `cdb_len=0x10`, `CDB[0]=0x20`, `CDB[1..2]=param`
+4. `read_flash`: `ADFURead` `cmd 0x11` → `CDB[0]=8`, `CDB[2..5]=addr`, `CDB[7..8]=sectors`
+
+Steps 1, 2 and 4 are implemented and proven to exchange valid CBW/CSW. **Only step 3 is
+untested.**
+
+## Side effect observed
+
+After executing a payload via `actions_flash`'s (wrong) `switch`, the device returns to
+normal mode and boots fine — SD card mounts, USB enumerates — but **the UART console
+stays silent**. A warm reset does not restore it; a full power cycle is likely needed.
+Nothing is written to flash, and the device is otherwise unharmed.

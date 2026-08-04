@@ -16,23 +16,32 @@ Written to be honest rather than encouraging. If you're picking this up, read th
 | Official LARK `adfus.bin` payload obtained | ✅ |
 | LARK ADFU USB protocol (framing, opcodes, CDB layouts) | ✅ |
 | Register write primitive (`dbg mww`) | ✅ |
+| LARK ADFU host implementation (CBW/CSW verified live) | ✅ |
+| Payload upload via `write_mem` | ✅ |
+| **Starting the payload (handoff)** | ⚠️ decoded, untested |
+| **Reading flash over ADFU** | ⚠️ blocked on handoff |
 | **Writing anything to flash** | ❌ |
 
 ## The one blocker
 
-**No verified write path.** Everything else is solved.
+**Starting the uploaded payload.** Everything either side of it works.
 
-`actions_flash` implements the ATJ2127/ATJ2157 opcodes; LARK's `adfus.bin` uses a
-different set, so every command after payload upload hangs
-(see [adfu-protocol.md](adfu-protocol.md) for exactly why).
+`tools/lark_adfu.py` implements the recovered protocol and **provably talks to the
+device** — it sends a valid CBW and receives a well-formed CSW. The boot ROM answers
+with status `2` (unsupported opcode) for flash commands, which is correct behaviour:
+flash access requires `adfus.bin` to be *running*.
 
-The protocol is now known, so the remaining work is *implementation*: retarget a host
-tool to LARK's CDB layouts. `nfd/atj2127decrypt`'s `dfu/adfu.py` is the best starting
-point — it already builds the correct CBW.
+Uploading the payload works (`actions_dump write_mem 0x118000 0 0 adfus.bin`).
+Starting it does not — `actions_flash`'s `switch` sends the ATJ2157 command, which LARK
+ignores; the device simply leaves ADFU and boots normally (reproduced twice).
 
-**Do the read path first.** `ADFURead(cmd=0x11)` should dump all 4 MB. That is the
-backup which makes every subsequent write reversible, and it can be validated against
-`dbg fread` output we can already obtain.
+The correct handoff has been decoded from the vendor DLL —
+`CallingEntry` = `CDB[0] 0x20`, `Switch` = `CDB[0] 0x10`, each with a 2-byte parameter —
+but **has not yet been tried**. That single command is what stands between here and a
+full 4 MB dump.
+
+Validate any dump against `dbg fread spi_flash <off>`; a ground-truth capture helper is
+in `tools/lark_adfu.py`.
 
 ## Risk situation
 
