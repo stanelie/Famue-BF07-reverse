@@ -205,3 +205,40 @@ After executing a payload via `actions_flash`'s (wrong) `switch`, the device ret
 normal mode and boots fine — SD card mounts, USB enumerates — but **the UART console
 stays silent**. A warm reset does not restore it; a full power cycle is likely needed.
 Nothing is written to flash, and the device is otherwise unharmed.
+
+## Handoff attempt — result (tested)
+
+`Switch` (`CDB[0]=0x10`) and `CallingEntry` (`CDB[0]=0x20`) were both sent to the boot ROM
+with the payload uploaded at `0x118000`, params 0 and 1, `cdb_len=0x10`, no data phase.
+
+**All four returned CSW status 2 (unsupported).** Subsequent `cmd 0x11` flash reads also
+returned status 2 rather than data.
+
+Crucially the device **stayed in ADFU and the boot ROM kept responding** (`adfu_info` still
+returns `CADFUD`) — unlike `actions_flash`'s `switch`, which reproducibly drops the device
+out of ADFU into a normal boot.
+
+### Interpretation
+
+`Switch` / `CallingEntry` are almost certainly commands the **running payload** implements,
+not boot-ROM commands. Compare `payload_arm/adfus.c` (ATJ2157), where `case 0x20` is handled
+*inside the payload*. So they cannot be used to start it.
+
+The boot ROM does speak `actions_flash`'s ATJ-style protocol — `write_mem 0x118000` succeeds
+against it. What is still unknown is the boot-ROM command that **transfers control** to the
+uploaded payload on LARK. `actions_flash`'s `CMD_ADFU_SWITCH` reaches the device (it visibly
+reacts, by rebooting) but does not start the LARK payload correctly.
+
+### Remaining leads
+
+1. **`adfus_u.bin`** — the SDK ships this alongside `adfus.bin`; the `_u` variant may be the
+   USB-entry build. Untried.
+2. **Payload arguments.** `actions_flash`'s `nandread_init` for ATJ2157 writes an args block
+   at `0x11fff0` (code `0x11e000`, buffer `0x11a000`) before executing. The LARK payload may
+   likewise expect setup that a bare switch does not provide.
+3. **Disassemble the vendor tool's caller.** `ProductionCC.dll` imports these functions —
+   following the call sequence there would show the exact order and parameters used
+   (`SwitchToAdfu` → `ADFUWrite` → ? → `PollingReady`).
+4. The FWU manifest lists `ADFUS.BIN | 1146880 | 8` — the trailing `8` is an unexplained
+   parameter that may be the entry/mode selector.
+
