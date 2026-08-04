@@ -500,3 +500,64 @@ structure (stack pointer, buffer address, arg block) that the vendor tool sets u
 2. **USB capture on Windows** — still definitive, and now with a much smaller question:
    just the bytes between `DownloadMem` and the first successful read.
 
+---
+
+# BREAKTHROUGH: the payload load address is `0x01010000`, not `0x118000`
+
+Disassembling the LARK `adfus.bin` entry stub (file offset 0) settles it:
+
+```
+00118000  ldr r0,[pc,#0x23c]   ; = 0x01007ff0     stack pointer
+          mov sp, r0
+          ldr r0,[pc,#0x23c]   ; = 0xe000ed08     VTOR
+          ldr r1,[pc,#0x240]   ; = 0x01010100     vector table
+          str r1,[r0]
+          ldr r1,[pc,#0x240]   ; = 0x0101ba00     BSS start
+          ldr r2,[pc,#0x240]   ; = 0x0101ff69     BSS end
+          ... zero BSS ...
+          ldr r0,[pc,#0x234]   ; = 0x01012541     entry
+          bx  r0
+```
+
+All absolute addresses are `0x0101xxxx`. Cross-checked against the file:
+
+| | |
+|---|---|
+| file size | `0xb9f8` (47608) |
+| load at `0x01010000` → image ends | `0x0101b9f8` |
+| BSS start from code | `0x0101ba00` — an 8-byte gap ✓ |
+| vector table `0x01010100` | file offset `0x100` ✓ |
+| entry `0x01012541` | file offset `0x2540` ✓ |
+| **vector[1] (reset vector)** | **`0x01010000`** ✓ |
+
+**`0x118000` is the ATJ2157 address from `actions_flash`'s README and is wrong for LARK.**
+
+This also explains the long-standing crash: loaded at `0x118000` the stub still runs, sets
+VTOR to an empty `0x01010100`, zeroes nothing, then `bx` to `0x01012541` where nothing was
+loaded → fault → watchdog reset → normal boot. Exactly the observed behaviour, every time.
+
+## Result of loading at the correct address
+
+```
+write_mem 0x01010000 0 0 adfus.bin     -> OK
+switch    0x01010000                    -> OK
+```
+
+The device **stayed enumerated as `10d6:10d6`** instead of rebooting to normal mode — the
+first time that has ever happened. So the payload starts.
+
+But it then **hangs**: bulk writes to EP `0x02` time out, and even the classic boot-ROM
+`adfu_info` (`0xcc`) times out. Endpoints are unchanged (`0x02` OUT / `0x81` IN). The
+device is enumerated but not servicing USB. Requires a physical reset.
+
+## Next hypothesis: the Thumb bit
+
+The reset vector is `0x01010000` (even), but this is a Cortex-M — code entry must have bit 0
+set or the core faults on entering ARM state. The payload's own code does
+`ldr r0,=0x01012541` (odd) then `bx r0`, i.e. it sets the bit for its internal jump.
+
+`actions_flash`'s `adfu_switch()` passes the address unmodified, so the core is likely
+entered at `0x01010000` in ARM state. Compare `simple_exec`, which uses `addr | 1`.
+
+**Try `switch 0x01010001`.** Untested.
+
