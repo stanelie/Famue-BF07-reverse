@@ -34,6 +34,10 @@ BAUD = 2000000
 BLOCK = 512
 
 LINE = re.compile(rb"^\s*([0-9a-f]+):\s+((?:[0-9a-f ]{2}\s*){1,16})$", re.I)
+# The device echoes the offset it actually read. Verifying it is essential:
+# after a timeout the previous command's output can still be in flight, and
+# without this check it would be silently accepted as the NEXT block's data.
+HEADER = re.compile(rb"fread\s+512b:\s*offset=0x([0-9a-f]+)", re.I)
 
 
 def read_block(s, off, tries=2):
@@ -47,6 +51,7 @@ def read_block(s, off, tries=2):
 
         got = {}
         pending = bytearray()
+        armed = False
         deadline = time.time() + 8.0
         while time.time() < deadline and len(got) < BLOCK // 16:
             chunk = s.read(4096)
@@ -56,6 +61,14 @@ def read_block(s, off, tries=2):
             *lines, rest = bytes(pending).split(b"\n")
             pending = bytearray(rest)
             for raw in lines:
+                h = HEADER.search(raw)
+                if h:
+                    # only trust hex lines that follow OUR header
+                    armed = int(h.group(1), 16) == off
+                    got.clear()
+                    continue
+                if not armed:
+                    continue
                 m = LINE.match(raw.strip())
                 if not m:
                     continue
