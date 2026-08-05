@@ -923,3 +923,71 @@ controller brings up its clock.
 
 **Next:** recapture at `115200 x k`. The ~2-byte repeat period suggests `k = 2`
 (230400); `k = 1/2` (57600) is the alternative if the clock dropped instead.
+
+---
+
+# BREAKTHROUGH: `adfus_u.bin` brings up USB (2026-08-05)
+
+**The wrong payload was being used all along.** `adfus.bin` is not the USB
+variant — `adfus_u.bin` is (`_u` = USB). Evidence:
+
+| | `adfus.bin` | `adfus_u.bin` |
+|---|---|---|
+| USB strings | `'Adfus_Irq… usb_receive_cbw_isr - null'` only | **also `'usb out'`** |
+| `main()` | `storage_bind(type)` then `b .` | `bl 0x10126f0` then `b .`, **no storage arg** |
+| ordering | storage init, *then* poll | **polls first**, storage only once a command arrives |
+| poller read size | 16 bytes via a context handle | USB |
+
+`adfus.bin`'s poller (`0x1014758`) reads **16 bytes** through a context stamped
+with type byte `8` — not a 31-byte CBW. It is a different transport.
+
+`adfus_u.bin`'s service function `0x010126f0`:
+
+```
+010126f4  bl   0x10147e0          ; init
+01012708  [sp+0x10] = 0x01014931  \
+0101270c  [sp+0x14] = 0x01014a05   > three handler callbacks
+01012710  [sp+0x18] = 0x01014a55  /
+0101271e  bl   0x1014ad8          ; register the callback struct
+01012722  bl   0x1014a18          ; POLL  <-- before any storage init
+01012728  cbnz r0, 0x101274a      ; only on a command, touch storage
+0101274a  movs r1,#0x32 ; movs r0,#1 ; bl 0x1015068   ; storage_init(1,50)
+01012754  movs r1,#0x32 ; movs r0,#2 ; bl 0x1015068   ; storage_init(2,50)
+```
+
+It tries storage types **1 then 2, never 0** — the same NAND bias as
+`adfus.bin`, in a different shape. One byte at file offset `0x274c`
+(`01 20` -> `00 20`) redirects the first attempt to **type 0 = SPI NOR**.
+
+## Result on hardware: USB is ALIVE
+
+With `adfus_u_nor.bin` uploaded to `0x01010000` and started with `cd 20`:
+
+- **Control transfers work.** Live `GET_DESCRIPTOR` returns
+  `class ff/ff/ff`, `ep 0x81 IN bulk 512`, `ep 0x02 OUT bulk 512` — the payload
+  is running its own USB device stack, not the boot ROM's.
+- **EP `0x81` streams 6-byte packets continuously**, with or without any command
+  sent:
+
+```
+01 04 00 00 63 35
+01 05 00 00 63 ae
+01 06 00 00 63 32     format: 01 <seq4> 00 00 63 <cksum>
+```
+
+  `seq` is a 4-bit counter incrementing per packet delivered; the last byte
+  correlates with `seq` parity, so it is likely a checksum.
+- No UART output at 115200 (the `_u` build may use a different rate, or none).
+
+## What is still missing
+
+The payload does **not** answer our CBW framing — not the `0xCD` ROM dialect,
+not either `CCommUSB` dialect, not classic ATJ. It streams its status packet
+regardless.
+
+So the remaining task is now well-posed and small: **recover the command format
+the running `adfus_u` payload expects**, from its own poller (`0x1014a18`) and
+its three handler callbacks (`0x01014931`, `0x01014a05`, `0x01014a55`).
+
+That is ordinary static analysis of a payload we have, against a device that
+now talks back — a far better position than any point earlier in this project.
