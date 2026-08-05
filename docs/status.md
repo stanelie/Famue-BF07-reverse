@@ -392,3 +392,45 @@ shifted by one — this cost real debugging time.
 are the same 16-byte protocol, so the transport work is done. A byte-verified
 4 MB backup exists, so a mistake is recoverable — **but only `fw0_sys`
 (`0x14000`, len `0x1e0000`) should ever be written.**
+
+## Flash WRITE and ERASE verified (2026-08-05)
+
+Both write primitives work. Tested in the blank tail of the flash — chosen so
+that even a coarse erase alignment could not damage anything.
+
+**Target selection.** `0x3f0000`–`0x400000`: the last 64 KB, entirely `0xFF` in
+the verified dump, 64 KB-aligned, inside the unused tail of `fw0_sdfs20` (and
+containing `fw0_temp`, the OTA scratch partition). Because it was already
+erased, the first write needed no erase at all — NOR programs 1→0 freely.
+
+```
+ws 0x3f0000 len=256   -> reply aa 00 00 00, readback byte-exact
+es 0x3f0000 size=1000 -> reply aa 00 00 00, region returns to 0xFF
+```
+
+**Erase granularity is 4 KB.** Verified empirically: a marker written at
+`0x3f1000` survived intact while `0x3f0000` was erased. So `fw0_sys` can be
+patched surgically — erase and rewrite only the 4 KB sectors containing a
+change.
+
+`0xaa` is the ACK byte in a reply (`aa 00 00 00`).
+
+**After cleanup, a full 4 MB ADFU dump compares IDENTICAL to the pre-test
+backup** — the device is byte-for-byte as it started.
+
+### Complete verified capability
+
+| operation | status |
+|---|---|
+| `rm` read memory | ✅ |
+| `rs` read flash | ✅ byte-identical to the UART dump |
+| `ws` write flash | ✅ verified by readback |
+| `es` erase flash | ✅ 4 KB granularity, verified |
+
+Everything needed to patch `fw0_sys` now exists and is proven. The remaining
+work is applying the ebook layout patches (offsets in
+[ebook-layout.md](ebook-layout.md)) — `0x4903e` wrap width, `0x4934a`
+lines-per-page, `0x164a32` word-break table — as flash offsets
+`0x14000 + file_offset`, sector-aligned.
+
+**Write only `fw0_sys` (`0x14000`, len `0x1e0000`). Never `fw0_boot` at `0x0`.**
