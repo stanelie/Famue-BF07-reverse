@@ -178,3 +178,47 @@ nothing in the DLL made the `0xCD` prefix visible at the level we were reading.
 **Lesson:** four sessions of protocol inference lost to a field-offset
 assumption that a single capture settled in under a minute. When a protocol has
 a reachable implementation, capture before inferring.
+
+## CORRECTION: "SD-card OTA never runs on this board" was wrong
+
+The entry above concluded the bootloader probes the wrong controller. **That was
+a misreading.** The BF07 has **two card slots**:
+
+| disk | controller | slot |
+|---|---|---|
+| `/SD:` | `MMC_0` | **user slot** — was empty during all earlier testing |
+| `/SD1:` | `MMC_1` | **system card** — the 28.5 GB card holding ebooks, fonts, `*.LIB` |
+
+Both `MMC_0` and `MMC_1` exist in the firmware, as do both disk names. So:
+
+```
+!!!ERR: dev sd not found        sdfs cannot found device sd
+main I: upgrade not allowed
+```
+
+simply means **the user slot was empty**, not that the probe targets the wrong
+device. The OTA path `/SD:/ota.bin` points at the *user* slot, which is exactly
+where a user would insert an update card.
+
+The earlier probe `ota.bin` was placed on the **system** card (`/SD1:`), which
+the OTA backend never looks at — which is why it was "never even examined".
+
+### This also qualifies the XIP conclusion
+
+`status.md` argued OTA cannot replace `fw0_sys` because it is XIP and unmirrored.
+That reasoning holds for the **running application** rewriting itself in place —
+`ota_partition_erase_part` really does skip XIP partitions.
+
+It does **not** rule out the **bootloader/recovery** path. `fw0_rec`
+(`RECOVERY`, `0x4000`, 64 KB) is a separate program whose job is exactly this:
+it does not execute from `fw0_sys`, so it can erase and rewrite it. That is what
+an OTA is *for* on a single-bank XIP device.
+
+**Untested.** To verify: put a FAT32 card with a valid `ota.bin` in the **user**
+slot and watch the boot log for `found ota file` instead of `dev sd not found`.
+`tools/ota_tool.py` builds and validates the image format (already checked
+against the vendor's `build_ota_image.py`).
+
+This would be a *vendor-intended*, CRC-checked update path requiring no ADFU at
+all — worth having alongside the ADFU write path, not least because it is far
+easier for anyone reproducing this work.
