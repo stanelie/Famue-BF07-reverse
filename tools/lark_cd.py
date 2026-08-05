@@ -161,13 +161,20 @@ def do_info(a, args):
 
 def do_handover(a, args):
     blob = open(args.payload, "rb").read()
+    raw = len(blob)
+    # The tool zero-pads to a 256-byte boundary and sends the whole image in a
+    # single cd 13 (observed: 4980 B ADFUS.BIN -> 5120 B transfer).
+    if raw % 256:
+        blob += b"\x00" * (256 - raw % 256)
     addr = args.addr
-    print(f"payload {args.payload}: {len(blob)} bytes -> 0x{addr:08x}\n")
+    print(f"payload {args.payload}: {raw} B -> {len(blob)} B padded "
+          f"-> 0x{addr:08x}\n")
 
-    print(f"1. cd 13 upload ({args.chunk} B chunks)")
+    chunk = args.chunk or len(blob)
+    print(f"1. cd 13 upload ({'single transfer' if chunk >= len(blob) else f'{chunk} B chunks'})")
     off = 0
     while off < len(blob):
-        part = blob[off:off + args.chunk]
+        part = blob[off:off + chunk]
         st = a.write(OP_WRITE, addr + off, part)
         if st != 0:
             print(f"   offset 0x{off:x}: csw={st}  -- aborting")
@@ -203,7 +210,8 @@ def main():
     s = sub.add_parser("handover", help="upload a payload and try cd 20 / cd 21")
     s.add_argument("payload")
     s.add_argument("--addr", type=lambda x: int(x, 0), default=LARK_LOAD)
-    s.add_argument("--chunk", type=lambda x: int(x, 0), default=4096)
+    s.add_argument("--chunk", type=lambda x: int(x, 0), default=0,
+                   help="0 = single transfer, matching the vendor tool")
     s.add_argument("--settle", type=float, default=1.0)
     s.set_defaults(fn=do_handover)
 

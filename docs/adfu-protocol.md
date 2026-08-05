@@ -721,3 +721,24 @@ should carry over, but the addresses and the payload do not.
 Also unknown is the 156-byte `cd 23` reply format. Feeding the tool a plausible
 one is what would push the capture past identification into the actual flash
 sequence.
+
+## Confirmation: the captured payload is our decrypted `ADFUS.BIN`
+
+The 4,952 real bytes captured off the wire are a **byte-exact prefix** of the
+4,980-byte `ADFUS.BIN` extracted from the FWU SQLite DB by `atjboottool`
+(md5 `a389934296afa37d7947844b2f83ac16`). 100% identical, no transformation.
+
+| blob | size | match |
+|---|---|---|
+| FWU DB `ADFUS.BIN` | 4,980 | **exact prefix** |
+| tool FAT32 `ADFUS.BIN` (encrypted) | 48,192 | 0.8% |
+| SDK LARK `adfus.bin` | 47,608 | 1.8% |
+
+Three things follow:
+
+1. The FWU decryption chain is correct end to end — the tool uploads exactly
+   what we extracted, unmodified.
+2. **Payloads are sent in the clear.** No obfuscation on the wire.
+3. The transfer is the raw image **zero-padded to a 256-byte boundary**
+   (4,980 → 5,120), sent in a **single** `cd 13`. For LARK that means 47,608 →
+   47,616 bytes at `0x01010000`.
