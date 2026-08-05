@@ -18,9 +18,9 @@ Written to be honest rather than encouraging. If you're picking this up, read th
 | Register write primitive (`dbg mww`) | ✅ |
 | LARK ADFU host implementation (CBW/CSW verified live) | ✅ |
 | Payload upload via `write_mem` | ✅ |
-| **Starting the payload (handoff)** | ⚠️ decoded, untested |
-| **Reading flash over ADFU** | ⚠️ blocked on handoff |
-| **Writing anything to flash** | ❌ |
+| **Starting the payload (handoff)** | ✅ `cd 20` @ 0x01010000 |
+| **Reading flash over ADFU** | ✅ byte-identical to the serial dump, 693 KB/s |
+| **Writing anything to flash** | ⚠️ primitives known (`ws`/`es`), untested |
 
 ## The blocker — identified 2026-08-05
 
@@ -319,3 +319,76 @@ what makes a bootloader update safe. It cannot replace the code image.
 (Recorded because `tools/read_parttable.py` initially printed the opposite
 verdict: it flagged "mirror pairs exist" without checking whether the *SYSTEM*
 partition was among them. Fixed to test the SYSTEM file_id specifically.)
+
+---
+
+# 2026-08-05: ADFU SOLVED — full flash read over USB
+
+The core blocker of this project is gone.
+
+```
+$ lark_adfu_u.py dump adfu_full.bin --compare bf07_flash_full.bin
+read 4194304 bytes in 5.9s (693 KB/s) -> adfu_full.bin
+compared 4194304 bytes against bf07_flash_full.bin: IDENTICAL
+```
+
+A complete 4 MB flash image over ADFU in **5.9 seconds**, byte-identical to the
+UART dump that took ~2 hours and was independently verified block by block. Two
+fully independent read paths agree on all 4,194,304 bytes.
+
+## What was actually wrong
+
+Three compounding mistakes, each of which alone would have blocked everything:
+
+1. **Wrong payload.** `adfus.bin` is not the USB build — `adfus_u.bin` is
+   (`_u` = USB). `adfus.bin`'s poller reads 16 bytes through a non-USB context
+   stamped with type byte `8`.
+2. **Wrong storage type.** Both payloads are built for SPI NAND. `adfus_u`
+   tries storage types 1 then 2, never 0. The BF07 is SPI NOR.
+3. **Wrong framing.** There is **no CBW/CSW wrapper**. The payload reads a raw
+   **16-byte command packet** off the bulk OUT endpoint. Every CBW dialect this
+   repo tried — `0xCD` ROM framing, both `CCommUSB` variants, classic ATJ — was
+   wrapping commands in something the payload never reads.
+
+## The working recipe
+
+```
+dbg reboot adfu                       # UART shell
+lark_cd.py handover adfus_u_go.bin    # cd 13 upload + cd 20 start
+lark_adfu_u.py dump out.bin           # raw 16-byte packet protocol
+```
+
+`adfus_u_go.bin` = stock `adfus_u.bin` with two RAM-only patches:
+
+| offset | from | to | why |
+|---|---|---|---|
+| `0x274c` | `01 20` | `00 20` | first storage attempt -> type 0 (SPI NOR) |
+| `0x2752` | `60 b9` | `0c e0` | `cbnz r0` -> unconditional branch; a failed storage init otherwise loops forever without ever reaching the command dispatcher |
+
+## Command set
+
+Dispatcher `0x01014a88`; IDs at `0x01010e06` (16 x u16), handlers at
+`0x01010e28` (16 x u32). Opcodes are two ASCII characters read as a u16 LE.
+
+```
+[0..1] opcode   [4..7] length u32   [8..11] address u32 (BYTE address)
+```
+
+| op | meaning | op | meaning |
+|---|---|---|---|
+| `gf` | get flash info | `rs` | **read sector** ✅ verified |
+| `rm` | **read memory** ✅ verified | `ws` | **write sector** ⚠️ untested |
+| `wm` | write memory | `es` | **erase sector** ⚠️ untested |
+| `ic` | ic version | `cf` | config |
+| `is` / `si` | init / storage info | `rr` `rx` `sf` `af` `cr` | misc |
+
+**Gotcha:** a stale status packet (`01 <seq4> 00 00 63 <cksum>`) may be queued
+on EP `0x81`. Drain the endpoint before each command or every reply arrives
+shifted by one — this cost real debugging time.
+
+## Next
+
+`ws` (write sector) and `es` (erase sector) are the remaining primitives. They
+are the same 16-byte protocol, so the transport work is done. A byte-verified
+4 MB backup exists, so a mistake is recoverable — **but only `fw0_sys`
+(`0x14000`, len `0x1e0000`) should ever be written.**
