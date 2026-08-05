@@ -71,6 +71,9 @@ def read_block(s, off, tries=2):
 
         if len(got) == BLOCK // 16:
             return b"".join(got[o] for o in sorted(got))
+        # Sustained hammering degrades the device's print path; it recovers
+        # when given idle time. Back off before retrying.
+        time.sleep(1.5 * (attempt + 1))
     return None
 
 
@@ -80,6 +83,10 @@ def main():
     p.add_argument("--size", type=lambda x: int(x, 0), default=0x400000)
     p.add_argument("--start", type=lambda x: int(x, 0), default=0x0)
     p.add_argument("--port", default=PORT)
+    p.add_argument("--settle", type=float, default=0.06,
+                   help="pause between blocks so the device drains")
+    p.add_argument("--rest-every", type=int, default=256,
+                   help="take a longer rest every N blocks")
     args = p.parse_args()
 
     # resume: keep whatever is already complete
@@ -133,10 +140,15 @@ def main():
             if blk is None:
                 fail += 1
                 print(f"  0x{off:06x}  FAILED", flush=True)
+                time.sleep(4.0)          # let the device recover
             else:
                 data[off:off + BLOCK] = blk
                 pending.append(off)
                 ok += 1
+                time.sleep(args.settle)
+                if args.rest_every and ok % args.rest_every == 0:
+                    flush()
+                    time.sleep(3.0)      # periodic drain
             if (ok + fail) % 64 == 0 or i == total - 1:
                 flush()
                 el = time.time() - t_start
