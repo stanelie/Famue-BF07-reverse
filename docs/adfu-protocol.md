@@ -991,3 +991,33 @@ its three handler callbacks (`0x01014931`, `0x01014a05`, `0x01014a55`).
 
 That is ordinary static analysis of a payload we have, against a device that
 now talks back — a far better position than any point earlier in this project.
+
+## Trap: `rm` on low addresses is unreliable
+
+The `rm` handler branches on the address (`cmp r5, #0x40000000; blo ...`). The
+low-address path is not a straightforward memory read:
+
+* Immediately after a fresh payload start, `rm 0x01010000` works and returns the
+  uploaded payload byte-exactly.
+* After a few commands, `rm` on low addresses starts returning a **constant**
+  (`d0 5a 00 01 d1 01 00 00 ...`) for *every* address — `0x0`, `0x01010000`,
+  `0x18000000` all identical — and then wedges the payload entirely (endpoints
+  time out, only a power-on reset recovers).
+
+`rm 0x10000000` did once return real decrypted code — matching `fw_code_full.bin`
+at offset `0xe8000`, implying the XIP window maps a different flash offset under
+ADFU than when the application runs. That was not reproducible.
+
+**Use `rs` for flash. Do not rely on `rm` for probing.**
+
+### The encryption test does not need `rm` anyway
+
+Whether the SoC encrypts on write is answerable with `ws` + `rs` alone:
+
+| write plaintext P to `fw0_sys` padding, then `rs` | conclusion |
+|---|---|
+| returns **P** | raw write — the cipher must be broken to patch code |
+| returns **something else** | hardware encrypted on write — patching is easy |
+
+If the hardware transforms the write, the stored bytes are `E(P)` and a raw read
+shows exactly that. No decrypted view is required.
