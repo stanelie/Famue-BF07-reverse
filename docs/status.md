@@ -434,3 +434,51 @@ lines-per-page, `0x164a32` word-break table — as flash offsets
 `0x14000 + file_offset`, sector-aligned.
 
 **Write only `fw0_sys` (`0x14000`, len `0x1e0000`). Never `fw0_boot` at `0x0`.**
+
+## USB-ONLY workflow verified end to end (2026-08-05)
+
+No serial cable at any point. Full chain, on a device that started in normal
+mode:
+
+```
+diskutil unmountDisk /dev/disk2            # macOS: release the MSC interface
+sudo python3 tools/adfu_enter_usb.py       # -> ADFU in ~1s
+sudo python3 tools/lark_cd.py handover adfus_u_go.bin --start-only
+sudo python3 tools/lark_adfu_u.py dump out.bin
+```
+
+Results:
+
+```
+ADFU mode reached after 1.0s
+uploaded 48896 bytes, all CSW 0        cd 20 @ 0x01010000 csw=0
+read 4194304 bytes in 5.9s (690 KB/s)  compared: IDENTICAL
+ws 0x3f0000 -> aa 00 00 00, readback OK; es -> aa 00 00 00, blank again
+final full dump vs backup: IDENTICAL
+```
+
+Read, write and erase all confirmed over USB alone.
+
+### Platform notes
+
+* **macOS** needs the volume unmounted **and** elevated privileges — libusb
+  cannot detach `IOUSBMassStorageDriver` otherwise. Unmounting alone is not
+  enough.
+* **Linux** is easier: libusb detaches kernel drivers directly, so a Raspberry
+  Pi or any Linux box works as a dev host with no special handling.
+* **LARK answers `ff 55`** to the `0xCB/0x21` reboot, not the `ff 00` that
+  `actions_flash` expects — its `adfu_reboot` would misreport this as a failure.
+* Use `--start-only`. Any extra boot-ROM command after `cd 20` is a 31-byte CBW
+  to a payload that reads raw 16-byte packets, and it desynchronises the command
+  stream unrecoverably (endpoints will not even clear halt — only a power-on
+  reset recovers).
+
+### Exiting ADFU
+
+There is no plain reboot opcode. `sf` (`0x01014fed`) is an arbitrary-execution
+command — it acks, then `blx` to `packet[8..11]` — so it is the plausible route
+to a programmatic reboot. **Untested.**
+
+**Serial is still the recovery path**: if a payload wedges USB, the physical
+reset button is the only way back. A serial-free host is fine, but physical
+access to the device is still required.
