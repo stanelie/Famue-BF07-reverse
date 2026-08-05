@@ -182,11 +182,19 @@ def do_handover(a, args):
         off += len(part)
     print(f"   uploaded {off} bytes, all CSW 0")
 
-    for op, name in ((OP_EXEC1, "cd 20"), (OP_EXEC2, "cd 21")):
+    ops = ((OP_EXEC1, "cd 20"),) if args.start_only else (
+        (OP_EXEC1, "cd 20"), (OP_EXEC2, "cd 21"))
+    for op, name in ops:
         print(f"\n2. {name} @ 0x{addr:08x}")
         st = a.cmd(op, addr)
         print(f"   csw={st}")
         time.sleep(args.settle)
+        if args.start_only:
+            # Anything further would be junk to an already-running payload:
+            # it reads raw 16-byte packets, so a 31-byte CBW desynchronises
+            # its command stream. Stop here and hand over to lark_adfu_u.py.
+            print("   started; use lark_adfu_u.py from here")
+            return 0
 
         print(f"3. probe cd 23 after {name}")
         data, st2 = a.read(OP_INFO, 0, 156)
@@ -213,6 +221,8 @@ def main():
     s.add_argument("--chunk", type=lambda x: int(x, 0), default=0,
                    help="0 = single transfer, matching the vendor tool")
     s.add_argument("--settle", type=float, default=1.0)
+    s.add_argument("--start-only", action="store_true",
+                   help="cd 20 only; do not probe (probes desync adfus_u)")
     s.set_defaults(fn=do_handover)
 
     args = p.parse_args()
