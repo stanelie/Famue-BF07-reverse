@@ -1021,3 +1021,43 @@ Whether the SoC encrypts on write is answerable with `ws` + `rs` alone:
 
 If the hardware transforms the write, the stored bytes are `E(P)` and a raw read
 shows exactly that. No decrypted view is required.
+
+## Regression: the NOR storage path started hanging
+
+After the aborted encryption test, `adfus_u_go.bin` (storage type 0 = SPI NOR)
+stopped starting entirely — the boot ROM answers, `cd 13` uploads with CSW 0,
+`cd 20` returns CSW 0, and then nothing responds. The same binary had previously
+performed full 4 MB dumps plus verified `ws`/`es` cycles.
+
+Isolated with `adfus_u_diag.bin` — **bypass patch only, storage type left at the
+stock value 1**:
+
+```
+DIAG PAYLOAD ALIVE: ic -> 00 00 00 0f
+rs 0x0 / 0x14000 / 0x1e7000 -> 0 bytes   (expected: type 1 is not the NOR backend)
+```
+
+So the payload itself, the upload, the handover and the command protocol are all
+fine. **Storage init on type 0 hangs**, and because it never returns, the
+`cbz`-bypass patch cannot help — that patch only rescues a failure *return*.
+
+Sequence of events: the hang began immediately after `ws`/`es` commands were
+sent to `0x1e7000` **while the payload was unresponsive**, so what the device did
+with them is unknown. A desynchronised payload reading misaligned bytes could
+take its address from the wrong offset.
+
+Mitigating evidence: the device still boots normally, mounts its card, and runs
+from XIP — so `fw0_sys` is intact where it matters and NOR reads work for the
+application. Any damage is confined to unused space.
+
+Candidate explanations, untested:
+
+1. The SPI NOR is left in a busy/suspend state that a warm reset does not clear
+   (a true power cycle — battery disconnect — would). Weakened by the fact that
+   XIP reads work fine.
+2. The type-0 init reads something from flash that the stray commands changed.
+
+**Next step: reconnect UART and watch at 115200 during the handover.** The
+payload printfs `system binding storage type %d`, `spinor0_binding`,
+`nor id = {...}` and friends, so the exact hang point is directly observable
+rather than inferred. Diagnosing this blind over USB is guesswork.
