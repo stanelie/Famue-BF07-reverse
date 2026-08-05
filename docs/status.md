@@ -86,3 +86,75 @@ customised **Aug 2022** build) — treat it as likely, not guaranteed.
 
 Implement `ADFURead(cmd=0x11)` against LARK and dump the flash. Everything else in this
 repo is already done and waiting on it.
+
+---
+
+# 2026-08-05 session: ADFU cracked, plus a second write path found
+
+## ADFU
+
+The `0xCD` framing works on hardware. `cd 23` returns CSW 0 with data, `cd 13`
+uploads, and `cd 20` is a **working handover** — the payload demonstrably runs:
+
+```
+Ver1.1-adfu (build Apr 24 2023 15:17:38)
+system_set_svcc: 0x02680be4
+WIO0_CTL: 0x00000000
+WAKE_CTL_SVCC: 0x00001157
+[D] adfus run
+<output corrupts here>
+```
+
+Two things previously recorded here were wrong and are corrected in
+[adfu-protocol.md](adfu-protocol.md): the UART was never "held low" (wrong baud
+— the payload uses 115200, the shell uses 2,000,000), and the payload does not
+hang (`b .` in `main()` is by design; USB is interrupt-driven).
+
+**Remaining gap:** the payload's CBW ISR is never installed, so it never
+answers USB. The only handler reachable is the stub at `0x010125dc`, which
+exists to print `'Adfus_Irq(%x) - usb_receive_cbw_isr - null'`. Output corrupts
+right after `adfus run` because something in `storage_bind()` changes the clock,
+shifting the effective baud (the image has exactly one `uart_init` call site and
+one baud immediate, so nothing reprograms the UART).
+
+## A second, possibly easier write path
+
+The **running Zephyr firmware** can erase and write its own NOR:
+
+```
+'snort'  'nor test : snort address size'
+'nor write speed test, size=%d kb, offset=0x%x'
+'flash erase fail'   'erase use %d ms, erase speed=%d kb/s'
+'flash write fail'   '--cmp write and read---'
+```
+
+`dbg snort <address> <size>` erases, writes and verifies. It writes a generated
+test pattern rather than arbitrary data, so it is not directly a firmware
+writer — but it proves erase+write works from the shell with no ADFU at all.
+
+The application also carries a full OTA stack, including
+**`ota_storage_erase_spinor`** — its OTA writes the SPI NOR:
+
+```
+ota_upgrade_init / ota_upgrade_attach_backend / ota_do_upgrade
+ota_storage_erase_spinor / ota_storage_write_default
+ota_backend_sdcard_{init,open,read,close,ioctl}
+"found ota file '%s' in sdcard" / "cannot found ota file '%s' in sdcard"
+```
+
+Only the **sdcard** backend is compiled in, and the path is hardcoded:
+
+```
+0x1016f084  '/SD:/ota.bin'
+```
+
+Our card mounts as `/SD1:`. Note the firmware carries `/SD:` *and* `/SD1:`
+variants of many other paths (`RECORDER`, `FMRECORDER`, `XWdict.lib`) but only
+a `/SD:` form for `ota.bin`. The XLX sibling firmwares are named 双卡
+("dual card"), so `/SD:` may be an internal slot — worth checking whether this
+board has a second, unpopulated card position.
+
+**This is a distinct and possibly shorter route to a write path than finishing
+the ADFU payload**, and unlike ADFU it needs no payload reverse engineering —
+only a correctly built `ota.bin` (we already have `tools/ota_tool.py`) and a
+way to make the app see it.
