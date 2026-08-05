@@ -874,3 +874,52 @@ splits the problem cleanly:
 `cd 21` against the boot ROM returns **status 2** — it is a command of the
 *running stage-1 payload*, not of the ROM, exactly as the classic capture
 implies. `cd 20` is the ROM's only handover.
+
+## Correction: the payload runs fine. It was the wrong baud all along.
+
+Earlier this document claimed the UART TX line was "held continuously low" after
+`cd 20`, and inferred that the payload was dead. **That was wrong.** The
+payload reconfigures UART0 to **115200 baud**:
+
+```
+010124d6  mov.w r2, #0x1c200      ; 115200
+010124da  movs  r1, #1
+010124dc  movs  r0, #0
+010124de  bl    0x1013108         ; uart_init(port 0, ?, baud)
+```
+
+The Zephyr shell runs at 2,000,000. Every capture was at the shell's rate, so
+the all-`0x00` result was misread framing, not a low line.
+
+Listening at 115200 during the handover gives:
+
+```
+Ver1.1-adfu (build Apr 24 2023 15:17:38)
+system_set_svcc: 0x02680be4
+WIO0_CTL: 0x00000000
+WAKE_CTL_SVCC: 0x00001157
+[D] adfus run
+c;c<c5c2c'...          <- structured garbage, ~2-byte period
+```
+
+So the payload **executes correctly** through init and past `adfus run`. `cd 20`
+is a working handover and always was.
+
+### The garbage is a clock change, not a baud change
+
+A full sliding-window disassembly (decoding at every even offset, since linear
+disassembly misaligns on interleaved data) finds:
+
+- **exactly one** call site for `uart_init` — `0x010124de`
+- **exactly one** baud-plausible immediate in the whole image — `115200`
+
+The payload therefore never reprograms the UART. The output corrupts because
+something after `adfus run` changes the **core/peripheral clock**, shifting the
+effective baud while the divisor stays fixed. Effective baud becomes
+`115200 x (new_clk / old_clk)`.
+
+That happens inside `storage_bind()` — which is exactly where a NOR/NAND
+controller brings up its clock.
+
+**Next:** recapture at `115200 x k`. The ~2-byte repeat period suggests `k = 2`
+(230400); `k = 1/2` (57600) is the alternative if the clock dropped instead.
