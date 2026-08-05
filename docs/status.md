@@ -199,3 +199,72 @@ and the remaining sub-problem is exact and bounded:
 > **make the uploaded LARK payload install its CBW interrupt handler and
 > service USB**, instead of falling through to the `usb_receive_cbw_isr - null`
 > stub.
+
+## Correction: full flash dump needs no ADFU at all
+
+`dbg fread spi_flash <offset>` reads **raw** flash 512 bytes at a time straight
+from the shell, at ~5 blocks/s — a full 4 MB in roughly 25 minutes. Validated
+against ground truth at `0x0` and `0x1000`: byte-exact.
+
+`tools/dump_flash.py` does this, resumably (it journals completed blocks to
+`<out>.state`). Two parsing traps, both hit and fixed:
+
+- The device interleaves unrelated log lines (`lcd idle`, charge messages), so
+  a read loop that extends its deadline on *any* serial activity never
+  terminates. Use a hard deadline.
+- `fread` prints with `%2x`, so single-digit bytes are **space padded**
+  (`" 1"`, not `"01"`). Parse on whitespace, not fixed width.
+
+**So ADFU was never needed for reading — only for writing.** The dump
+prerequisite in the risk section above is satisfiable today.
+
+## The BF07 is definitively LARK
+
+Its own firmware references `lcdc_lark.c`, `de_lark.c`, `lark_bt`, `DSP_LARK`
+and contains **zero** leopard references.
+
+This matters because the SDK's only **NOR** ADFU payload
+(`app_demo/lvgl_demo/prebuild/ATT/att_adfu.bin`, 15,080 B — strings
+`'snor int ret=%d'`, `'nor id = {...}'`, no spinand at all) is a **leopard**
+build that loads at `0x2ff90000`. Not usable here. Every LARK ADFU prebuilt in
+the SDK is a NAND build.
+
+Load address `0x01010000` is now confirmed *empirically*, not just by file
+self-consistency: the payload uploaded there executes and prints its banner.
+
+## Mirror partitions — how XIP firmware is legitimately replaced
+
+The application's OTA is an **A/B mirror** scheme:
+
+```
+'id  name      offset    type  file_id  mirror_id  flag'
+'cannt found mirror part entry for file_id %d'
+'found part entry for file_id %d, cur_file_id %d'
+'part[%d]: skip current used partition'
+'[%d]: file %s, file_id %d write to nor addr 0x%x'
+```
+
+`struct partition_entry` (SDK `partition.h`) carries `mirror_id:4` and
+`storage_id:4`, with `PARTITION_MIRROR_ID_A/B`. So
+`'storage %d is xip, skip erase'` does **not** mean XIP is unwritable — it means
+the *currently executing* partition is skipped, because the update is written to
+its **mirror** and the bootloader swaps on reboot.
+
+That is the intended mechanism for replacing XIP firmware in place, and it
+implies a write path that needs no ADFU **if this device's table actually
+defines mirror partitions**. Unverified — the table must be read first.
+
+### How to read the live partition table
+
+From the printer at `0x10078fb0`:
+
+```
+10078fc6  ldr r4, =0x1801d684     ; RAM: pointer to the loaded table
+10078fd0  ldr r3, =0x54504341     ; magic 'ACPT'
+10078fea  mov.w r2, #0x2e4        ; table size, CRC checked at +0x2e4
+10078fa2  cmp r7, #0x1e           ; 30 entries
+```
+
+So: `dbg mdw 0x1801d684` for the pointer, then read `0x2e4` bytes from it.
+There is no shell command that prints the table (the full command table is
+enumerated in [debug-shell.md](debug-shell.md)) — read it via `mdw`.
