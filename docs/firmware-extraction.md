@@ -90,3 +90,53 @@ unidentified. Don't treat a mismatch as dump corruption.
 
 Parsing our `0x13000000` dump yields 12 entries: `video.dsp`, `admusic.dsp`,
 `bmp_dec.dsp`, `v950big.tbl`, `v936gbk.tbl`, `1251l.tbl`, `hfreq.bin`, `bt_rf.bin`, …
+
+---
+
+# Full 4 MB raw flash backup — complete and verified (2026-08-05)
+
+```
+~/Documents/bf07-backups/bf07_flash_full_2026-08-05.bin
+  4,194,304 bytes   md5 86fed84c9954fe482364799bb3f68bc2
+  8192/8192 blocks captured, 8192/8192 re-read and byte-compared, 0 mismatches
+```
+
+Captured with `tools/dump_flash.py` over the UART shell (`dbg fread spi_flash`)
+— **no ADFU required**. This is the *raw* image (ciphertext for `ENCRYPT`-
+flagged partitions), which is what a restore needs; `dbg mdw` gives the
+decrypted XIP view of the code partition only.
+
+All partitions complete: `fw0_boot`, `fw0_para`, `fw1_boot`, `fw1_para`,
+`fw0_rec`, `fw0_sys`, both `fw0_sdfs`, nvram, `fw0_temp`.
+
+## Traps hit along the way
+
+**The device degrades under sustained reading.** After ~1,300 blocks every
+offset starts failing — including ones that read fine minutes earlier — and it
+recovers after idle time. This is device-side print/log exhaustion, not bad
+sectors. Both the dumper and the verifier now pace reads, back off on failure,
+and rest periodically. Without this a run dies every ~20 minutes.
+
+**Stale output can be misattributed.** After a read times out, the previous
+command's output may still be in flight; a naive parser accepts it as the *next*
+block's data. `dump_flash.py` now requires a `fread 512b: offset=0x...` header
+matching the requested offset before accepting any hex lines. (The full
+verification found 0 mismatches, so this never actually corrupted the image —
+the 32-well-formed-lines requirement rejected partial junk — but the hazard was
+real.)
+
+**`--size` used to truncate the image.** A targeted re-read invoked as
+`--start X --size Y` sized its buffer from `--size` and rewrote the whole file,
+destroying 1,138 already-captured blocks while the journal still claimed them.
+Image size is now `max(--size, existing file size)` and `--count` selects a
+block range. **This was caught only by spot-verifying against the device** —
+the file looked complete.
+
+**Journal ordering.** The `.state` journal was flushed per block while the data
+file was flushed every 64, so any hard kill left the journal claiming blocks
+whose bytes were never written — a resume would then skip them and silently keep
+`0xff`. Data is now `fsync`ed *before* the corresponding offsets are journalled.
+
+The general lesson: **a backup you have not read back from the device is not a
+backup.** Three independent bugs here would each have produced a
+complete-looking image with wrong bytes in it.
