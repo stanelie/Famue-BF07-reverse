@@ -158,3 +158,44 @@ board has a second, unpopulated card position.
 the ADFU payload**, and unlike ADFU it needs no payload reverse engineering —
 only a correctly built `ota.bin` (we already have `tools/ota_tool.py`) and a
 way to make the app see it.
+
+## …but the running-firmware paths CANNOT rewrite fw0_sys
+
+Followed up on `snort` and the OTA stack. Both are dead ends for our actual
+goal (patching `fw0_sys`), for a fundamental reason:
+
+**`fw0_sys` is the XIP partition the firmware executes from.** You cannot erase
+the flash you are fetching instructions from — and the firmware's own OTA code
+knows it:
+
+```
+0x1018dc85  '%s%s: update file_id %d: storage %d is xip, skip erase'
+```
+
+`ota_partition_erase_part` explicitly **skips XIP partitions**. So even a
+correctly-built `ota.bin` on the right card would not rewrite the code partition.
+
+The `snort` handler makes this concrete and dangerous rather than useful:
+
+- Its write function `malloc`s a 512-byte buffer and writes it **uninitialised**
+  in a loop — it is a speed benchmark, not a data writer. `mww`+`snort` cannot
+  inject controlled bytes.
+- **Bare `snort` (no args) targets `offset=0x20000, size=0xe0000`** — inside
+  `fw0_sys`. Running it would erase 896 KB of the live, executing firmware and
+  brick the session until reset. **Do not run `snort` without arguments.**
+
+The firmware *does* contain a working Zephyr `spi_flash` write primitive
+(`flash_dev->api->write(dev, off, buf, len)`, reached at `0x10077b0e`), but:
+(a) there is no shell command to call an arbitrary function with arguments, and
+(b) it could not write the XIP partition anyway.
+
+### Conclusion: ADFU is not merely easier — it is the only path
+
+ADFU's `adfus.bin` runs **from RAM at `0x01010000`**, so it can erase and
+rewrite `fw0_sys` while nothing executes from XIP. That is precisely why the
+platform has ADFU. The entire ADFU effort is therefore on the critical path,
+and the remaining sub-problem is exact and bounded:
+
+> **make the uploaded LARK payload install its CBW interrupt handler and
+> service USB**, instead of falling through to the `usb_receive_cbw_isr - null`
+> stub.
