@@ -106,6 +106,24 @@ def main():
     ok = fail = 0
     t_start = time.time()
 
+    # Blocks whose bytes are in `data` but not yet written to disk. The journal
+    # must never claim a block the output file does not actually contain, or a
+    # resume silently keeps stale bytes -- so always flush data BEFORE
+    # journalling. (Earlier versions journalled per block while flushing data
+    # every 64, which corrupts on any hard kill.)
+    pending = []
+
+    def flush():
+        if not pending:
+            return
+        with open(args.outfile, "wb") as f:
+            f.write(bytes(data))
+            f.flush()
+            os.fsync(f.fileno())
+        for o in pending:
+            state.write(f"{o:x}\n")
+        pending.clear()
+
     try:
         for i in range(total):
             off = args.start + i * BLOCK
@@ -117,20 +135,20 @@ def main():
                 print(f"  0x{off:06x}  FAILED", flush=True)
             else:
                 data[off:off + BLOCK] = blk
-                state.write(f"{off:x}\n")
+                pending.append(off)
                 ok += 1
             if (ok + fail) % 64 == 0 or i == total - 1:
+                flush()
                 el = time.time() - t_start
                 rate = ok / el if el else 0
                 eta = (total - i - 1) / rate / 60 if rate else 0
                 pct = 100.0 * (i + 1) / total
                 print(f"  0x{off:06x}  {pct:5.1f}%  ok={ok} fail={fail}  "
                       f"{rate:.1f} blk/s  eta {eta:.0f} min", flush=True)
-                open(args.outfile, "wb").write(bytes(data))
     except KeyboardInterrupt:
         print("\ninterrupted")
     finally:
-        open(args.outfile, "wb").write(bytes(data))
+        flush()
         s.close()
         state.close()
 
