@@ -268,3 +268,54 @@ From the printer at `0x10078fb0`:
 So: `dbg mdw 0x1801d684` for the pointer, then read `0x2e4` bytes from it.
 There is no shell command that prints the table (the full command table is
 enumerated in [debug-shell.md](debug-shell.md)) — read it via `mdw`.
+
+## THE PARTITION TABLE — read from the live device
+
+Read via `dbg mdw`. `g_part_table` (pointer at RAM `0x1801d684`) points to
+**`0x12000000`**, not a normal RAM address — a separate mapped window. Magic
+`ACPT` verified, `version=0x0101`, `part_cnt=15`, `entry_size=24`.
+
+```
+id  name      type      fid  mir  stor  offset      size        flags
+0   fw0_boot  BOOT      1    0    NOR   0x0         0x1000      ENCRYPT
+1   fw0_para  PARAM     2    0    NOR   0x1000      0x1000      ENCRYPT
+2   fw1_boot  BOOT      1    1    NOR   0x2000      0x1000      ENCRYPT
+3   fw1_para  PARAM     2    1    NOR   0x3000      0x1000      ENCRYPT
+4   fw0_rec   RECOVERY  3    0    NOR   0x4000      0x10000     ENCRYPT
+5   fw0_sys   SYSTEM    4    0    NOR   0x14000     0x1e0000    ENCRYPT
+6   fw0_sdfs  DATA      5    0    NOR   0x1f4000    0xa0000     ENCRYPT
+7   nvram_fa  DATA      6    -    NOR   0x294000    0x1000      -
+8   nvram_fa  DATA      7    -    NOR   0x295000    0x2000      -
+9   nvram_us  DATA      8    -    NOR   0x297000    0x2000      -
+10  fw0_sdfs  DATA      20   0    NOR   0x299000    0x166000    ENCRYPT
+11  fw0_temp  TEMP      254  1    NOR   0x3ff000    0x1000      ENCRYPT
+12  mbr       DATA      11   0    SD    0x0         0x1000      -
+13  fw1_sdfs  DATA      12   0    SD    0x10000     (dynamic)   -
+14  udisk     DATA      40   0    SD    (dynamic)   (dynamic)   -
+```
+
+This independently confirms `fw0_sys` @ `0x14000`, size `0x1e0000` — the values
+this project has used all along — and confirms it is `ENCRYPT`-flagged.
+
+### The mirror path does NOT work — verdict reversed
+
+Mirror pairs exist for exactly two file_ids:
+
+- `file_id 1`: `fw0_boot` / `fw1_boot` — 4 KB each
+- `file_id 2`: `fw0_para` / `fw1_para` — 4 KB each
+
+**`fw0_sys` (file_id 4) has NO mirror.** There is a single 1.875 MB system
+partition. `fw0_rec` and both `sdfs` partitions are likewise unmirrored, and
+`fw0_temp` is **0x1000 bytes** — three orders of magnitude too small to stage a
+system image.
+
+So the A/B scheme protects only the bootloader and its parameters, which is
+what makes a bootloader update safe. It cannot replace the code image.
+
+> **Conclusion: ADFU is confirmed as the only way to rewrite `fw0_sys`.**
+> This closes the last alternative. The earlier XIP reasoning was right, and the
+> mirror discovery — while real — does not provide a way around it.
+
+(Recorded because `tools/read_parttable.py` initially printed the opposite
+verdict: it flagged "mirror pairs exist" without checking whether the *SYSTEM*
+partition was among them. Fixed to test the SYSTEM file_id specifically.)

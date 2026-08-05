@@ -36,7 +36,7 @@ BLOCK = 512
 LINE = re.compile(rb"^\s*([0-9a-f]+):\s+((?:[0-9a-f ]{2}\s*){1,16})$", re.I)
 
 
-def read_block(s, off, tries=4):
+def read_block(s, off, tries=2):
     """One 512-byte block. Returns bytes or None."""
     # The shell emits unrelated background log lines, so never extend the
     # deadline on activity - use a hard cutoff and parse incrementally.
@@ -47,7 +47,7 @@ def read_block(s, off, tries=4):
 
         got = {}
         pending = bytearray()
-        deadline = time.time() + 3.0
+        deadline = time.time() + 8.0
         while time.time() < deadline and len(got) < BLOCK // 16:
             chunk = s.read(4096)
             if not chunk:
