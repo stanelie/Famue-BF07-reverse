@@ -802,3 +802,75 @@ stage 2 went to different addresses (`0x118000` / `0x11e000`).
 3. **Post-handover re-enumeration.** The payload sets VTOR and may re-init the
    USB controller; the host handle would go stale. Needs a full device rescan
    after `cd 20`, not just a fresh handle.
+
+## The SDK's LARK `adfus.bin` is built for SPI NAND
+
+`Ver1.1-adfu (build Apr 24 2023 15:17:38)`. Every LARK board in the SDK that
+ships an `adfus.bin` is an `*_dev_watch_sdnand` variant, and it shows:
+
+```
+'%s spinand init failed, please check...'   'Use spinand lib driver ...'
+"Can't get spinand id, Please check!"       'SPINand lib driver init err.'
+```
+
+`main()` at `0x01012540` hardcodes the NAND backend:
+
+```
+01012540  push {r3, lr}
+01012542  bl   0x10124b0            hardware init, runs before any printf
+01012546  ldr  r0, ='[D] '      \ printf
+01012548  bl   0x1013054        /
+0101254c  ldr  r0, ='adfus run' \ printf
+0101254e  bl   0x1013054        /
+01012552  movs r1, #0
+01012554  movs r0, #2              <-- storage type 2 = SPI NAND
+01012556  bl   0x1012610           storage_bind()
+0101255a  b    0x101255a           <-- infinite self-loop if it returns
+```
+
+Storage dispatch (switch at `0x1012564`):
+
+| type | handler | identified by |
+|---|---|---|
+| 0 | `0x01013e2c` | prints `'spinor0_binding'`, installs a 3-entry fn table — **SPI NOR** |
+| 1 | `0x01013bc0` | unknown |
+| 2 | `0x01012dbc` | the `spinand` path — **currently selected** |
+
+The BF07 is NOR. A failed NAND probe falling into `b .` at `0x101255a` matches
+the observed symptom exactly: `cd 20` accepted CSW 0, then enumerated but
+servicing neither USB nor UART.
+
+`tools/patch_adfus.py` flips `02 20` -> `00 20` at file offset `0x2554`
+(RAM-only payload; touches no flash).
+
+### Result: negative
+
+The NOR-patched payload wedges identically. So the NAND/NOR mismatch is real
+and is *a* bug, but it is not the whole story — or the failure happens before
+`main()` even reaches the storage bind.
+
+Note `bl 0x10124b0` runs *before* the first printf. If that hangs, nothing is
+printed at all and the storage type is irrelevant.
+
+**Next diagnostic:** capture UART *during* the handover rather than after.
+The payload printfs its own progress, so the presence or absence of `adfus run`
+splits the problem cleanly:
+
+- `adfus run` appears -> init is fine, the storage bind is the problem
+- nothing appears -> it dies in `0x10124b0` or never really enters
+
+`tools/../scratchpad/trace_uart.py` does this (listener started before `cd 20`).
+
+## Payload behaviour matrix
+
+| payload | size | `cd 20` | result |
+|---|---|---|---|
+| bootloader `adfus.bin` | 12,820 | csw 0 | runs, reboots to normal — self-recovers |
+| bootloader `adfus_u.bin` | 13,896 | csw 0 | runs, reboots to normal — self-recovers |
+| zephyr `adfus.bin` | 47,608 | csw 0 | wedges |
+| zephyr `adfus_u.bin` | 48,792 | csw 0 | wedges |
+| zephyr `adfus.bin` NOR-patched | 47,608 | csw 0 | wedges |
+
+`cd 21` against the boot ROM returns **status 2** — it is a command of the
+*running stage-1 payload*, not of the ROM, exactly as the classic capture
+implies. `cd 20` is the ROM's only handover.
