@@ -22,7 +22,24 @@ Written to be honest rather than encouraging. If you're picking this up, read th
 | **Reading flash over ADFU** | ⚠️ blocked on handoff |
 | **Writing anything to flash** | ❌ |
 
-## The one blocker
+## The blocker — identified 2026-08-05
+
+**`CDB[0]` is a constant escape byte `0xCD`; the opcode goes in `CDB[1]`.**
+Every command this project ever sent put the opcode in `CDB[0]`, so the ROM
+saw an unknown opcode and answered CSW status `2` — correctly. The handover is
+`cd 20` (execute at address). Full decode in
+[adfu-protocol.md](adfu-protocol.md#solved--the-real-boot-rom-protocol-from-a-live-capture).
+
+Recovered by capture, not analysis: `tools/adfu-mock` put a Raspberry Pi 4 in
+USB gadget mode as `10d6:10d6` and let the Windows tool talk to it. The BF07
+was never connected.
+
+**Not yet tried against the BF07.** `tools/lark_cd.py` implements the corrected
+protocol. The capture was of the classic-ATJ path (`0x118000`, ~5 KB probe);
+LARK loads 47,608 bytes at `0x01010000`, so the framing should carry over but
+the addresses and payload do not.
+
+## Historical: what the blocker looked like before
 
 **Starting the uploaded payload.** Everything either side of it works.
 

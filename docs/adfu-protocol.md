@@ -634,3 +634,90 @@ handover it expects cannot be recovered by static analysis. **A USB capture of t
 tool on Windows is now the only route that can answer it** — it would show the precise byte
 sequence between upload and first successful read.
 
+
+---
+
+# SOLVED — the real boot-ROM protocol, from a live capture
+
+Captured 2026-08-05 with `tools/adfu-mock` (Raspberry Pi 4 in USB gadget mode
+impersonating `10d6:10d6`). The Windows Multimedia Product Tool was fed a
+**classic-ATJ** firmware deliberately; the BF07 was never connected.
+
+## The mistake that blocked everything
+
+Every command synthesised from `HardwareEx.dll` put the opcode in **`CDB[0]`**.
+The boot ROM does not work that way:
+
+> **`CDB[0]` is a constant vendor escape byte `0xCD`. The opcode is in `CDB[1]`.**
+
+So every probe we ever sent looked like an unknown opcode, and CSW status `2`
+was the ROM behaving correctly. The `CCommUSB` reverse engineering was accurate
+about *values* and wrong about *placement*.
+
+## CDB layout
+
+```
+CDB[0]      = 0xCD           vendor escape, constant
+CDB[1]      = opcode
+CDB[2..4]   = 0              reserved
+CDB[5..8]   = length, LE32   (mirrors CBW dlen)
+CDB[9..12]  = address, LE32
+CDB[13..15] = 0
+```
+
+All five captured commands agree: the length field matches `dlen` exactly in
+every case, and the address field decodes to the known ATJ load address
+`0x118000`. The layout is unambiguous — `[5..8]`/`[9..12]` is the only field
+pair that fits (`[4..7]` gives `0x140000`, `[10..13]` gives `0x1180`).
+
+## Opcodes
+
+| opcode | direction | meaning |
+|---|---|---|
+| `0x13` | host→device | write memory at address |
+| `0x20` | none | **execute at address** — the handover |
+| `0x21` | none | execute at address, second variant |
+| `0x23` | device→host | read chip-identity block |
+
+## Captured sequence
+
+```
+cd 13  5120 B -> 0x118000     probe stage 1
+cd 20         -> 0x118000     run it
+cd 13  1536 B -> 0x11e000     probe stage 2
+cd 21         -> 0x11e000     run it
+cd 23   156 B <- 0            read chip identity
+```
+
+The tool stopped there because the mock answered 156 zero bytes.
+
+## The probe payload
+
+`payload_0001.bin`: 5120 B transferred, 4952 B real (zero-padded to a 256-byte
+boundary), md5 `0f99f457be845ede0ad790ecb7ba3b87`. Close to but not identical
+with the 4,980-byte `ADFUS.BIN` from the FWU SQLite DBs.
+
+Its strings are decisive:
+
+```
+ic_version:   BDG_CTL:   jtag_ctl:   auto flag:   wd_ctl_val:
+sub op:       err:       sta:        fun_value:
+USBC          USBS       USBIRQ_HCUSBIRQ:   USBEIRQ:   OUT_HCINSHORTPCKIRQ:
+```
+
+- **`sub op:`** independently confirms the sub-opcode model.
+- **`USBC` / `USBS` and the USB IRQ strings** mean the payload brings up and
+  services the USB controller *itself*. That explains the BF07 symptom recorded
+  above — "enumerated but not servicing USB" after a handover attempt is what a
+  payload that started at the wrong entry point, or was never really entered,
+  looks like from the host side.
+
+## What this does not yet tell us
+
+The capture is the **classic-ATJ** path (`0x118000`, ~5 KB probe). LARK's
+`adfus.bin` is 47,608 bytes at `0x01010000`. The framing is boot-ROM level and
+should carry over, but the addresses and the payload do not.
+
+Also unknown is the 156-byte `cd 23` reply format. Feeding the tool a plausible
+one is what would push the capture past identification into the actual flash
+sequence.

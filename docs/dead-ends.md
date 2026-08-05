@@ -162,3 +162,19 @@ return CSW **status 2** from the boot ROM. The revised memory-vs-storage reading
 [adfu-protocol.md](adfu-protocol.md) is therefore neither confirmed nor refuted — the ROM
 rejects that whole command class until the payload runs.
 
+
+## Every hand-built ADFU command, because the opcode was in the wrong byte
+
+Superseded by the live capture (2026-08-05). Every probe in this repo's history
+placed the opcode in `CDB[0]`. The boot ROM wants a constant `0xCD` there, with
+the opcode in `CDB[1]`. Status `2` was the correct answer to a genuinely
+malformed command, every single time.
+
+The `CCommUSB` reverse engineering was not wrong about the opcode *values*
+(`0x10`, `0x20`, `0x13`…) — it was wrong about where they go. Reading exported
+dispatch tables told us what the numbers were but not the wire layout, and
+nothing in the DLL made the `0xCD` prefix visible at the level we were reading.
+
+**Lesson:** four sessions of protocol inference lost to a field-offset
+assumption that a single capture settled in under a minute. When a protocol has
+a reachable implementation, capture before inferring.
