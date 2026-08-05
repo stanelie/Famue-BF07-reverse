@@ -742,3 +742,63 @@ Three things follow:
 3. The transfer is the raw image **zero-padded to a 256-byte boundary**
    (4,980 → 5,120), sent in a **single** `cd 13`. For LARK that means 47,608 →
    47,616 bytes at `0x01010000`.
+
+---
+
+# Live test against the BF07 (2026-08-05)
+
+First run of the corrected `0xCD` framing on real hardware. Device entered ADFU
+with `dbg reboot adfu`.
+
+## Confirmed on hardware
+
+```
+cd 23  len=156        csw=0    00 e8 00 e8 00 e8 ...   <-- first non-status-2 EVER
+cd 13  47616 B -> 0x01010000   csw=0
+cd 20          @ 0x01010000    csw=0                   <-- handover ACCEPTED
+```
+
+The framing is right. Three years of `status 2` were a malformed CDB.
+
+`cd 23` **ignores its address field** — identical `00 e8` filler at `0x0`,
+`0x1000`, `0x118000`, `0x01010000`, `0x18010e00`. It is a fixed status/identity
+read, not a memory-read primitive. The filler is what the ROM returns before a
+payload populates the buffer (in the classic capture the *probe payload* fills
+it in before the tool reads it).
+
+## Still failing
+
+After `cd 20` the device stops servicing USB entirely — reads *and* writes time
+out. It stays enumerated as `10d6:10d6` (no reboot), and the UART TX line is
+held **continuously low** (118,127 bytes captured, every one `0x00`, one
+distinct value). That is a driven-low pin, not output.
+
+So control leaves the boot ROM and something runs, but it services neither USB
+nor serial. Physical reset required.
+
+## Ruled out: a wrong load address
+
+All four LARK payloads share a byte-identical entry stub and a vector table at
+file offset `0x100` with `initSP=0x2000f000`, `reset=0x01010000`:
+
+| payload | size | load |
+|---|---|---|
+| `zephyr/tools/…/lark/adfus.bin` | 47,608 | `0x01010000` |
+| `zephyr/tools/…/lark/adfus_u.bin` | 48,792 | `0x01010000` |
+| `bootloader/tools/…/lark/adfus.bin` | 12,820 | `0x01010000` |
+| `bootloader/tools/…/lark/adfus_u.bin` | 13,896 | `0x01010000` |
+
+`0x01010000` is correct for every one of them. `adfus.bin` and `adfus_u.bin`
+are **variants, not stages** — unlike the classic path, where stage 1 and
+stage 2 went to different addresses (`0x118000` / `0x11e000`).
+
+## Remaining hypotheses
+
+1. **`cd 21`, not `cd 20`.** In the classic capture the device was demonstrably
+   responsive after `cd 21` (stage 2), never directly after `cd 20`. Cheap to
+   test: one reset cycle.
+2. **The smaller `bootloader` build** (12,820 B) may have fewer runtime
+   dependencies than the 47,608 B one. One reset cycle.
+3. **Post-handover re-enumeration.** The payload sets VTOR and may re-init the
+   USB controller; the host handle would go stale. Needs a full device rescan
+   after `cd 20`, not just a fresh handle.
