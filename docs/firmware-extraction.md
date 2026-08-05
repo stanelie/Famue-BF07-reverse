@@ -140,3 +140,57 @@ whose bytes were never written — a resume would then skip them and silently ke
 The general lesson: **a backup you have not read back from the device is not a
 backup.** Three independent bugs here would each have produced a
 complete-looking image with wrong bytes in it.
+
+---
+
+# The fw0_sys cipher: 32-byte ECB (2026-08-05)
+
+`fw0_sys` is stored encrypted (flag `0x02` = `PARTITION_FLAG_ENABLE_ENCRYPTION`)
+and the XIP window decrypts it transparently. Characterised using the 1.875 MB
+of matched pairs we hold — `bf07_flash_full.bin` at `0x14000` (ciphertext) and
+`fw_code_full.bin` (plaintext, read through XIP):
+
+* **Block size is 32 bytes.** The 53 KB of erased padding at `0x1e7000`–`0x1f4000`
+  is constant `0xFF` in raw flash and decrypts to a pattern that **repeats with
+  period exactly 32**.
+* **Mode is ECB, with no address tweak.** Of 61,440 blocks, 50 plaintext blocks
+  occur more than once; **every one maps to a single ciphertext**. Identical
+  plaintext at different addresses always produces identical ciphertext.
+* It is **not** a plain XOR stream: `raw XOR plaintext` is not constant across
+  32-byte boundaries in the code region (which is why the earlier XOR
+  brute-force found nothing — it was looking for a stream, not a block cipher).
+
+A 256-bit block is unusual for a standard cipher, which suggests a custom
+construction.
+
+## What this means for patching
+
+An arbitrary code patch changes a 32-byte block to one we have never seen, so we
+would need `E(new_block)` — and we cannot compute that without the algorithm or
+key. The codebook of 59,271 known pairs only lets us **reuse blocks that already
+exist somewhere in the image**.
+
+### The question that decides this — UNTESTED
+
+**Does the SoC encrypt on write?** If the flash controller applies encryption to
+writes in the XIP-mapped range, we simply write plaintext and the hardware does
+the rest.
+
+Our verified write test was at `0x3f0000`, which is in `fw0_sdfs20` and outside
+the XIP mapping — it came back byte-identical, so *that* path is raw. **No write
+inside `fw0_sys` has been attempted.**
+
+Safe test: `fw0_sys` has 53 KB of unused `0xFF` padding at `0x1e7000`–`0x1f4000`.
+Write a known 32-byte pattern there, then read it two ways:
+
+| result | meaning |
+|---|---|
+| `rs` (raw) returns the pattern | write is raw -> we must encrypt ourselves |
+| XIP (`dbg mdw 0x100d3000`) returns the pattern | **hardware encrypts on write — patching is straightforward** |
+
+(`0x1e7000 - 0x14000 = 0x1d3000`, so the XIP address is `0x100d3000`.)
+
+Failing that, the other avenue is turning decryption **off**: `<enable_encryption>`
+is a per-partition build flag in the SDK's `firmware.xml`, so the hardware
+behaviour is presumably configured somewhere reachable (mbrec, param partition,
+or a controller register) rather than fused.
