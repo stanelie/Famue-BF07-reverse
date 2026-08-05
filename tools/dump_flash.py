@@ -82,6 +82,8 @@ def main():
     p.add_argument("outfile")
     p.add_argument("--size", type=lambda x: int(x, 0), default=0x400000)
     p.add_argument("--start", type=lambda x: int(x, 0), default=0x0)
+    p.add_argument("--count", type=int, default=0,
+                   help="read only N blocks from --start (0 = to end)")
     p.add_argument("--port", default=PORT)
     p.add_argument("--settle", type=float, default=0.06,
                    help="pause between blocks so the device drains")
@@ -89,12 +91,17 @@ def main():
                    help="take a longer rest every N blocks")
     args = p.parse_args()
 
-    # resume: keep whatever is already complete
-    data = bytearray(b"\xff" * args.size)
+    # resume: keep whatever is already complete.
+    # NEVER shrink an existing image -- a targeted re-read (--start/--count)
+    # must not truncate the rest of the dump away.
+    img_size = args.size
+    if os.path.exists(args.outfile):
+        img_size = max(img_size, os.path.getsize(args.outfile))
+    data = bytearray(b"\xff" * img_size)
     done = set()
     if os.path.exists(args.outfile):
         old = open(args.outfile, "rb").read()
-        n = min(len(old), args.size)
+        n = min(len(old), img_size)
         data[:n] = old[:n]
         st = os.path.getsize(args.outfile + ".state") if os.path.exists(
             args.outfile + ".state") else 0
@@ -109,7 +116,7 @@ def main():
     time.sleep(0.3)
 
     state = open(args.outfile + ".state", "a", buffering=1)
-    total = (args.size - args.start) // BLOCK
+    total = args.count or (img_size - args.start) // BLOCK
     ok = fail = 0
     t_start = time.time()
 
