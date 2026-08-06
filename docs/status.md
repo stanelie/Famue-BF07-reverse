@@ -482,3 +482,67 @@ to a programmatic reboot. **Untested.**
 **Serial is still the recovery path**: if a payload wedges USB, the physical
 reset button is the only way back. A serial-free host is fine, but physical
 access to the device is still required.
+
+---
+
+# Recovery paths for a risky fw0_sys write (2026-08-06, from SDK source)
+
+Two independent recovery mechanisms exist in the boot chain, both living in
+partitions we would NOT modify (`fw0_boot` mbrec, `fw0_rec` recovery app).
+
+## 1. TX<->RX loopback -> ADFU  (the strong net)
+
+`bootloader/soc/arm/actions/leopard/soc.c:check_adfu_connect()` drives the
+pattern `0x55aa55aa` (32 bits) out on the ADFU TX GPIO and reads each bit back
+on the RX GPIO. If they match — i.e. **TX and RX are shorted together** — it
+returns success and the recovery app reboots to ADFU:
+
+```
+ota_app/src/main.c:
+    if(check_adfu()){                       // CONFIG_TXRX_ADFU
+        sys_pm_reboot(REBOOT_TYPE_GOTO_ADFU);
+    }
+    ...
+    boot_to_application();                   // only reached if no ADFU
+```
+
+This runs on **every boot**, before `boot_to_application()`, from `fw0_rec` —
+so it works even if `fw0_sys` is completely destroyed. Combined with our proven
+ADFU write path, this is a clean recovery loop:
+
+    short TX<->RX, reset  ->  ADFU  ->  reflash fw0_sys from the verified backup
+
+**Needs confirming on our build:** that `CONFIG_TXRX_ADFU` is compiled in and
+which GPIOs. A normal-boot UART log will print `check txrx adfu` if so. (Our
+board has no GPIO/button ADFU — `CONFIG_GPIO_ADFU` — per earlier testing, so
+TXRX is the expected variant.)
+
+## 2. SD-card /SD:/ota.bin  (real, but must be armed)
+
+`recovery_main.c` reads `/SD:/ota.bin` — the **user** card slot (MMC_0), empty
+on our device. But it is NOT passive: `ota_upgrade_is_allowed()` returns true
+only if
+
+```
+soc_pstore SOC_PSTORE_TAG_OTA_UPGRADE != 0   OR   nvram REC_OTA_FLAG == "yes"
+```
+
+and `recovery_main()` then also requires `ota_upgrade_is_in_progress()`. So a
+card alone does nothing (matching our earlier probe). To use it as brick-
+recovery it must be **armed in advance** while the app still runs:
+`REC_OTA_FLAG` is settable from the shell (`nvram REC_OTA_FLAG yes`), the app
+sets the in-progress breakpoint state, and a validly-formatted `ota.bin` must be
+on the card. More moving parts than path 1, and building a bootable `ota.bin` is
+itself unverified.
+
+`ota_main()` (the `exit_to_ota` fallback) is a **stub infinite loop** in this
+SDK — not a recovery mechanism.
+
+## Does mbrec auto-detect a bad fw0_sys?
+
+`partition_valid_check()` only tests that the partition **table** is non-null —
+it does NOT checksum `fw0_sys` (no partition carries `PARTITION_FLAG_BOOT_CHECK`
+`0x04`). `boot_to_application()` -> `boot_to_app()` (SoC layer) is where any
+integrity check would live; unconfirmed for our custom mbrec. **Do not assume a
+corrupt fw0_sys auto-routes to recovery.** Rely on path 1 (TX/RX loopback),
+which is triggered by hardware state, not by fw0_sys validity.
