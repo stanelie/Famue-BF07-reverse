@@ -114,3 +114,67 @@ is by far the largest of the three requested changes.
 
 Fonts live on the `SD1:C` partition: `/SD1:C/{fang,sans,you}{16,18}.font`.
 Max 96 chars per line (`cmp r7, #0x60` in `txt_analy_one_line` at `0x10049074`).
+
+---
+
+# Interline spacing — measured and patched (2026-08-06)
+
+## How the reader lays out a page
+
+Two **independent** constants, both hardcoded — changing one does not affect
+the other:
+
+| what | where | original |
+|---|---|---|
+| lines per page | `_decode_one_page`, file `0x4934a` (`cmp r3, #7`) | 8 (indices 0..7) |
+| line height | `_reading_create_content`, file `0x4a288` | `content_height / 8` |
+
+```
+1004a276  bl   0x100f9014           ; content height
+1004a27e  ldrb.w fp, [r4, #0x1de]   ; base
+1004a288  add.w fp, fp, r0, asr #3  ; line_height = base + height/8
+1004a28e  ldr  r0, ='%s%s: line_height:%d'
+```
+
+## Measured on hardware
+
+The firmware logs both values when a book opens:
+
+```
+_reading_create_content: list height *************236
+_reading_create_content: line_height:29
+```
+
+So `236 >> 3 = 29` and the base at `[r4+0x1de]` is **0** — line height is purely
+`content_height / 8`. With 8 lines that is `8 x 29 = 232` of 236 px, i.e. the
+page is already full.
+
+**Consequence:** raising the line count alone does *not* tighten spacing — the
+pitch stays 29 px and the extra lines overflow. Lowering it alone (the 8->7 test)
+leaves the same gaps plus blank space at the bottom. Both constants must move
+together.
+
+The font box is ~21 px (`asc 17, desc -4`), which is the hard floor for pitch.
+
+| lines | pitch needed | gap over font |
+|---|---|---|
+| 8 (stock) | 29 | 8 px |
+| 9 | 26 | 5 px |
+| 10 | 23 | 2 px |
+| 16 (`asr #4`) | 14 | **overlaps — do not** |
+
+`asr` granularity is too coarse (/4=59, /8=29, /16=14), so instead **replace the
+computation with a constant** — same 4 bytes:
+
+```
+0x4a288:  0b eb e0 0b   add.w fp, fp, r0, asr #3
+       -> 4f f0 17 0b   mov.w fp, #23
+0x4934a:  07 2b  cmp r3,#7   ->   09 2b  cmp r3,#9    (10 lines)
+```
+
+Applied and verified: sector `0x5d000` differed only at block `0x340`, sector
+`0x5e000` only at block `0x280`, everything else byte-identical to the backup.
+
+**Caveat:** line height is now a constant rather than derived from the content
+area. Harmless while the reader area is fixed at 236 px, but it would no longer
+adapt if the firmware ever renders the reader at another size.
