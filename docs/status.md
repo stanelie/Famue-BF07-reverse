@@ -546,3 +546,60 @@ it does NOT checksum `fw0_sys` (no partition carries `PARTITION_FLAG_BOOT_CHECK`
 integrity check would live; unconfirmed for our custom mbrec. **Do not assume a
 corrupt fw0_sys auto-routes to recovery.** Rely on path 1 (TX/RX loopback),
 which is triggered by hardware state, not by fw0_sys validity.
+
+## The real boot chain, from a captured boot log (2026-08-06)
+
+```
+Ver1.1-mbrec (build Aug 26 2022)      <- fw0_boot, 0x0
+  nor: 0x00000000, 1
+  para=0x1000,r=1, i=0, crc=0
+  of=0x200, entry 0x1100057d          <- loads the NEXT stage at 0x11000000
+  z_sys_init dev(spi_flash) ...       <- a full Zephyr init at 0x1100xxxx
+  ** Showing partition infomation **  <- partition_dump(), matches our table exactly
+  !!!ERR: dev MMC_0 not found         <- the USER card slot, empty
+  main I: upgrade not allowed         <- ota_upgrade_is_allowed() == false
+  main I: REBOOT_TYPE_GOTO_SYSTEM     <- so: boot the application
+<I> main: ### reboot_type:3 ###       <- fw0_sys now running at 0x10000000
+```
+
+**The recovery app (`fw0_rec`) runs on EVERY boot**, at `0x11000000`, before the
+application. It is a full Zephyr image — this is the `ota_app/main.c` read from
+the SDK. It lives in a partition we would never modify.
+
+Two consequences:
+
+1. **`check txrx adfu` never prints** -> `CONFIG_TXRX_ADFU` is NOT compiled into
+   this build. The TX<->RX loopback ADFU recovery does not exist here. (An
+   earlier note in adfu-protocol.md proposed relying on it — do not.)
+2. **`upgrade not allowed` is the only reason it booted the system.** That comes
+   from `ota_upgrade_is_allowed()`, which is just:
+   `pstore OTA flag != 0 || nvram REC_OTA_FLAG == "yes"`.
+
+### Therefore: the recovery net is ARMABLE
+
+We do not need mbrec to detect a corrupt `fw0_sys`. We can decide *in advance*
+that the next boot runs recovery instead of the application:
+
+```
+nvram REC_OTA_FLAG yes      (shell, while the app still works)
++ a valid ota.bin on the USER card slot (/SD:, MMC_0)
+then perform the risky fw0_sys write
+```
+
+On the next boot the recovery app sees the flag, runs `recovery_main()` and
+flashes from the card — **without ever jumping into the broken application.**
+This is app-independent and does not rely on any integrity check.
+
+### Why the factory does not need this
+
+The factory flashes **blank** chips: with no valid mbrec, the boot ROM finds
+nothing to load and simply stays in ADFU, which is how the production tool
+talks to it. That net exists because mbrec is *absent*. In our case mbrec stays
+valid, so the boot ROM hands control onward and the decision falls to the
+recovery app — hence the flag above.
+
+**Still unverified:** that `nvram REC_OTA_FLAG yes` persists and is read by the
+recovery app, and that a `tools/ota_tool.py`-built `ota.bin` is accepted. Both
+are testable with **no risk at all** — arm the flag, put an image on a card,
+reboot, and watch the log. A failed OTA attempt on an intact device costs
+nothing.
