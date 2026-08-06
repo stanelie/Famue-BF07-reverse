@@ -152,3 +152,62 @@ the version compare at `0x100bb70c`, and both occur **before** the
 
 None of this is currently reachable on the BF07 — the SD-card OTA backend never runs.
 See [dead-ends.md](dead-ends.md).
+
+---
+
+# The `ota.xml` manifest (recovered 2026-08-06)
+
+An AOTA image is not just the container — it must contain a file named
+**`ota.xml`**, an XML manifest the device parses and validates before writing
+anything. Recovered from the parser's own error strings in `fw0_sys`
+(`0x1018e900`–`0x1018ed00`).
+
+Required top-level tags (each has a `cannot found tag <...>` error):
+
+```
+<firmware_version>
+    <version_code>      <version_res>      <version_name>
+<board_name>            <- checked; mismatch => "unmatched board name, skip ota"
+<partitionsNum>         <- "too many ota file cnt: %d" if excessive
+<partitions>
+    <partition>
+        <type> <file_id> <file_name> <file_size> <checksum>
+```
+
+Parser behaviour:
+
+* `'<?xml'` must be present or it logs `invalid manifest file`.
+* Generic tag scanner: `cant find tag start %s` / `cant find tag end %s`.
+* Per-partition it logs
+  `part file %s: type %d, file_id %d, checksum 0x%x`.
+* It cross-checks the container against the manifest:
+  `file %s: file size 0x%x in man[ifest]...`.
+* `board_name` must match this device: **`xlx_58120_bf07`**.
+* Version is NOT a barrier — the recovery app logs
+  `enable no version control`, so a same or older `version_code` is accepted.
+
+For the SYSTEM partition the expected entry is **`file_name = app.bin`,
+`file_id = 4`** (from the SDK's `firmware.xml`).
+
+## Consequence for `tools/ota_tool.py`
+
+`build()` currently produces only the AOTA container plus its two CRCs. **It
+does not emit `ota.xml`**, so an image it builds today would be rejected with
+`invalid manifest file` / `cannot found tag <board_name>`. Adding the manifest
+is the remaining work before an OTA can be tested.
+
+## What the payload data must contain
+
+`fw0_sys` is stored **encrypted**, and the application contains **no flash
+encryption routine** — every `encrypt`/`AES`/`crypt` string in `fw0_sys` belongs
+to the Bluetooth stack (`bt_crypto`, `AES CMAC`, `LTK`, `DHKey`). Combined with
+the verified fact that ADFU `ws` writes raw, the OTA must also write raw.
+
+**Therefore `app.bin` inside `ota.bin` must be CIPHERTEXT** — the exact bytes
+from the verified backup at `0x14000`, length `0x1e0000`. The vendor's
+production tool applies encryption at build time (the `<enable_encryption>`
+flag), not the device at write time.
+
+Getting this backwards — shipping plaintext `app.bin` — would write plaintext
+over an encrypted partition and brick the device. This is the single most
+dangerous assumption in the whole OTA path.
