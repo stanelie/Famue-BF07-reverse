@@ -1157,3 +1157,75 @@ failure — so any second `storage_init` call always "fails". Not the cause here
 dumps plus `ws`/`es` cycles, so storage init used to succeed. What changed is not
 yet known. One untested difference: every successful run entered ADFU via the
 **USB mass-storage switch** (`adfu_enter_usb.py`), not `dbg reboot adfu`.
+
+## SOLVED: bind storage with `is`, and writes are RAW
+
+### Storage binds on demand — the startup init is not needed
+
+The automatic storage init at payload start fails, but the **`is` command binds
+it explicitly**, with the storage type in `packet[2..3]`:
+
+```
+01014c60  ldrh r6, [r0,#2]    ; storage type from the packet
+01014c66  printf 'exit prevous disk driver'   ; tears down any previous binding
+01014c7e  bl 0x10125e0        ; get driver for that type
+01014c82  str r0, [r4]        ; 0x0101c468 <- the storage pointer
+```
+
+Sending `is` with mode 0 works every time:
+
+```
+is type=0 -> aa 00 00 00
+rs 0 512  -> real flash data, matches the verified backup
+
+UART:
+  system binding storage type 0
+  spinor0_binding
+  spinor status: {0x00 0x02 0x20},0x85
+  nor id = {0x85, 0x60, 0x16, 0x00}
+```
+
+`nor id` = Puya `0x85`, capacity `0x16` = 2^22 = 4 MB — our chip exactly.
+**Storage type 0 is confirmed SPI NOR in `adfus_u` too.**
+
+**Procedure: after `cd 20`, always send `is` mode 0 before any flash command.**
+This removes the dependence on startup storage init entirely, and works with the
+bypassed payload (`adfus_u_go.bin`).
+
+### Writes into fw0_sys are RAW — no hardware encryption
+
+Tested in the unused `0xFF` padding at `0x1e7000`, storage explicitly bound,
+every step acked and corroborated on UART:
+
+```
+ws 0x1e7000 <- 00 01 02 03 ... (two identical 32-byte plaintext blocks)
+rs 0x1e7000 -> 00 01 02 03 ... identical
+```
+
+**The SoC does not encrypt on write.** Whatever bytes we send are the bytes
+stored.
+
+Consequence: to patch code in `fw0_sys` we must generate correct **ciphertext**
+ourselves. The XIP window decrypts on read with a 32-byte ECB cipher (no address
+tweak), so a patched 32-byte block must be encrypted before writing. Our
+codebook of 59,271 known plaintext/ciphertext pairs only allows **reusing blocks
+that already appear in the image** — it cannot encrypt a new one.
+
+### The promising alternative: turn decryption off
+
+`fw0_sys` carries `PARTITION_FLAG_ENABLE_ENCRYPTION` (`0x02`) in the partition
+table, and `<enable_encryption>` is a per-partition **build flag** in the SDK's
+`firmware.xml`. If the XIP controller's decryption is driven by that flag rather
+than being fused, then:
+
+1. patch the **plaintext** image (`fw_code_full.bin`) directly — trivial,
+2. write all 1.875 MB of it to `fw0_sys` — we have verified `ws`,
+3. clear the encryption flag so the XIP window stops decrypting.
+
+This sidesteps the cipher completely. It needs the flag's location in flash
+(the table is loaded to `0x12000000` at runtime; its on-flash home is not yet
+established) and a corrected table CRC — plain zlib CRC-32 over the first 740
+bytes, which we have already verified.
+
+Note `fw0_boot` and `fw0_para` **are mirrored** (`fw1_boot`, `fw1_para`), which
+is exactly the safety net such an edit would want. **Untested.**
