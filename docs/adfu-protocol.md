@@ -1229,3 +1229,68 @@ bytes, which we have already verified.
 
 Note `fw0_boot` and `fw0_para` **are mirrored** (`fw1_boot`, `fw1_para`), which
 is exactly the safety net such an edit would want. **Untested.**
+
+---
+
+# SOLVED: hardware encrypts on write — set bit 31 of the address
+
+The encryption blocker is gone, and it needed neither breaking the cipher nor
+disabling it.
+
+Found in the SDK's `framework/ota/libota/ota_upgrade.c`:
+
+```c
+/* enable encryption function */
+if (part->flag & PARTITION_FLAG_ENABLE_ENCRYPTION) {
+    SYS_LOG_INF("enable encryption write");
+    addr |= (1 << 31);                     /* <-- bit 31 of the WRITE ADDRESS */
+    if (len % 32) {
+        SYS_LOG_ERR("len %d shall align with 32 bytes", len);
+        return -EINVAL;
+    }
+}
+wlen = 32;
+```
+
+**Bit 31 of the flash write address enables hardware encryption**, and the
+32-byte alignment requirement matches the 32-byte block cipher characterised
+earlier. Our first `ws` test wrote without bit 31, which is exactly why it came
+back raw — that observation was correct but incomplete.
+
+## Verified on hardware, twice
+
+Written into the unused `0xFF` padding at `0x1e7000`, storage bound with `is`:
+
+```
+ws (addr | 1<<31) <- plaintext of fw0_sys+0x00000
+rs (plain addr)   -> 7b 55 ee cf 84 68 14 87 53 05 71 6a dd 95 8a 4f ...
+known ciphertext  -> 7b 55 ee cf 84 68 14 87 53 05 71 6a dd 95 8a 4f ...   MATCH
+
+ws (addr | 1<<31) <- plaintext of fw0_sys+0x20000
+rs (plain addr)   -> 3d 65 6d 6b 55 98 67 c0 02 a2 cc b1 49 c4 f9 b9 ...
+known ciphertext  -> 3d 65 6d 6b 55 98 67 c0 02 a2 cc b1 49 c4 f9 b9 ...   MATCH
+```
+
+Byte-for-byte identical to the real firmware's ciphertext, for two independent
+blocks at different offsets. The padding was erased and verified blank
+afterwards.
+
+## What this means
+
+The patch workflow is now straightforward and needs no cryptanalysis:
+
+1. dump raw flash (ADFU `rs`, ~6 s for 4 MB)
+2. work on the **plaintext** (`fw_code_full.bin` — the XIP view)
+3. patch the plaintext
+4. write it back with `ws` using **`addr | (1 << 31)`**, 32-byte aligned
+5. the hardware encrypts; the XIP window decrypts it back correctly
+
+**Do NOT clear `PARTITION_FLAG_ENABLE_ENCRYPTION`.** The flag is only what the
+OTA consults to decide whether to set bit 31 — the partition table needs no
+modification at all. Keep encryption enabled and write plaintext with bit 31.
+That is strictly safer than the flag-clearing plan, since it touches no boot
+metadata.
+
+Constraints: writes must be **32-byte aligned in length**, and erase
+granularity is 4 KB, so a patch means read-modify-erase-write of the containing
+4 KB sector(s).
