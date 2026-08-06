@@ -740,3 +740,48 @@ That leaves **no automatic recovery** from a bad `fw0_sys`:
 **Before any risky `fw0_sys` write, this must be resolved** — most plausibly by
 confirming whether mbrec/the boot ROM falls back to ADFU when `fw0_sys` fails to
 boot (the factory case, where a blank chip simply stays in ADFU).
+
+## Crash-loop recovery: ADFU IS reachable from a boot loop (2026-08-06)
+
+Removing the system card produces a **hard crash**, not graceful degradation:
+
+```
+<E> bitmap_font_open:  open font file /SD1:C/sans16.font failed!
+<E> lvgl_bitmap_font_open: open bitmap font failed
+<E> ***** USAGE FAULT *****
+<E> Faulting instruction address (r15/pc): 0x00000000
+<E> >>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0
+```
+
+`bitmap_font_open` returns NULL and the caller calls straight through the null
+pointer (`pc = 0`). Zephyr faults, reboots with `reboot_type 0x4`, and repeats
+forever. There is **no font fallback** — `/SD1:C/sans16.font` is a hard boot
+dependency, and `/NOR:K` does not substitute.
+
+**But the shell comes up before the crash, and that is enough to escape:**
+
+```
+# repeatedly send over UART while it loops
+dbg reboot adfu     x30, 0.4s apart
+-> usb: ['10d6:10d6']   *** ADFU REACHED FROM A CRASH LOOP ***
+```
+
+### Why this matters
+
+This is the recovery path we had concluded did not exist. If modified firmware
+boots far enough to start the shell and then crashes, the device is **not
+bricked** — hammer `dbg reboot adfu` over serial and reflash from the verified
+backup.
+
+**Limits, stated precisely:**
+
+* It requires the firmware to reach shell startup. Damage that prevents the
+  shell from running (bad code early in boot, or plaintext where the XIP window
+  still decrypts) leaves **no** route in — the recovery app has no shell, and
+  both other ADFU entries need the application.
+* It requires the **UART wired**. Serial is the recovery lifeline; do not treat
+  the device as USB-only while doing firmware work.
+
+So: a patch that mostly works is recoverable. A patch that breaks early boot is
+still fatal. That distinction should drive how changes are staged — small,
+verifiable edits rather than wholesale replacement.
