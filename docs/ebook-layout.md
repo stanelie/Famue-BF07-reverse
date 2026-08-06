@@ -178,3 +178,49 @@ Applied and verified: sector `0x5d000` differed only at block `0x340`, sector
 **Caveat:** line height is now a constant rather than derived from the content
 area. Harmless while the reader area is fixed at 236 px, but it would no longer
 adapt if the firmware ever renders the reader at another size.
+
+---
+
+# IMPORTANT: lines-per-page is an ARRAY BOUND, not a display limit
+
+Raising it to 12 made **page turns crash and reboot the device**. Raising it to
+10 appeared to work but was silently corrupting memory.
+
+```
+100492ce  mov.w sb, #0x74      ; 0x74 bytes per line record
+10049312  mul   r8, sb, r3     ; record = base + 0x74 * line_index
+10049316  add.w r0, r8, #0x2c  ; array begins at +0x2c
+```
+
+Eight records of `0x74` bytes occupy `0x2c`..`0x3cc`. Writing a 9th or later
+record runs past the end of the array into adjacent memory. At 12 lines that is
+four records — 464 bytes — of overflow, which corrupts whatever follows and
+faults on the next page render.
+
+**`cmp r3, #7` bounds an 8-entry array. Do not raise it without enlarging the
+array.** Lowering it is safe (fewer entries used).
+
+Both sectors were reverted to stock and verified byte-identical (zero differing
+blocks).
+
+## Consequence for layout work
+
+More text per screen cannot be obtained by raising the line count alone. What
+remains available:
+
+* **Wrap width** (`0x4903e`, `cmp r0, #0xa8` = 168 px) — touches no array, safe
+  to change; gives more characters per line.
+* **Line height** (`0x4a288`) — safe on its own, but with 8 lines fixed it only
+  moves the blank space to the bottom.
+* **Font metrics** — the white space between lines plus the clipped descenders
+  show the glyph is positioned low in its box: `asc 17` exceeds the real ink
+  height. That is a property of `/SD1:C/sans16.font`, not of the firmware, and
+  the SD card can be changed with zero flash risk.
+* **New code in free space** — see below.
+
+## Lesson
+
+A constant that looks like a display parameter may be an allocation bound.
+Trace what indexes with it *before* increasing it. The 10-line version passing a
+visual check was misleading: the corruption only surfaced on a code path
+(page turn) that was not exercised.
