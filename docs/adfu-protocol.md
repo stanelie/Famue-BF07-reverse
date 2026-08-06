@@ -1361,3 +1361,64 @@ demonstrated:
 This is the core capability the open-firmware goal needs. Patches are
 reversible with byte-level proof at every step, and the backup remains the
 ground truth for verification.
+
+---
+
+# PROVEN: arbitrary code injection into free flash (2026-08-06)
+
+New code was written into the unused padding inside `fw0_sys` and executed.
+
+## What was done
+
+**Stub** — 6 bytes at flash `0x1e7000` (file offset `0x1d3000`, XIP `0x101d3000`):
+
+```
+101d3000  4f f0 1c 0b   mov.w fp, #28
+101d3004  70 47         bx lr
+```
+
+Written as a single 32-byte `ws` with `addr | (1<<31)` into a freshly erased
+sector; the rest of the sector stays `0xFF`.
+
+**Hook** — at `0x1004a288` in `_reading_create_content`, the line-height
+computation was replaced by a call to it:
+
+```
+add.w fp, fp, r0, asr #3     0b eb e0 0b
+->  bl 0x101d3000            88 f1 ba fe
+```
+
+## Result
+
+```
+_reading_create_content: list height *************236
+_reading_create_content: line_height:28
+```
+
+Stock computes **29**. The earlier constant patch produced **23**. **28 comes
+only from the injected stub**, so the code in previously-empty flash executed.
+
+## Why this matters
+
+Constant patching is limited to values that are genuinely constants — and
+`cmp r3, #7` proved that a constant can secretly be an **array bound** (raising
+it overflowed a 0x74-byte-per-entry array and crashed on page turn).
+
+Injected code has no such limit: a replacement routine can allocate and index
+its **own** structures. With ~53 KB of padding at `0x1e7000`-`0x1f4000` there is
+room for a real line-breaking / hyphenation implementation.
+
+## Recipe for further injection
+
+1. assemble the routine for **XIP address `0x10000000 + file_offset`**
+   (padding starts at file `0x1d3000` -> `0x101d3000`)
+2. erase the target padding sector, write the code as 32-byte `ws` writes with
+   bit 31 set
+3. patch a call site with a 4-byte `bl` (range +/-16 MB — the padding is ~1.7 MB
+   from the reader code, well within range)
+4. verify both sectors by re-encrypt-and-compare against the backup
+
+**Check before hooking:** that `lr` is dead at the call site (the enclosing
+function must already have saved it — here it pushes `lr` at `0x10049ec0`, and
+another `bl` sits 18 bytes earlier), and that the replaced instruction is not
+inside an `IT` block (here `it lt` covered only the following `addlt`).
