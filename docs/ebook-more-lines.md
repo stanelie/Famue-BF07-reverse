@@ -113,10 +113,43 @@ table (`0x101abc6c..0x101acc50`) spanning `0x18000000..0x181ed400`. Editing them
 break its sort order, and nothing depends on those entries for correctness — the reader
 memsets its contexts explicitly.
 
-## Open item
+## Finding the relocated RAM block
 
-`NEW` is not yet chosen. It needs `0x14a0` contiguous bytes of RAM that no other code
-uses. Candidate approach: probe above the highest static symbol on the device (read-only
-first), write a canary, exercise the reader and audio paths, and confirm it is untouched.
+The image contains a **sorted 1018-entry table of every static's address** at
+`0x101abc6c..0x101acc50`. It gives the whole RAM layout for free:
+
+```
+0x18000000 .. 0x18073000   dense statics (also all three kernel heaps:
+                           0x180225d8, 0x18025248, 0x1806ee48 -- all small)
+0x18073000 .. 0x180f3000   one 512 KB object
+0x180f3400 .. 0x181d2c00   one ~894 KB object
+0x181d5400 .. 0x181ed400   96 KB       <- last static ends here
+```
+
+Probing the device with `dbg mdw` (read-only) above that:
+
+| address | contents | reading |
+|---|---|---|
+| `0x181ee000` – `0x181f2000` | all zero | free |
+| `0x181f4000` | `00000006 00000008 00000001` | **in use** |
+| `0x181f6000`+ | identical words at every 4 KB step | floating / aliased, not real RAM |
+
+So physical RAM ends near `0x181f5000`, and `0x181ee000..0x181f4000` (24 KB) is the
+free tail. `dbg mww` confirms it is genuinely writable and holds its value.
+
+**`NEW = 0x181ee000`**, using `0x14a0` of the 24 KB.
+
+Validate before flashing by filling the region with `0xa5a5a5a5`, exercising the reader
+and audio paths, and re-reading — anything that overwrites the canary disqualifies it.
+
+## Tooling
+
+`tools/patch_lines.py` applies all 15 sites offline and emits the three sectors. Every
+site asserts its expected stock bytes first, so a wrong offset aborts rather than
+corrupting the image:
+
+```
+python3 tools/patch_lines.py fw_code_full.bin --lines 11 --ram 0x181ee000 --outdir out/
+```
 
 Related: [ebook-layout.md](ebook-layout.md), [firmware-extraction.md](firmware-extraction.md)
