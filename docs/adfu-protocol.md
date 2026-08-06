@@ -1061,3 +1061,38 @@ Candidate explanations, untested:
 payload printfs `system binding storage type %d`, `spinor0_binding`,
 `nor id = {...}` and friends, so the exact hang point is directly observable
 rather than inferred. Diagnosing this blind over USB is guesswork.
+
+## The NOR hang is cleared by a POWER CYCLE, not a reset
+
+Confirmed 2026-08-06. After `adfus_u_go.bin` (storage type 0) stopped starting
+entirely, **disconnecting the battery** restored it: the payload starts and
+answers `ic` again. Pressing the reset button — repeatedly, over many attempts —
+never did.
+
+The mechanism fits: the reset button restarts the **SoC**, but the SPI NOR is a
+separate die that never sees that reset. An interrupted erase can leave it in
+erase-suspend or with a stale busy status. Ordinary reads still work (the device
+boots, XIP runs, `dbg fread` returns correct data), but a driver that polls the
+status register during init waits forever.
+
+**Recovery procedure: if the NOR path hangs, disconnect the battery.** A warm
+reset is not sufficient.
+
+Flash integrity was verified across 9 spots against the backup — including
+`0x1e7000`, the stray-write target — all matching. Nothing was corrupted.
+
+### Still outstanding
+
+After the power cycle the payload runs but **storage is not bound**: `ic`
+answers, `rs` returns 0 bytes, and it wedges after a few commands. So the power
+cycle fixed the *hang* but not the *bind*.
+
+### Correction: `adfus_u` prints at 2,000,000 baud, not 115200
+
+An earlier note claimed the `_u` build produces no UART output. That was wrong —
+it was measured at the wrong rate. `adfus.bin` contains the 115200 constant
+(`0x1c200`) and calls `uart_init`; **`adfus_u.bin` contains no baud constant at
+all**, so it inherits whatever the boot ROM left configured, which the mbrec log
+shows is **2,000,000**. Every `_u` trace so far has been taken at the wrong
+speed, including the runs that succeeded — there may be useful diagnostics in
+that log that have never been seen.
