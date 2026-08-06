@@ -1294,3 +1294,50 @@ metadata.
 Constraints: writes must be **32-byte aligned in length**, and erase
 granularity is 4 KB, so a patch means read-modify-erase-write of the containing
 4 KB sector(s).
+
+## First verified firmware patch (2026-08-06)
+
+Changed lines-per-page in `_decode_one_page` from 8 to 7:
+
+```
+1004934a  cmp r3, #7      07 2b   ->   06 2b
+```
+
+File offset `0x4934a` in the plaintext XIP view; flash sector `0x5d000`
+(`0x14000 + 0x49000`), byte `+0x34a` within it.
+
+Procedure that works:
+
+1. `is` mode 0 to bind NOR
+2. `rs` the 4 KB sector and **verify it matches the backup** before touching it
+3. take the corresponding 4 KB of **plaintext** (`fw_code_full.bin`), patch the byte
+4. `es` the sector, confirm it reads back `0xFF`
+5. `ws` the 4 KB as **128 separate 32-byte writes**, each with `addr | (1 << 31)`
+6. `rs` back and compare every 32-byte block against the original backup
+
+### Writes must be 32 bytes — bursts encrypt differently
+
+A single 4096-byte `ws` with bit 31 produced ciphertext matching **neither** the
+plaintext nor the expected ciphertext: all 128 blocks differed. Rewriting the
+same data as 128 x 32-byte writes produced **exactly one** differing block (the
+patched one) — every other block byte-identical to the original.
+
+So the encryption engine carries per-transaction state; it is not pure ECB
+across a burst. This is why `ota_upgrade.c` loops with `wlen = 32`. **Any
+flasher must write in 32-byte transactions.**
+
+### Verification method
+
+Because the cipher is ECB with no address tweak, unchanged plaintext must
+re-encrypt to the exact bytes already in the backup. Comparing every 32-byte
+block against the backup therefore validates the whole sector unambiguously:
+a correct patch shows precisely one differing block.
+
+### Tooling note
+
+`ws`/`es`/`is` acks are **4 bytes** (`aa 00 00 00`). Waiting for 16 stalls on the
+USB timeout for every command — 128 writes took ~13 minutes instead of ~40
+seconds. Read 4 and move on.
+
+**Status: written and byte-verified. Functional effect not yet confirmed** — the
+device must boot and display an ebook page to see 7 lines instead of 8.
