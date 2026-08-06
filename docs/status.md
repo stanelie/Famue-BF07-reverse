@@ -661,3 +661,82 @@ Testable at zero risk: build one from the **current, unmodified** firmware, put
 it in the user slot, arm the flag, reboot. A successful reflash-with-identical-
 firmware proves the whole loop end to end. Only then is rewriting `fw0_sys`
 a defensible risk.
+
+## How SD-card OTA actually works on this device (2026-08-06, tested)
+
+Three findings, all verified on hardware.
+
+### 1. The recovery app can NEVER read the card
+
+`fw0_rec` runs on every boot, but its Zephyr build has **no `MMC_0` device**:
+
+```
+z_sys_init dev(sd) func:0x11008739
+I: sd_card_init
+!!!ERR: dev MMC_0 not found
+E: Cannot find mmc device MMC_0!
+...
+ota_storage_init E: cannot found storage device sd
+ota_app_init I: ota app init error
+main I: skip ota recovery
+```
+
+Arming `REC_OTA_FLAG` correctly makes `recovery_main()` run — that part is
+proven — but it always dies at `ota_app_init` because the card is unreachable
+from that image. **No flag or file can fix this**; it is a build-level omission
+in `fw0_rec`. The earlier plan to use the recovery app as a brick-recovery net
+is therefore **not viable**.
+
+### 2. The application CAN mount the card — but not while USB is attached
+
+With USB unplugged:
+
+```
+<I> CSD: capacity 15193 MB
+normal card
+<I> fs_manager_init: fs (/SD:) init success
+<I> sys_status_init: sys status: card=1, usb=0, charge=0
+```
+
+and `fs ls /SD:` lists our `ota.bin`.
+
+**With USB attached the device exports both cards as USB mass storage and
+unmounts them locally** — `/SD:` then reports `mount point not found`, and the
+host sees the files instead. This is why every earlier attempt failed: the
+laptop was holding the card. Any SD-based OTA work requires USB detached
+(serial is unaffected and remains the way to observe).
+
+### 3. The trigger is a UI app, not a boot-time scan
+
+A full boot with the card mounted produces **no** `found ota file` /
+`cannot found ota file` — the application does not scan at startup. The OTA is
+driven by an on-device upgrade application:
+
+```
+upgrade_app_main   upgrade_init   upgrade_view_paint
+upgrade_ing_cb     upgrade_event_deal   upgrade_app_notify
+```
+
+`/SD:/ota.bin` (`0x1016f084`) is referenced from `0x10061b64` and `0x101aaed4`.
+`libota: version 1.0.0` does initialise in the application at boot.
+
+**So the OTA must be started from the device's own menu.** The shell offers
+`app input` (inject key events), which could drive the UI from serial if manual
+navigation proves awkward.
+
+### Consequence for the recovery plan
+
+The SD path is a **user-initiated update mechanism**, not an automatic
+brick-recovery net. It cannot rescue a device whose `fw0_sys` is broken, because
+the thing that reads the card is the application itself.
+
+That leaves **no automatic recovery** from a bad `fw0_sys`:
+
+* recovery app  -> cannot read the card
+* app OTA       -> requires a working app
+* ADFU entry    -> both known methods need a working app
+* no hardware ADFU button; `CONFIG_TXRX_ADFU` not built
+
+**Before any risky `fw0_sys` write, this must be resolved** — most plausibly by
+confirming whether mbrec/the boot ROM falls back to ADFU when `fw0_sys` fails to
+boot (the factory case, where a blank chip simply stays in ADFU).
