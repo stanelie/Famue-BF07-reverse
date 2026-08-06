@@ -603,3 +603,61 @@ recovery app, and that a `tools/ota_tool.py`-built `ota.bin` is accepted. Both
 are testable with **no risk at all** — arm the flag, put an image on a card,
 reboot, and watch the log. A failed OTA attempt on an intact device costs
 nothing.
+
+## PROVEN: the recovery net arms via `REC_OTA_FLAG` (2026-08-06)
+
+Tested on an intact device, zero risk. `dbg nvram REC_OTA_FLAG yes`, then reset.
+
+**Flag unset (normal boot):**
+```
+main I: upgrade not allowed
+main I: REBOOT_TYPE_GOTO_SYSTEM
+```
+
+**Flag armed:**
+```
+main I: ota recovery main                            <- recovery_main() RUNS
+ota_app_init I: ota app init
+ota_app_init I: OTA_STORAGE_DEVICE_NAME: spi_flash   <- it writes the NOR
+ota_app_init I: OTA_STORAGE_EXT_DEVICE_NAME: sd      <- it reads the user card
+ota_upgrade_init I: init
+ota_upgrade_init I: enable no version control        <- same/older version accepted
+ota_storage_init I: init storage spi_flash
+ota_storage_init E: cannot found storage device sd   <- user slot is EMPTY
+ota_upgrade_init I: storage ext open err
+ota_app_init I: ota app init error
+main I: skip ota recovery
+main I: REBOOT_TYPE_GOTO_SYSTEM                      <- falls through, boots normally
+```
+
+Confirmed:
+
+* `REC_OTA_FLAG` is written from the shell (`dbg nvram <key> <val>`), persists,
+  and **is read by the recovery app** — this is the arming mechanism.
+* The recovery app targets **`spi_flash`** for writing and **`sd`** (MMC_0, the
+  user slot) for reading, exactly as needed.
+* **`enable no version control`** — it will not reject an image for being the
+  same or an older version. Reflashing the current firmware is acceptable to it.
+* With no card it degrades safely: logs the error, skips, boots the application.
+  The device remains fully usable while armed.
+
+**Divergence from SDK source:** the flag did **not** self-clear. The SDK's
+`recovery_main()` calls `nvram_config_set("REC_OTA_FLAG","no")` on the
+`skip ota recovery` path, but `ota_app_init()` errored first in our build so
+that never ran. Practically this is *better* — the net stays armed across
+repeated boot attempts instead of disarming after one. Disarm manually with
+`dbg nvram REC_OTA_FLAG no`.
+
+### The one remaining requirement
+
+A card in the **user slot** (MMC_0 — the empty one) containing a valid
+`/SD:/ota.bin`. The slot is physically present but unpopulated, which is the
+sole reason recovery cannot complete today.
+
+### Remaining unknown before any risky write
+
+Whether a `tools/ota_tool.py`-built `ota.bin` is accepted by this OTA stack.
+Testable at zero risk: build one from the **current, unmodified** firmware, put
+it in the user slot, arm the flag, reboot. A successful reflash-with-identical-
+firmware proves the whole loop end to end. Only then is rewriting `fw0_sys`
+a defensible risk.
