@@ -1096,3 +1096,64 @@ all**, so it inherits whatever the boot ROM left configured, which the mbrec log
 shows is **2,000,000**. Every `_u` trace so far has been taken at the wrong
 speed, including the runs that succeeded — there may be useful diagnostics in
 that log that have never been seen.
+
+## `adfus_u` storage init, seen with a working UART trace
+
+With serial finally captured at the **correct 2,000,000 baud**, the `_u` payload
+turns out to start perfectly every time:
+
+```
+Ver1.1-adfu (build Apr 24 2023 15:17:38)
+system_set_svcc: 0x2680be4
+WIO0_CTL: 0x0
+WAKE_CTL_SVCC: 0x1157
+[D] adfus run
+```
+
+It then goes quiet, which is correct — `adfus_u` polls first and only touches
+storage when a command arrives.
+
+### The bypass patch defeats flash access
+
+Sending `rs` to the **bypassed** build (`adfus_u_go.bin`) logs:
+
+```
+read start 0, size 200
+```
+
+— the `rs` handler's own printf. So dispatch, opcode, length and address all
+parse correctly. It then dies in:
+
+```
+01014f30  ldr r0, [r8]      ; r8 = 0x0101c468, the storage device pointer
+01014f38  ldr r3, [r0]      ; vtable
+01014f42  ldr sl, [r3, #4]  ; read fn
+01014f4c  blx sl            ; called through a pointer never populated
+```
+
+The `cbz` bypass skips the storage-init *check*, so the command loop is reached
+but the storage pointer is never set. `ic` works (needs no storage); `rs` jumps
+through a null vtable.
+
+### Without the bypass, storage init genuinely fails
+
+`adfus_u_nor.bin` (type 0, no bypass) starts, and an `rs` then returns the
+6-byte status stream (`01 <seq> 00 00 63 <cksum>`) instead of data — the failure
+loop — with **no UART message at all**. So `0x1015068` fails silently.
+
+```
+01015068  storage_init(type, retries)
+0101506c  ldrb r3,[0x0101c464]
+0101506e  cbnz r3, -> return 0        ; ALREADY INITIALISED RETURNS 0 = "failure"
+01015070  type 0: bl 0x101aa14  (must return NONZERO)
+01015080          bl 0x101ab72  (must return ZERO)  -> then flag = 1, success
+```
+
+Note the already-initialised path returns **0**, which the caller reads as
+failure — so any second `storage_init` call always "fails". Not the cause here
+(the main loop only calls it once per session), but a trap.
+
+**Unresolved:** the same `adfus_u_go.bin` previously performed full verified 4 MB
+dumps plus `ws`/`es` cycles, so storage init used to succeed. What changed is not
+yet known. One untested difference: every successful run entered ADFU via the
+**USB mass-storage switch** (`adfu_enter_usb.py`), not `dbg reboot adfu`.
