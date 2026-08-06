@@ -1341,3 +1341,23 @@ seconds. Read 4 and move on.
 
 **Status: written and byte-verified. Functional effect not yet confirmed** — the
 device must boot and display an ebook page to see 7 lines instead of 8.
+
+### Revert verified: byte-identical reproduction
+
+Rewriting the same sector with the **original** plaintext produced:
+
+```
+differing blocks vs backup: 0
+RESULT: PERFECT - sector byte-identical to original firmware
+```
+
+So 4 KB of plaintext pushed through the hardware encryptor reproduced the
+vendor's ciphertext **exactly**, across all 128 blocks. Combined with the
+observed on-screen change (8 lines -> 7 lines -> 8 lines), the full loop is
+demonstrated:
+
+    dump raw  ->  edit plaintext  ->  encrypt-on-write  ->  boot  ->  revert
+
+This is the core capability the open-firmware goal needs. Patches are
+reversible with byte-level proof at every step, and the backup remains the
+ground truth for verification.
