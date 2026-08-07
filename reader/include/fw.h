@@ -38,7 +38,16 @@
 /* --- filesystem (Zephyr FS, dispatchers confirmed by their error strings) --
  * struct fs_file_t { void *filep; struct fs_mount_t *mp; uint8_t flags; }
  * fs_open stores flags at [file+8], matching that layout. Zero it first. */
-typedef struct { void *filep; void *mp; uint8_t flags; } fs_file_t;
+/* WRONG at 12 bytes. ebook_file_init memsets its handle with r2 = 0x14, so
+   fs_file_t is 20 BYTES here. A 12-byte stack copy let fs_open write past it
+   and corrupt the stack, which surfaced as a k_mutex_unlock wait-queue
+   assertion inside ebook_decode_page -- nowhere near the damage. */
+typedef struct { uint8_t opaque[20]; } fs_file_t;
+
+/* The vendor's OWN open handle for the book, from
+   ebook_file_init(r0=0x1801a084, ...) -> fs_open_cluster. Reuse it: opening the
+   same file a second time corrupts the FS layer's mutex bookkeeping. */
+#define FW_BOOK_FILE ((fs_file_t *)0x1801a084)
 #define FS_O_READ 0x01
 #define FS_SEEK_SET 0
 /* [OBSERVED] "%sfile open error (%d)" */

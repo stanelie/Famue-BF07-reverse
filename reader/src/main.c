@@ -86,7 +86,7 @@ __attribute__((naked)) void probe(void)
         "bx    r12\n");
 }
 
-#define INJ_MAGIC 0x5244423au   /* bump on every state-layout change */
+#define INJ_MAGIC 0x5244423cu   /* bump on every state-layout change */
 #define MAXW      44      /* buffer per displayed line          */
 #define CPL       25      /* fallback: measured by eye at 168px      */
 #define LINE_PX  168      /* label width, measured on hardware       */
@@ -102,6 +102,7 @@ struct inj_state {
     int32_t  last_line;               /* last vendor reading_line seen      */
     uint16_t nlines;                  /* lines currently cached             */
     uint8_t  sp;                      /* back-stack depth                   */
+    volatile uint8_t need_prep;       /* timer thread -> ebook thread        */
     char     text[INJ_LINES][MAXW];   /* the wrapped page                   */
     int32_t  back[BACKSTACK];
 };
@@ -160,23 +161,14 @@ __attribute__((naked)) void render_hook(void)
 /* The mount is "/SD1:", NOT "/SD:" -- found by searching live SRAM, where the
    firmware's own paths read "/SD1:C/sans16.font" and "/SD1://EBOOK.LIB".
    Using "/SD:" made fs_open return -ENOENT (-2). */
-static const char book[] = "/SD1:/The Last Town - Blake Crouch.txt";
-
-/* Reads `len` bytes at `off`. Returns bytes read, or a negative error.
-   Called only when the page changes -- never per frame. */
+/* No open, no close: the vendor already has the book open via ebook_file_init
+   (handle at 0x1801a084). We only seek and read on it, from the SAME thread it
+   uses, so there is no second handle and no cross-thread access. */
 static int book_read(int32_t off, char *buf, uint32_t len)
 {
-    fs_file_t f;
-    fw_memset(&f, 0, sizeof f);          /* Zephyr wants a zeroed handle */
-    int rc = fs_open(&f, book, FS_O_READ);
+    int rc = fs_seek(FW_BOOK_FILE, off, FS_SEEK_SET);
     if (rc < 0) return rc;
-    if (off) {
-        rc = fs_seek(&f, off, FS_SEEK_SET);
-        if (rc < 0) { fs_close(&f); return rc; }
-    }
-    rc = fs_read(&f, buf, len);
-    fs_close(&f);
-    return rc;
+    return fs_read(FW_BOOK_FILE, buf, len);
 }
 
 /* Our own word wrap.
@@ -320,18 +312,23 @@ void reader_body(void)
     if (!rd) return;
     int line = *(volatile int *)((uint32_t)rd + RD_OFF_LINE);
 
+    /* We are on the DISPLAY thread (this function is a timer callback,
+       registered by _reading_create_content via timer_create at 0x100a1130,
+       period 2 -- hence the ~3 calls/second measured).
+       Never touch the filesystem here: doing so raced ebook_calculate_pages on
+       the ebook thread and produced ASSERTION FAIL [pended_on]. Just record
+       what is wanted and let prepare_hook, which runs on the ebook thread, do
+       the work. */
     if (st.last_line < 0 || st.nlines == 0) {
-        /* SRAM survives a warm reset, so stale state can otherwise leave us
-           with an empty cache and no page-change to trigger a fill. */
-        repaginate();
+        st.need_prep = 1;
     } else if (line > st.last_line) {          /* next */
         push_back(st.offset);
         st.offset = st.next_offset;
-        repaginate();
+        st.need_prep = 1;
     } else if (line < st.last_line) {          /* previous */
         if (st.sp) st.offset = st.back[--st.sp];
         else       st.offset = 0;
-        repaginate();
+        st.need_prep = 1;
     }
     st.last_line = line;
 
@@ -352,6 +349,32 @@ __attribute__((naked)) void reader_main(void)
         "mov   r0, r4\n"
         "pop   {r4, lr}\n"
         "movw  r12, #0xd8c3\n"      /* 0x100fd8c2 | thumb -- unlock */
+        "movt  r12, #0x100f\n"
+        "bx    r12\n");
+}
+
+/* ---- page preparation, on the EBOOK thread ------------------------- */
+
+/* Wraps `bl 0x100ff06c` (msg_manager_receive_msg) at 0x1004c002, the top of
+ * _ebook_reading_event_handle's message loop. That call is unconditional, runs
+ * on the ebook thread -- which already owns the file via ebook_file_init -- and
+ * happens just before the loop blocks for the next message. So this is idle
+ * time while the user reads: exactly where page preparation belongs. */
+void prepare_body(void)
+{
+    if (st.magic != INJ_MAGIC) return;      /* timer initialises the state */
+    if (!st.need_prep) return;
+    st.need_prep = 0;
+    repaginate();                            /* file I/O + wrap, safe here */
+}
+
+__attribute__((naked)) void prepare_hook(void)
+{
+    __asm__ volatile(
+        "push  {r0-r3, lr}\n"
+        "bl    prepare_body\n"
+        "pop   {r0-r3, lr}\n"
+        "movw  r12, #0xf06d\n"      /* 0x100ff06c | thumb */
         "movt  r12, #0x100f\n"
         "bx    r12\n");
 }
