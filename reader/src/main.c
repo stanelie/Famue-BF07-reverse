@@ -80,16 +80,89 @@ __attribute__((naked)) void probe(void)
 
 /* ---- milestone 3: write to the display from our own code ----------- */
 
+/* No writable data section: our image is flash-only, and the page-context RAM
+   is still owned by the vendor reader at this stage. So build strings on the
+   stack -- which also tests whether lv_label_set_text copies (it must, or the
+   text would be garbage once we return). */
+static char *put(char *p, const char *s)
+{
+    while (*s) *p++ = *s++;
+    return p;
+}
+
+static char *put_u(char *p, unsigned v)
+{
+    char t[8];
+    int n = 0;
+    do { t[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (n) *p++ = t[--n];
+    return p;
+}
+
+#define INJ_LINES 12
+
+/* ---- milestone 5: read the book ourselves -------------------------- */
+
+static const char book[] = "/SD:/The Last Town - Blake Crouch.txt";
+
+/* Reads `len` bytes at `off`. Returns bytes read, or a negative error. */
+static int book_read(int32_t off, char *buf, uint32_t len)
+{
+    fs_file_t f;
+    fw_memset(&f, 0, sizeof f);              /* Zephyr requires a zeroed handle */
+    int rc = fs_open(&f, book, FS_O_READ);
+    if (rc < 0) return rc;
+    if (off) {
+        rc = fs_seek(&f, off, FS_SEEK_SET);
+        if (rc < 0) { fs_close(&f); return rc; }
+    }
+    rc = fs_read(&f, buf, len);
+    fs_close(&f);
+    return rc;
+}
+
 void after_render(void)
 {
-    static const char marker[] = "== INJECTED READER ==";
     void *rd = reader_obj();
     if (!rd) return;
     void *cont = *(void **)((uint32_t)rd + RD_OFF_LIST);
     if ((uint32_t)cont < 0x01000000) return;
-    if (lv_obj_child_cnt(cont) == 0) return;
-    void *c0 = lv_obj_get_child(cont, 0);
-    if (c0) lv_label_set_text(c0, marker, 0);     /* [OBSERVED] sig */
+
+    uint32_t n = lv_obj_child_cnt(cont);
+    if (n > INJ_LINES) n = INJ_LINES;
+
+    static const char f_rc[] = "%s%s: book_read rc=%d\n";
+    char raw[360];
+    int rc = book_read(0, raw, sizeof raw);
+    fw_log(f_rc, "", "inj", rc);
+
+    if (rc <= 0) {                            /* show the error, not silence */
+        void *c = lv_obj_get_child(cont, 0);
+        if (c) {
+            char e[40], *p = e;
+            p = put(p, "book_read failed rc=");
+            p = put_u(p, (unsigned)(-rc));
+            *p = 0;
+            lv_label_set_text(c, e, 0);
+        }
+        return;
+    }
+
+    /* Fixed-width split for now -- real wrapping comes next. */
+    int pos = 0;
+    for (uint32_t i = 0; i < n && pos < rc; i++) {
+        void *c = lv_obj_get_child(cont, i);
+        if (!c) continue;
+        char line[34];
+        int k = 0;
+        while (k < 30 && pos < rc) {
+            char ch = raw[pos++];
+            if (ch == '\n' || ch == '\r') break;
+            line[k++] = ch;
+        }
+        line[k] = 0;
+        lv_label_set_text(c, line, 0);
+    }
 }
 
 /* Wraps `bl 0x1004922c` at 0x100493a8. The original fills every label's text;

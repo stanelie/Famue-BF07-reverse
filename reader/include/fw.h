@@ -35,6 +35,21 @@
 #define LV_PROP_WIDTH   0x1001
 #define LV_PROP_HEIGHT  0x1004
 
+/* --- filesystem (Zephyr FS, dispatchers confirmed by their error strings) --
+ * struct fs_file_t { void *filep; struct fs_mount_t *mp; uint8_t flags; }
+ * fs_open stores flags at [file+8], matching that layout. Zero it first. */
+typedef struct { void *filep; void *mp; uint8_t flags; } fs_file_t;
+#define FS_O_READ 0x01
+#define FS_SEEK_SET 0
+/* [OBSERVED] "%sfile open error (%d)" */
+#define fs_open  ((int (*)(fs_file_t *, const char *, uint8_t))0x1007fba9)
+/* [OBSERVED] "%sfile close error (%d)" */
+#define fs_close ((int (*)(fs_file_t *))0x1007fd01)
+/* [OBSERVED] "%sfile read error (%d)" */
+#define fs_read  ((int (*)(fs_file_t *, void *, uint32_t))0x1007fd3d)
+/* [OBSERVED] "%sfile seek error (%d)" */
+#define fs_seek  ((int (*)(fs_file_t *, int32_t, int))0x1007fde1)
+
 /* --- text layout ------------------------------------------------------ */
 /* [OBSERVED] _decode_one_page: (buf, len, max, encoding) -> bytes in one line */
 #define fw_wrap_line ((int (*)(const char *, int, int, int))0x10049075)
