@@ -693,3 +693,54 @@ offset at `[r4,#4]` immediately before, which is what identifies `r4` as a recor
 **Lesson: a struct layout can be duplicated across modules.** Patching the layout where it
 is *defined* is not enough; every module that walks it needs the same treatment, and the
 firmware's own log was faster at finding this than any amount of scanning.
+
+## A THIRD module: the shared text-view library at 0x100eb000
+
+Every scan up to this point was confined to `0x10048000..0x1004e000`. A whole-image scan for
+32-bit access to `[rX, #0x194]` (the reading position) found the scroll path calling into
+`0x100eb404`, `0x100eb586` and `0x100eb65a` -- a **shared text-view library**, which keeps
+its own copy of everything again:
+
+```
+100eb42c  cmp.w r4, r3, lsl #3     total_pages * 8
+100eb43a  asrs  r3, r3, #3         page = line / 8
+100eb448  lsls  r6, r3, #3         page * 8
+100eb494  add.w ip, ip, #0x74      record stride
+100eb49c  movs  r0, #0x74          record stride
+100eb5b8  cmp.w r3, r2, lsl #3     another *8
+100eb5c4  asrs  r3, r3, #3         another /8
+```
+
+### How to enumerate the modules
+
+Anything walking page contexts must reference the `0x3cc` context stride. Scanning the whole
+image for it (imm12 `0xF73`, i.e. `hw2 & 0xF0FF == 0x7073` with the `i` bit set in `hw1`):
+
+```
+0x1003c000-0x1003f000   music service -- FALSE POSITIVES, an unrelated struct
+0x10049000-0x1004c000   the reader (patched)
+0x100eac8c, 0x100eb444, 0x100eb552, 0x100eb5d2, 0x100eb630   text-view library
+```
+
+So five more functions, each with its own divide, multiply and record stride: **15-20 further
+sites**, several being shifts embedded in compares (`cmp.w r4, r3, lsl #3`) that would need
+flag-preserving stubs, in code shared beyond the reader.
+
+## Conclusion: two viable end states
+
+**Geometry only (3 sites, shipped).** Stock decode granularity, 12 lines on screen:
+
+| XIP | flash | stock -> new |
+|---|---|---|
+| `0x1004a1fc` | `0x05e1fc` | container Y 28 -> 24 |
+| `0x1004a222` | `0x05e222` | container height 229 -> 240 |
+| `0x1004a288` | `0x05e288` | line pitch -> 20 (literal 19 + 1 base) |
+
+12 lines, page turns work, advance is 8 so **4 lines repeat** per turn. Robust: three
+constants, no stubs, no layout change.
+
+**Full 12-line decode.** Everything above plus the 35 sites already derived plus the
+remaining library work. Removes the repeats. Larger blast radius, shared code.
+
+The repeats are the price of leaving decode granularity at 8. Nothing in between works,
+because a clean turn requires visible == decode.
