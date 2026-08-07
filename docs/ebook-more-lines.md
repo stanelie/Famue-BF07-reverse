@@ -744,3 +744,61 @@ remaining library work. Removes the repeats. Larger blast radius, shared code.
 
 The repeats are the price of leaving decode granularity at 8. Nothing in between works,
 because a clean turn requires visible == decode.
+
+## The full 12-line decode works, then breaks pagination
+
+With all 43 sites live, the advance measured **exactly right** for the first time:
+
+```
+line=0    pg1,2,3    ln12
+line=12   (+12)      pg2,3,4
+line=24   (+12)      pg3,4,5
+line=204  (+60)      pg18,19,20      (5 presses)
+```
+
+Every delta a multiple of 12, `page = line/12 + 1` exact. The reader, the second decode
+module and the text-view library were all consistent.
+
+**But background pagination never terminates.** Watching `[reader+0x19c]` (total pages)
+while the reading line was frozen:
+
+```
+line=780  total_pages=804
+line=780  total_pages=1071
+line=780  total_pages=1205   <- still climbing
+```
+
+A ~377 KB book is roughly 10,600 lines, so ~880 pages at 12 lines. It sailed past that and
+kept counting, so the reader is permanently busy repaginating and the UI stops responding --
+"next does nothing". The cause is the termination test in `ebook_calculate_pages`:
+
+```
+1004ba92  ldr  r3, [r7, #0xc]    ; total lines so far
+1004ba96  lsrs r3, r3, #3        ; pages = lines / N
+1004ba98  adds r3, #1
+1004ba9a  cmp  r2, r3            ; pages counted
+1004ba9c  beq  done              ; EXACT EQUALITY
+```
+
+Both sides advance as pagination proceeds, and they only ever meet because the increment and
+the divisor agree. Changing the divisor to 12 while the counter still steps by its own rule
+means the equality is never hit. This is a **state machine**, not a constant -- it cannot be
+fixed by substituting another number.
+
+## Final state: the 3-site geometry build
+
+Reverted to it, and this is what to use:
+
+| XIP | flash | stock -> new |
+|---|---|---|
+| `0x1004a1fc` | `0x05e1fc` | container Y 28 -> 24 |
+| `0x1004a222` | `0x05e222` | container height 229 -> 240 |
+| `0x1004a288` | `0x05e288` | line pitch -> 20 (literal 19, +1 base) |
+
+12 lines per screen, page turns work, 4 lines repeat per turn. No stubs, no layout change,
+no shared code touched.
+
+**Why the repeats are unavoidable by patching:** a clean turn needs visible == decode
+granularity. Raising decode to 12 requires consistency across the reader, `ebook_decode_page`,
+the text-view library *and* an incremental pagination state machine whose loop terminates on
+an exact equality involving the divisor. The first three are constants; the fourth is not.
