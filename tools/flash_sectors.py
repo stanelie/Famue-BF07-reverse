@@ -15,14 +15,14 @@ import usb.util
 from lark_cd import Adfu, OP_EXEC1, OP_WRITE
 
 SPD = "$BF07_WORK/"
-OUT = SPD + "outip2/"
+OUT = SPD + "outip3/"
 dump = open("$BF07_BACKUPS/bf07_flash_full_2026-08-05.bin", "rb").read()
 
 JOBS = [
-    (0x5D000, OUT + "sector_05d000.bin", [0x260, 0x280, 0x2C0, 0x2E0, 0x300, 0x320, 0x340, 0x440, 0x4C0, 0x540, 0x560, 0x660, 0x800, 0xE20, 0xEA0], True),
-    (0x5E000, OUT + "sector_05e000.bin", [0x280, 0x300, 0x560], True),
-    (0x5F000, OUT + "sector_05f000.bin", [0xA80, 0xAA0, 0xB80], True),
-    (0x1E7000, OUT + "sector_1e7000.bin", [0x0, 0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0], False),
+    (0x5D000, OUT + "sector_05d000.bin", [0x260, 0x280, 0x2c0, 0x2e0, 0x300, 0x320, 0x340, 0x440, 0x4c0, 0x540, 0x560, 0x660, 0x800, 0xe20, 0xea0], True),
+    (0x5E000, OUT + "sector_05e000.bin", [0x280, 0x300, 0x560, 0x680], True),
+    (0x5F000, OUT + "sector_05f000.bin", [0xa80, 0xaa0, 0xb80], True),
+    (0x1E7000, OUT + "sector_1e7000.bin", [0x0, 0x20, 0x40, 0x60, 0x80, 0xa0, 0xc0], False),
 ]
 
 
@@ -154,5 +154,5 @@ for FLASH, path, expect_blocks, full in JOBS:
           f"expected {[hex(x) for x in expect_blocks]}  "
           f"{'OK' if good else 'MISMATCH'}", flush=True)
 
-print("RESULT:", "11-LINE BUILD v2 FLASHED" if ok else "PROBLEM",
+print("RESULT:", "11-LINE BUILD v3 FLASHED" if ok else "PROBLEM",
       flush=True)

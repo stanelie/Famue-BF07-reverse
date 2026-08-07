@@ -59,6 +59,14 @@ DIVP1_SITES = [(0x1004A572, 6), (0x1004BA96, 3), (0x1004BAA8, 3),
 DIVP1_REGS = [3, 6]
 DIVP1_BASE_INDEX = 5
 
+# The page-fill threshold, and therefore the page-advance amount:
+#     ldrd r6, r3, [r4]   ; r6 = line count
+#     adds r3, #8         ; threshold = start + LINES_PER_PAGE
+#     cmp  r6, r3
+# Measured on the device: reading_line advanced in multiples of 8 while 11
+# lines were displayed, which is exactly this.
+ADVANCE_SITES = [0x1004A562, 0x1004A696]
+
 # --- Thumb-2 encoders -------------------------------------------------------
 
 
@@ -308,6 +316,11 @@ def build_patches_inplace(lines, line_height):
         (MUL_SITE, bytes.fromhex("c1ebc301"),
          bl(MUL_SITE, STUB_XIP + MUL_STUB_INDEX * STUB_STRIDE),
          f"page*8 -> page*{lines} via stub"),
+
+        # page-fill threshold / advance amount
+        *[(addr, adds_imm8(3, STOCK_LINES), adds_imm8(3, lines),
+           f"page advance +{STOCK_LINES} -> +{lines}")
+          for addr in ADVANCE_SITES],
 
         # unsigned `pages = count/8 + 1` -> `count/lines + 1`
         *[(addr,
