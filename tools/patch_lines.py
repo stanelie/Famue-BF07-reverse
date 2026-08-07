@@ -31,7 +31,7 @@ STOCK_ARRAY = 3 * STOCK_SIZE                # 0xb64
 # hold the division stubs.  XIP = 0x10000000 + (flash - FW0_SYS).
 STUB_FLASH = 0x1E7000
 STUB_XIP = XIP_BASE + (STUB_FLASH - FW0_SYS)      # 0x101d3000
-STUB_STRIDE = 0x10
+STUB_STRIDE = 0x20   # stubs are up to 18 bytes
 
 # `page = line / 8`, hardcoded as `it lt / addlt rX,#7 / asr rX,rX,#3`.
 # Address is the `it`; the idiom is exactly 6 bytes, and bl+nop is exactly 6.
@@ -48,6 +48,16 @@ DIV_REGS = [0, 1, 2, 3]     # one stub per destination register
 # r1 = r3*lines - r1.  4 bytes in, 4 bytes out.
 MUL_SITE = 0x10049266
 MUL_STUB_INDEX = 4
+
+# UNSIGNED `pages = count / 8 + 1`, emitted as a bare 2-byte `lsrs rX,rX,#3`
+# followed by `adds rX,#1` -- no rounding idiom at all, which is why every scan
+# for the signed `it lt / addlt #7 / asr #3` sequence missed these. Four bytes
+# in total, exactly the size of a bl.  0x1004ba96/baa8/bb90 are
+# ebook_calculate_pages turning a line count into a page count.
+DIVP1_SITES = [(0x1004A572, 6), (0x1004BA96, 3), (0x1004BAA8, 3),
+               (0x1004BB90, 3)]
+DIVP1_REGS = [3, 6]
+DIVP1_BASE_INDEX = 5
 
 # --- Thumb-2 encoders -------------------------------------------------------
 
@@ -172,6 +182,18 @@ def stub_for(reg, lines):
             + push_pop(scratch, pop=True) + BX_LR)
 
 
+def udiv(rd, rn, rm):
+    return struct.pack("<HH", 0xFBB0 | (rn & 0xF),
+                       0xF0F0 | ((rd & 0xF) << 8) | (rm & 0xF))
+
+
+def divp1_stub(reg, lines):
+    """rX = rX / lines + 1, unsigned, preserving other registers and flags."""
+    scratch = 1 if reg == 0 else 0
+    return (push_pop(scratch) + mov_w(scratch, lines) + udiv(reg, reg, scratch)
+            + add_w(reg, reg, 1) + push_pop(scratch, pop=True) + BX_LR)
+
+
 def mul_stub(lines):
     """r1 = r3 * lines - r1, preserving every other register and the flags."""
     return (push_pop(0) + mov_w(0, lines) + mul_rr(0, 3, 0)
@@ -187,6 +209,10 @@ def build_stub_sector(lines):
     code = mul_stub(lines)
     off = MUL_STUB_INDEX * STUB_STRIDE
     sec[off:off + len(code)] = code
+    for j, reg in enumerate(DIVP1_REGS):
+        code = divp1_stub(reg, lines)
+        off = (DIVP1_BASE_INDEX + j) * STUB_STRIDE
+        sec[off:off + len(code)] = code
     return bytes(sec)
 
 
@@ -282,6 +308,14 @@ def build_patches_inplace(lines, line_height):
         (MUL_SITE, bytes.fromhex("c1ebc301"),
          bl(MUL_SITE, STUB_XIP + MUL_STUB_INDEX * STUB_STRIDE),
          f"page*8 -> page*{lines} via stub"),
+
+        # unsigned `pages = count/8 + 1` -> `count/lines + 1`
+        *[(addr,
+           struct.pack("<HH", 0x08C0 | (reg << 3) | reg, 0x3001 | (reg << 8)),
+           bl(addr, STUB_XIP + (DIVP1_BASE_INDEX + DIVP1_REGS.index(reg))
+              * STUB_STRIDE),
+           f"pages=count/8+1 -> /{lines}+1 via stub (r{reg})")
+          for addr, reg in DIVP1_SITES],
     ])
 
 

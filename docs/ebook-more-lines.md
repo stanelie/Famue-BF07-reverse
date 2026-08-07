@@ -450,3 +450,43 @@ literals, both memset sizes and every stride remain stock — ten fewer patch si
 line is ~30-40 characters, so ASCII has ample room, but multi-byte (UTF-8/CJK) text could
 truncate. The line-length cap at `0x100492da`/`0x100492e0` (`cmp r6,#0x60` / `movge r6,#0x60`)
 must come down with it, or the memcpy will read past what the record can hold.
+
+## The UNSIGNED divide-by-8, missed by every earlier scan
+
+The in-place build rendered 11 lines without crashing, but page navigation advanced only a
+few lines and then went blank. Cause: a fourth class of lines-per-page constant.
+
+```
+1004ba92  ldr  r3, [r7, #0xc]     ; total line count
+1004ba96  lsrs r3, r3, #3         ; pages = lines / 8
+1004ba98  adds r3, #1
+1004bab0  str  r3, [r7, #8]       ; total page count
+```
+
+For an **unsigned** value the compiler emits a bare 2-byte `lsrs` with **no rounding
+idiom** — no `cmp #0`, no `it lt`, no `addlt #7`. Every previous scan looked for the signed
+`it lt / addlt #7 / asr #3` sequence, so all of these were invisible. Four sites:
+
+| site | reg | role |
+|---|---|---|
+| `0x1004a572` | r6 | page from line index |
+| `0x1004ba96` | r3 | `ebook_calculate_pages`: total pages |
+| `0x1004baa8` | r3 | same |
+| `0x1004bb90` | r3 | same |
+
+`lsrs` + `adds` is 4 bytes, exactly a `bl`, so each becomes a call to a stub computing
+`rX = rX / lines + 1` with `udiv`.
+
+**Lesson: the same C expression compiles to different shapes depending on signedness.**
+`line / 8` on a signed int becomes the 6-byte rounding idiom; on an unsigned int it is a
+bare 2-byte shift. Searching for one form silently misses the other. Verify candidates are
+at even addresses too — Thumb instructions are 2-byte aligned, so an odd hit is always a
+false positive, as is one landing inside a 4-byte instruction (`0x1004df44` sits inside the
+`add.w` at `0x1004df42`).
+
+Stub map at `0x101d3000`, stride `0x20`:
+
+```
++0x00 r0 /= n     +0x20 r1 /= n     +0x40 r2 /= n     +0x60 r3 /= n
++0x80 r1 = r3*n - r1        +0xa0 r3 = r3/n + 1       +0xc0 r6 = r6/n + 1
+```
