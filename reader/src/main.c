@@ -86,7 +86,7 @@ __attribute__((naked)) void probe(void)
         "bx    r12\n");
 }
 
-#define INJ_MAGIC 0x5244423fu   /* bump on every state-layout change */
+#define INJ_MAGIC 0x52444240u   /* bump on every state-layout change */
 #define MAXW      44      /* buffer per displayed line          */
 #define CPL       25      /* fallback: measured by eye at 168px      */
 #define LINE_PX  168      /* label width, measured on hardware       */
@@ -102,7 +102,9 @@ struct inj_state {
     int32_t  last_line;               /* last vendor reading_line seen      */
     uint16_t nlines;                  /* lines currently cached             */
     uint8_t  sp;                      /* back-stack depth                   */
-    volatile uint8_t need_prep;       /* timer thread -> ebook thread        */
+    volatile uint8_t need_prep;       /* display -> ebook: please prepare    */
+    int32_t  have_offset;             /* offset the cached page actually is  */
+    uint32_t gen;                     /* bumped by every completed prepare   */
     char     text[INJ_LINES][MAXW];   /* the wrapped page                   */
     int32_t  back[BACKSTACK];
 };
@@ -137,9 +139,20 @@ void after_render(void)
     if (st.magic != INJ_MAGIC) {
         st.magic = INJ_MAGIC; st.calls = 0; st.offset = 0; st.next_offset = 0;
         st.last_line = -1; st.nlines = 0; st.sp = 0; st.need_prep = 1;
+        st.have_offset = -1; st.gen = 0;
     }
     st.calls++;
-    if (st.last_line < 0 || st.nlines == 0) {
+
+    /* This runs up to THREE times per turn -- the vendor decodes and renders up
+       to three contexts and we wrap that call. Two consequences to handle:
+       (a) a turn must be accepted only ONCE, and only after the previous
+           preparation finished, or we advance using a stale next_offset and
+           redisplay the same text;
+       (b) the labels are rewritten on every pass regardless, otherwise the
+           vendor's own text shows through between our redraws. */
+    if (st.need_prep) {
+        /* preparation still outstanding: ignore further turns for now */
+    } else if (st.last_line < 0 || st.nlines == 0) {
         st.need_prep = 1;
     } else if (line > st.last_line) {
         push_back(st.offset);
@@ -150,7 +163,7 @@ void after_render(void)
         else       st.offset = 0;
         st.need_prep = 1;
     }
-    st.last_line = line;
+    if (!st.need_prep) st.last_line = line;   /* only commit once serviced */
 
     for (uint32_t i = 0; i < n; i++) {
         void *c = lv_obj_get_child(cont, i);
@@ -294,6 +307,8 @@ static void repaginate(void)
         st.nlines++;
     }
     st.next_offset = st.offset + pos;
+    st.have_offset = st.offset;
+    st.gen++;
 }
 
 static void push_back(int32_t off)
