@@ -241,9 +241,9 @@ A shift can only divide by a power of two, so an in-place same-length patch can 
 **Arbitrary line counts require real division**, which does not fit in the 6 bytes the
 idiom occupies.
 
-## The way forward: injected division stubs
+## The fix: injected division stubs (IMPLEMENTED)
 
-This is tractable, and the two hard parts are already proven:
+This is tractable, and the two hard parts were already proven:
 
 - **Hardware division exists.** The firmware already uses `sdiv` 255 times and `udiv` 494
   times, so a stub is a few instructions and fast.
@@ -280,3 +280,45 @@ The Actions datasheets and programming guides collected for ATJ2135 / 2137 / 223
 from 2007-2012. The BF07 is a LARK (ATJ2158, ARM Cortex-M, Zephyr + LVGL). Likewise
 `atj2127decrypt` and the ATJ227x-era `ruizu-x02-rev` target the older families. The public
 LARK SDK remains the applicable reference; see [sdk.md](sdk.md).
+
+
+## Implementation
+
+`tools/patch_lines.py` now emits **24 sites across four sectors**:
+
+| sector | contents |
+|---|---|
+| `0x5d000` | array bound, context literals, memset sizes, 7 division sites |
+| `0x5e000` | context literals, strides, line height, 1 division site |
+| `0x60000` | array stride and end pointer |
+| `0x1e7000` | the division stubs (previously erased free flash) |
+
+Four stubs live at XIP `0x101d3000`, one per destination register, `0x10` apart:
+
+```
+101d3000  push {r1} / mov.w r1,#0xb / sdiv r0,r0,r1 / pop {r1} / bx lr
+101d3010  push {r0} / mov.w r0,#0xb / sdiv r1,r1,r0 / pop {r0} / bx lr
+101d3020  ... sdiv r2,r2,r0 ...
+101d3030  ... sdiv r3,r3,r0 ...
+```
+
+Each of the eight sites becomes `bl <stub>` + `nop` — exactly the 6 bytes the idiom
+occupied, so no code moves.
+
+Details that matter:
+
+- **`mov.w`, not `movs`.** `movs` would set flags. The stubs preserve flags entirely
+  (`push`/`pop`/`sdiv`/`mov.w` with S=0 all leave them alone), so nothing downstream can
+  be disturbed. Every site is in fact followed by `adds` or `mov.w`, which set their own
+  flags, but preserving them removes the whole question.
+- **`sdiv` truncates toward zero**, which is exactly what `addlt #7` + `asr #3`
+  implemented — same semantics, different divisor.
+- **`lr` is safe to clobber.** All eight sites sit in functions that return via
+  `pop {..., pc}` or already make calls, so `lr` is dead at those points.
+- **All eight sites read the reading position** (`[rX+0x194]` or `[rX+0x198]`), confirming
+  the divisor really is lines-per-page and not an unrelated `/8`.
+- **Write only the code blocks of the stub sector.** Writing the whole 4 KB would encrypt
+  the `0xFF` filler and leave the sector non-erased.
+
+Revert: `revert11.py` restores the three code sectors to stock. The stubs can be left in
+place — with no `bl` pointing at them they are inert.

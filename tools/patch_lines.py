@@ -27,6 +27,20 @@ STOCK_LINES = 8
 STOCK_SIZE = HDR + STOCK_LINES * REC        # 0x3cc
 STOCK_ARRAY = 3 * STOCK_SIZE                # 0xb64
 
+# Free flash at the tail of fw0_sys (0x1e7000..0x1f4000, 52 KB, erased) used to
+# hold the division stubs.  XIP = 0x10000000 + (flash - FW0_SYS).
+STUB_FLASH = 0x1E7000
+STUB_XIP = XIP_BASE + (STUB_FLASH - FW0_SYS)      # 0x101d3000
+STUB_STRIDE = 0x10
+
+# `page = line / 8`, hardcoded as `it lt / addlt rX,#7 / asr rX,rX,#3`.
+# Address is the `it`; the idiom is exactly 6 bytes, and bl+nop is exactly 6.
+DIV_SITES = [
+    (0x10049446, 1), (0x100494CA, 0), (0x1004955C, 1), (0x10049670, 1),
+    (0x10049816, 2), (0x10049E34, 1), (0x10049EAC, 1), (0x1004A30E, 3),
+]
+DIV_REGS = [0, 1, 2, 3]     # one stub per destination register
+
 # --- Thumb-2 encoders -------------------------------------------------------
 
 
@@ -96,6 +110,59 @@ def pick_context_size(lines):
     raise ValueError(f"no encodable context size for {lines} lines")
 
 
+def mov_w(rd, v):
+    """MOV.W Rd, #<modified immediate> (T2) -- does NOT set flags."""
+    imm12 = mod_imm(v)
+    if imm12 is None:
+        raise ValueError(f"{v:#x} is not a Thumb-2 modified immediate")
+    hw1 = 0xF04F | (((imm12 >> 11) & 1) << 10)
+    return struct.pack("<HH", hw1, _t2_hw2(imm12 & 0x7FF, rd))
+
+
+def sdiv(rd, rn, rm):
+    return struct.pack("<HH", 0xFB90 | (rn & 0xF),
+                       0xF0F0 | ((rd & 0xF) << 8) | (rm & 0xF))
+
+
+def push_pop(reg, pop=False):
+    return struct.pack("<H", (0xBC00 if pop else 0xB400) | (1 << reg))
+
+
+BX_LR = struct.pack("<H", 0x4770)
+NOP = struct.pack("<H", 0xBF00)
+
+
+def bl(addr, target):
+    """BL (T1).  addr and target are even Thumb addresses."""
+    off = target - (addr + 4)
+    if not -(1 << 24) <= off < (1 << 24) or off & 1:
+        raise ValueError(f"bl out of range: {off:#x}")
+    S = (off >> 24) & 1
+    i1 = (off >> 23) & 1
+    i2 = (off >> 22) & 1
+    j1 = (i1 ^ 1) ^ S
+    j2 = (i2 ^ 1) ^ S
+    hw1 = 0xF000 | (S << 10) | ((off >> 12) & 0x3FF)
+    hw2 = 0xD000 | (j1 << 13) | (j2 << 11) | ((off >> 1) & 0x7FF)
+    return struct.pack("<HH", hw1, hw2)
+
+
+def stub_for(reg, lines):
+    """rX = rX / lines, signed, preserving every other register AND the flags."""
+    scratch = 1 if reg == 0 else 0
+    return (push_pop(scratch) + mov_w(scratch, lines) + sdiv(reg, reg, scratch)
+            + push_pop(scratch, pop=True) + BX_LR)
+
+
+def build_stub_sector(lines):
+    """4 KB image for STUB_FLASH: erased 0xFF with one stub per register."""
+    sec = bytearray(b"\xff" * 0x1000)
+    for i, reg in enumerate(DIV_REGS):
+        code = stub_for(reg, lines)
+        sec[i * STUB_STRIDE:i * STUB_STRIDE + len(code)] = code
+    return bytes(sec)
+
+
 def cmp_imm8(rd, imm8):
     return struct.pack("<H", 0x2800 | (rd & 7) << 8 | (imm8 & 0xFF))
 
@@ -149,6 +216,16 @@ def build_patches(lines, new_base, line_height):
         # with a literal height, or 11 records would still be spaced for 8.
         (0x1004A288, bytes.fromhex("0bebe00b"), add_w(11, 11, line_height),
          f"line height: content/8 -> literal {line_height}px"),
+
+        # `page = line / 8` -> real division, via a stub in free flash.  A
+        # shift cannot divide by 11, and the idiom is only 6 bytes -- exactly
+        # the size of bl + nop.
+        *[(addr,
+           bytes.fromhex("b8bf07") + bytes([0x30 | reg]) +
+           struct.pack("<H", 0x10C0 | (reg << 3) | reg),
+           bl(addr, STUB_XIP + DIV_REGS.index(reg) * STUB_STRIDE) + NOP,
+           f"page=line/8 -> /{lines} via stub (r{reg})")
+          for addr, reg in DIV_SITES],
 
         # the other literal pool, in _reading_create_content
         (0x1004A110, le32(0x18018A4C), le32(ctx[0]), "literal standalone"),
@@ -215,6 +292,8 @@ def main():
     sectors = sorted({(FW0_SYS + (x - XIP_BASE)) & ~0xFFF for x, *_ in patches})
     print(f"\n{len(patches)} sites patched across {len(sectors)} sectors: "
           + ", ".join(hex(s) for s in sectors))
+    print(f"plus the stub sector 0x{STUB_FLASH:06x} "
+          f"({len(DIV_REGS)} division stubs at 0x{STUB_XIP:08x})")
 
     if args.outdir:
         for s in sectors:
@@ -222,6 +301,9 @@ def main():
             path = f"{args.outdir}/sector_{s:06x}.bin"
             open(path, "wb").write(bytes(data[off:off + 0x1000]))
             print(f"  wrote {path}")
+        path = f"{args.outdir}/sector_{STUB_FLASH:06x}.bin"
+        open(path, "wb").write(build_stub_sector(args.lines))
+        print(f"  wrote {path}  (stubs)")
     return 0
 
 

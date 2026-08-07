@@ -19,9 +19,14 @@ OUT = SPD + "out11/"
 dump = open("$BF07_BACKUPS/bf07_flash_full_2026-08-05.bin", "rb").read()
 
 JOBS = [
-    (0x5D000, OUT + "sector_05d000.bin", [0x340, 0x3C0, 0xF00, 0xF20, 0xFA0]),
-    (0x5E000, OUT + "sector_05e000.bin", [0x100, 0x280, 0x300, 0x440, 0x4E0]),
-    (0x60000, OUT + "sector_060000.bin", [0x360, 0x380]),
+    (0x5D000, OUT + "sector_05d000.bin",
+     [0x340, 0x3C0, 0x440, 0x4C0, 0x540, 0x560, 0x660, 0x800,
+      0xE20, 0xEA0, 0xF00, 0xF20, 0xFA0], True),
+    (0x5E000, OUT + "sector_05e000.bin", [0x100, 0x280, 0x300, 0x440, 0x4E0], True),
+    (0x60000, OUT + "sector_060000.bin", [0x360, 0x380], True),
+    # stub sector: erased flash, so write ONLY the blocks holding code.
+    # Writing the 0xFF filler would encrypt it and leave the sector non-erased.
+    (0x1E7000, OUT + "sector_1e7000.bin", [0x0, 0x20], False),
 ]
 
 
@@ -116,9 +121,13 @@ drain()
 assert cmd(b'is', 16, 0, expect=4)[:1] == b'\xaa', "is failed"
 
 ok = True
-for FLASH, path, expect_blocks in JOBS:
+for FLASH, path, expect_blocks, full in JOBS:
     data = open(path, "rb").read()
     assert len(data) == 0x1000, f"{path} is not 4096 bytes"
+    # which 32-byte blocks actually need writing
+    todo = (range(0, 0x1000, 32) if full
+            else [b for b in range(0, 0x1000, 32)
+                  if data[b:b + 32] != b"\xff" * 32])
 
     cur = cmd(b'rs', 0x1000, FLASH)
     if len(cur) != 0x1000:
@@ -134,7 +143,7 @@ for FLASH, path, expect_blocks in JOBS:
     time.sleep(0.6)
     assert cmd(b'rs', 64, FLASH) == b'\xff' * 64, "erase failed"
 
-    for off in range(0, 0x1000, 32):
+    for off in todo:
         ack = cmd(b'ws', 32, (FLASH + off) | (1 << 31), expect=4,
                   data=data[off:off + 32])
         assert ack and ack[0] == 0xAA, f"write fail at +0x{off:x}"
@@ -149,5 +158,5 @@ for FLASH, path, expect_blocks in JOBS:
           f"expected {[hex(x) for x in expect_blocks]}  "
           f"{'OK' if good else 'MISMATCH'}", flush=True)
 
-print("RESULT:", "ALL THREE SECTORS PATCHED CORRECTLY" if ok else "PROBLEM",
+print("RESULT:", "ALL FOUR SECTORS PATCHED CORRECTLY" if ok else "PROBLEM",
       flush=True)
