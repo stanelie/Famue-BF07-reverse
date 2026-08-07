@@ -107,7 +107,7 @@ def le32(v):
 # --- patch table ------------------------------------------------------------
 
 
-def build_patches(lines, new_base):
+def build_patches(lines, new_base, line_height):
     """Return [(xip_addr, old_bytes, new_bytes, description)]."""
     size = pick_context_size(lines)
     array = 3 * size
@@ -144,6 +144,12 @@ def build_patches(lines, new_base):
         (0x1004C360, addw(3, 5, STOCK_ARRAY), add_const(3, 5, array),
          f"array end {STOCK_ARRAY:#x} -> {array:#x}"),
 
+        # line height: the stock code computes content_height / 8 with the
+        # divisor HARDCODED, independent of the line count.  Replace the shift
+        # with a literal height, or 11 records would still be spaced for 8.
+        (0x1004A288, bytes.fromhex("0bebe00b"), add_w(11, 11, line_height),
+         f"line height: content/8 -> literal {line_height}px"),
+
         # the other literal pool, in _reading_create_content
         (0x1004A110, le32(0x18018A4C), le32(ctx[0]), "literal standalone"),
         (0x1004A114, le32(0x18019098), le32(ctx[1]), "literal array[0]"),
@@ -158,11 +164,20 @@ def main():
     ap.add_argument("--lines", type=int, default=11)
     ap.add_argument("--ram", type=lambda s: int(s, 0), required=True,
                     help="base of the relocated context block")
+    ap.add_argument("--content-height", type=int, default=236,
+                    help="reader content area height in px (measured: 236)")
+    ap.add_argument("--line-height", type=int,
+                    help="override px per line (default content_height/lines)")
     ap.add_argument("--outdir", help="write patched 4 KB sectors here")
     args = ap.parse_args()
 
     data = bytearray(open(args.image, "rb").read())
-    patches, size, array, ctx = build_patches(args.lines, args.ram)
+    lh = args.line_height or args.content_height // args.lines
+    if lh * args.lines > args.content_height:
+        print(f"ABORT: {args.lines} x {lh}px = {lh * args.lines}px exceeds the "
+              f"{args.content_height}px content area")
+        return 1
+    patches, size, array, ctx = build_patches(args.lines, args.ram, lh)
     total = 4 * size
 
     print(f"lines per page   : {STOCK_LINES} -> {args.lines}")
@@ -172,7 +187,8 @@ def main():
     print(f"array (3 ctx)    : {STOCK_ARRAY:#x} -> {array:#x}")
     print(f"relocated block  : {args.ram:#x} .. {args.ram + total:#x} "
           f"({total} bytes)")
-    print(f"line height      : 236/{args.lines} = {236 // args.lines} px\n")
+    print(f"line height      : {lh} px  ({args.lines} x {lh} = "
+          f"{args.lines * lh} of {args.content_height} px)\n")
 
     bad = 0
     for xip, old, new, desc in patches:
