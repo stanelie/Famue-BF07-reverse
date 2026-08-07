@@ -490,3 +490,62 @@ Stub map at `0x101d3000`, stride `0x20`:
 +0x00 r0 /= n     +0x20 r1 /= n     +0x40 r2 /= n     +0x60 r3 /= n
 +0x80 r1 = r3*n - r1        +0xa0 r3 = r3/n + 1       +0xc0 r6 = r6/n + 1
 ```
+
+---
+
+# WHY CONSTANT-PATCHING CANNOT FINISH THIS
+
+The reading position is **not** advanced by a lines-per-page constant. From the scroll
+callback at `0x10049690`:
+
+```
+100496ca  loop: r1 = r6 ; get child #r6 ; is it visible?
+100496d8  if r8 == -1: r8 = r6        ; r8 = index of the FIRST VISIBLE child
+100496e0  r5 = r6                     ; last visible
+100496e2  r6 += 1
+100496ea  cmp child_count, r6 ; bhi loop
+100496ee  ldrd r3, r2, [r4, #0x194]
+100496f8  addne r3, r8                ; reading_line += first visible index
+100496fa  strne.w r3, [r4, #0x198]
+```
+
+The reader walks its 18 label objects, asks LVGL which are visible, and advances the
+reading position by that index. **Lines-per-page is emergent from pixel geometry**, not a
+number in the code. Measured on the device with the full 27-site patch live and verified:
+
+```
+reading_line=136  (+8)   a0:pg19/ln11  a1:pg20/ln11  a2:pg21/ln11
+reading_line=160  (+8)   a0:pg21/ln11  a1:pg22/ln11  a2:pg23/ln11
+```
+
+Decoding is correct (11 lines per context, sequential pages), but the scroll still moves 8
+children, because 8 is what LVGL's layout produced. The render then maps line to label as
+`(page-1)*11 - reading_line + rec_index`, which for page 19 at line 144 gives 54 -- far
+past the 18 labels -- so every line lands off-screen. That is the blank page.
+
+**This is the wall.** Every remaining `/8` is a symptom; the cause is that the layout still
+puts ~8 labels in the viewport, and the label height patch at `0x1004a288` did not change
+the effective row pitch (a container pad or content-sizing overrides it). Chasing further
+constants cannot fix a number that is computed from geometry at runtime.
+
+## State
+
+Reverted to stock, byte-exact, sectors `0x5d000`/`0x5e000`/`0x5f000` all at 0 differing
+blocks. The stubs remain at `0x1e7000` but nothing branches to them, so they are inert.
+
+## What was actually achieved
+
+- Full read/modify/write/verify cycle on the firmware, with byte-exact revert
+- The complete page-context and line-record layout
+- 27 patch sites derived and verified, all asserting stock bytes before writing
+- Working code injection into free flash (stubs at `0x101d3000`, verified executing)
+- A method for instrumenting the live reader:
+  `global 0x18018978 -> [+0x3c] -> reading position at [+0x194]`, plus the three page
+  contexts at `0x18019098`/`464`/`830` (`+0x18` page, `+0x28` line count)
+
+## Recommendation
+
+Stop patching constants. The reader derives its layout from LVGL at runtime, so the only
+way to change lines per page reliably is to change the layout itself -- which means
+building the application rather than editing it. See [sdk.md](sdk.md): the LARK SDK is
+public and targets this exact SoC.
