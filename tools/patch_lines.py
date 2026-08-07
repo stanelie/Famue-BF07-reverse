@@ -67,6 +67,17 @@ DIVP1_BASE_INDEX = 5
 # lines were displayed, which is exactly this.
 ADVANCE_SITES = [0x1004A562, 0x1004A696]
 
+# Container geometry in _reading_create_content.  The screen is 264 px tall.
+#   0x1004a1fc  movs r2, #0x1c   -> container Y (28)
+#   0x1004a222  subs r0, #0x23   -> height = 264 - 35 = 229, wasting 7px
+# The reader is a continuous scroller, so a clean page turn requires
+#   floor(container_height / line_height) == decode lines per page.
+SCREEN_H = 264
+CONT_Y_SITE = 0x1004A1FC
+CONT_SUB_SITE = 0x1004A222
+STOCK_CONT_Y = 0x1C
+STOCK_CONT_SUB = 0x23
+
 # --- Thumb-2 encoders -------------------------------------------------------
 
 
@@ -228,6 +239,10 @@ def cmp_imm8(rd, imm8):
     return struct.pack("<H", 0x2800 | (rd & 7) << 8 | (imm8 & 0xFF))
 
 
+def sub_imm8(rd, imm8):
+    return struct.pack("<H", 0x3800 | (rd & 7) << 8 | (imm8 & 0xFF))
+
+
 def movs_imm8(rd, imm8):
     return struct.pack("<H", 0x2000 | (rd & 7) << 8 | (imm8 & 0xFF))
 
@@ -261,7 +276,7 @@ def record_layout(lines):
     return rec, text
 
 
-def build_patches_inplace(lines, line_height):
+def build_patches_inplace(lines, line_height, cont_top):
     """Patch set that keeps the contexts at their stock addresses.
 
     No relocation: the records are made smaller instead of the context bigger,
@@ -301,6 +316,14 @@ def build_patches_inplace(lines, line_height):
          f"write length byte {0x60:#x} -> {lb_render:#x}"),
         (0x1004928E, adds_imm8(5, REC), adds_imm8(5, rec),
          f"record stride {REC:#x} -> {rec:#x}"),
+
+        # --- container geometry ------------------------------------------
+        # Reclaim the wasted pixels so that exactly `lines` labels fit.
+        (CONT_Y_SITE, movs_imm8(2, STOCK_CONT_Y), movs_imm8(2, cont_top),
+         f"container Y {STOCK_CONT_Y} -> {cont_top}"),
+        (CONT_SUB_SITE, sub_imm8(0, STOCK_CONT_SUB), sub_imm8(0, cont_top),
+         f"container height {SCREEN_H - STOCK_CONT_SUB} -> "
+         f"{SCREEN_H - cont_top}"),
 
         # --- line height -------------------------------------------------
         (0x1004A288, bytes.fromhex("0bebe00b"), add_w(11, 11, line_height),
@@ -416,6 +439,9 @@ def main():
                     help="reader content area height in px (measured: 236)")
     ap.add_argument("--line-height", type=int,
                     help="override px per line (default content_height/lines)")
+    ap.add_argument("--container-top", type=lambda s: int(s, 0),
+                    default=STOCK_CONT_Y,
+                    help="container Y; height becomes 264 - this")
     ap.add_argument("--outdir", help="write patched 4 KB sectors here")
     args = ap.parse_args()
 
@@ -430,7 +456,14 @@ def main():
         total = 4 * size
     else:
         rec, text = record_layout(args.lines)
-        patches = build_patches_inplace(args.lines, lh)
+        top = args.container_top
+        ch = SCREEN_H - top
+        if ch // lh != args.lines:
+            print(f"ABORT: container {ch}px / {lh}px = {ch // lh} visible lines,"
+                  f" but decode is {args.lines}. They must match exactly or the"
+                  f" page turn will overlap or blank.")
+            return 1
+        patches = build_patches_inplace(args.lines, lh, top)
         print(f"mode             : IN PLACE (contexts stay at their stock "
               f"addresses; no relocation)")
         print(f"lines per page   : {STOCK_LINES} -> {args.lines}")
@@ -439,6 +472,8 @@ def main():
               f"({0x60} -> {text} bytes)")
         print(f"context usage    : {HDR + args.lines * rec:#x} of "
               f"{STOCK_SIZE:#x}")
+        print(f"container        : y={top}, height={ch}px  -> "
+              f"{ch // lh} visible lines (must equal {args.lines})")
         print(f"line height      : {lh} px  ({args.lines} x {lh} = "
               f"{args.lines * lh} of {args.content_height} px)\n")
         bad = 0

@@ -585,3 +585,34 @@ it simply scrolls a decode-page rather than a screenful. The two-step redraw (8 
 Note the advance stayed at 8 even in the earlier build where decode was 11 lines per
 context, so the scroll amount is **not** derived from decode granularity. It is a separate
 mechanism, and it is now the only thing left between this and a perfect result.
+
+## The invariant that makes a clean page turn
+
+Because the reader is a continuous scroller whose advance is one *decoded page*, a page
+turn is clean **only when the number of visible lines equals the decode granularity**:
+
+```
+floor(container_height / line_height) == decode lines per page
+```
+
+Every failed build violated it. v3 decoded 11 lines into a 229 px container at 21 px, so
+only 10 lines were visible against 11 decoded -- the page number and reading line diverged
+and everything mapped off-screen. The line-height-only build satisfied nothing either: 11
+visible against 8 decoded, which is why 3-4 lines repeated on each turn.
+
+## Container geometry
+
+The screen is 264 px. The stock container starts at y=28 and is sized `264 - 35 = 229`,
+**wasting 7 px** (28 + 229 = 257, not 264):
+
+| XIP | flash | stock | role |
+|---|---|---|---|
+| `0x1004a1fc` | `0x05e1fc` | `movs r2, #0x1c` | container Y = 28 |
+| `0x1004a222` | `0x05e222` | `subs r0, #0x23` | height = 264 - 35 |
+
+Reclaiming those pixels is what makes 12 lines fit **without clipping descenders**: at
+y=24 the height becomes 240, and `240 / 20 = 12` exactly. 19 px (the naive 236/12) is one
+pixel short of the font, which is the clipping seen at 12 lines.
+
+`tools/patch_lines.py` now enforces the invariant and refuses to emit a patch set where the
+visible count and the decode granularity disagree.
