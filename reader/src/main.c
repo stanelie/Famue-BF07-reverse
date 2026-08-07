@@ -86,7 +86,7 @@ __attribute__((naked)) void probe(void)
         "bx    r12\n");
 }
 
-#define INJ_MAGIC 0x52444238u   /* bump on every state-layout change */
+#define INJ_MAGIC 0x52444239u   /* bump on every state-layout change */
 #define MAXW      44      /* buffer per displayed line          */
 #define CPL       25      /* fallback: measured by eye at 168px      */
 #define LINE_PX  168      /* label width, measured on hardware       */
@@ -303,11 +303,16 @@ void reader_body(void)
     void *a0 = (void *)FW_CTX_ARRAY;
     void *a1 = (void *)(FW_CTX_ARRAY + 0x3cc);
     void *a2 = (void *)(FW_CTX_ARRAY + 2 * 0x3cc);
-    void *last = a2;
+    /* Faithful to the original at 0x10049394..0x100493a8: render ONLY if some
+       decode returned 0. The original's `cbnz r0, 0x100493ac` skips the render
+       when the last decode fails; calling it anyway renders an un-decoded
+       context and corrupts the semaphore inside 0x1004922c, which surfaces as
+       ASSERTION FAIL [thread->base.pended_on] in the scheduler. */
+    void *last = 0;
     if (fw_decode(a0) == 0)      last = a0;
     else if (fw_decode(a1) == 0) last = a1;
     else if (fw_decode(a2) == 0) last = a2;
-    fw_render(last);
+    if (last) fw_render(last);
 
     /* Use the vendor's position purely as a page-turn SIGNAL. Its magnitude
        is its own (8 lines/page); ours is however much text we consumed. */
