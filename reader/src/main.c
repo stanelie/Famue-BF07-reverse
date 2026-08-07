@@ -14,8 +14,8 @@
  */
 #include "fw.h"
 
-#define PITCH     18        /* +1 base in the caller = 19px pitch */
-#define INJ_LINES 13
+#define PITCH     19        /* +1 base in the caller = 20px pitch */
+#define INJ_LINES 12
 
 /* ---- M1: line height ---------------------------------------------- */
 
@@ -86,7 +86,7 @@ __attribute__((naked)) void probe(void)
         "bx    r12\n");
 }
 
-#define INJ_MAGIC 0x52444239u   /* bump on every state-layout change */
+#define INJ_MAGIC 0x5244423au   /* bump on every state-layout change */
 #define MAXW      44      /* buffer per displayed line          */
 #define CPL       25      /* fallback: measured by eye at 168px      */
 #define LINE_PX  168      /* label width, measured on hardware       */
