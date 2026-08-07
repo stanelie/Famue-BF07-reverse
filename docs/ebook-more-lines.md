@@ -549,3 +549,39 @@ Stop patching constants. The reader derives its layout from LVGL at runtime, so 
 way to change lines per page reliably is to change the layout itself -- which means
 building the application rather than editing it. See [sdk.md](sdk.md): the LARK SDK is
 public and targets this exact SoC.
+
+---
+
+# THE ACTUAL FIX: ONE SITE
+
+The reader is a **continuous scrolling view**, not a paginated one. 18 label objects, 3
+page contexts of 8 lines = 24 lines, and the render maps a decoded line to a label as
+`(page-1)*8 + rec_index - reading_line`: a sliding 18-line window. "Lines per page" is only
+the **decode granularity**. Screen capacity is pure pixel geometry.
+
+So changing lines-per-page was never necessary, and actively harmful -- it desynchronised
+the render mapping. The whole result comes from **one 4-byte site**:
+
+| XIP | flash | old | new | change |
+|---|---|---|---|---|
+| `0x1004a288` | `0x05e288` | `0bebe00b` | `0bf1140b` | `add.w fp,fp,r0,asr #3` -> `add.w fp,fp,#20` |
+
+Line height 29 -> 20 px. Result on hardware: **11 lines per page, page turns work.**
+
+## Remaining imperfection
+
+Measured with the patch live:
+
+```
+reading_line=216  (+16 = 2 presses)  a0:pg28/ln8  a1:pg30/ln8  a2:pg31/ln8
+reading_line=232  (+16 = 2 presses)  a0:pg30/ln8  a1:pg31/ln8  a2:pg32/ln8
+```
+
+The advance is **+8 per press** (one decoded page) while 11 lines are visible, so 3-4 lines
+repeat on each turn. Page tracks `line/8 + 1` exactly, so the reader is self-consistent --
+it simply scrolls a decode-page rather than a screenful. The two-step redraw (8 lines then
+3) is the same thing: the window straddles two contexts.
+
+Note the advance stayed at 8 even in the earlier build where decode was 11 lines per
+context, so the scroll amount is **not** derived from decode granularity. It is a separate
+mechanism, and it is now the only thing left between this and a perfect result.
