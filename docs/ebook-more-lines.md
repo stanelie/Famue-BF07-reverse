@@ -616,3 +616,41 @@ pixel short of the font, which is the clipping seen at 12 lines.
 
 `tools/patch_lines.py` now enforces the invariant and refuses to emit a patch set where the
 visible count and the decode granularity disagree.
+
+## Reading the real geometry off the device
+
+Guessing at pixel arithmetic failed twice. The layout can be read directly instead:
+
+```
+global 0x18018978 -> [+0x3c] = reader object -> [+0x14] = container (an lv_obj_t)
+container +0x14/+0x18 = coords as int16 pairs (x1,y1) (x2,y2)
+container +0x08 = spec_attr -> [+0x00] children[]   [+0x04] child_cnt
+child   +0x14/+0x18 = the same coords
+```
+
+Measured with `--line-height 20 --container-top 24 --container-sub 20`:
+
+```
+container: x1=4 y1=24  x2=179 y2=267      (height 244, as patched)
+child  0 : y1=24  y2=44   h=21
+child  1 : y1=45  y2=65   h=21   pitch=21
+...
+child 11 : y1=255 y2=275         <- screen ends at 263, so mostly off-screen
+```
+
+Two corrections fell out of that:
+
+- **The label height is `pitch`, and the code adds a base of 1.** `fp = [r4+0x1de] + <literal>`
+  and that base is 1, so a literal of 20 produces a 21 px label. It also explains the stock
+  reading: `229/8 = 28`, rendered as 29. `LINE_HEIGHT_BASE = 1` in the tool.
+- **There is no container padding.** Labels start exactly at `y1` and are contiguous, so the
+  usable height is the container height, nothing subtracted.
+
+So for N lines from container top T on a 264 px screen:
+
+```
+pitch = (SCREEN_H - T) / N        literal = pitch - 1
+container height = N * pitch      (keep the bottom on-screen: T + height <= 264)
+```
+
+12 lines: T=24, pitch 20, literal 19, height 240, bottom exactly 264.

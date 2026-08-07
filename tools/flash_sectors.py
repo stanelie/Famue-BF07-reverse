@@ -15,7 +15,7 @@ import usb.util
 from lark_cd import Adfu, OP_EXEC1, OP_WRITE
 
 SPD = "$BF07_WORK/"
-OUT = SPD + "out12/"
+OUT = SPD + "out12c/"
 dump = open("$BF07_BACKUPS/bf07_flash_full_2026-08-05.bin", "rb").read()
 
 JOBS = [
@@ -154,5 +154,5 @@ for FLASH, path, expect_blocks, full in JOBS:
           f"expected {[hex(x) for x in expect_blocks]}  "
           f"{'OK' if good else 'MISMATCH'}", flush=True)
 
-print("RESULT:", "12-LINE BUILD FLASHED" if ok else "PROBLEM",
+print("RESULT:", "12-LINE BUILD (pitch 20) FLASHED" if ok else "PROBLEM",
       flush=True)

@@ -73,6 +73,11 @@ ADVANCE_SITES = [0x1004A562, 0x1004A696]
 # The reader is a continuous scroller, so a clean page turn requires
 #   floor(container_height / line_height) == decode lines per page.
 SCREEN_H = 264
+# The line-height code is `fp = [r4+0x1de] + <value>`, and that base is 1
+# (measured: stock 229/8 = 28 renders as a 29px label). So the literal written
+# must be pitch - 1. Confirmed by reading the live label coords: every child is
+# 21px tall and 21px apart after writing a literal of 20.
+LINE_HEIGHT_BASE = 1
 CONT_Y_SITE = 0x1004A1FC
 CONT_SUB_SITE = 0x1004A222
 STOCK_CONT_Y = 0x1C
@@ -276,7 +281,7 @@ def record_layout(lines):
     return rec, text
 
 
-def build_patches_inplace(lines, line_height, cont_top):
+def build_patches_inplace(lines, line_height, cont_top, cont_sub):
     """Patch set that keeps the contexts at their stock addresses.
 
     No relocation: the records are made smaller instead of the context bigger,
@@ -321,13 +326,16 @@ def build_patches_inplace(lines, line_height, cont_top):
         # Reclaim the wasted pixels so that exactly `lines` labels fit.
         (CONT_Y_SITE, movs_imm8(2, STOCK_CONT_Y), movs_imm8(2, cont_top),
          f"container Y {STOCK_CONT_Y} -> {cont_top}"),
-        (CONT_SUB_SITE, sub_imm8(0, STOCK_CONT_SUB), sub_imm8(0, cont_top),
+        (CONT_SUB_SITE, sub_imm8(0, STOCK_CONT_SUB), sub_imm8(0, cont_sub),
          f"container height {SCREEN_H - STOCK_CONT_SUB} -> "
-         f"{SCREEN_H - cont_top}"),
+         f"{SCREEN_H - cont_sub}"),
 
         # --- line height -------------------------------------------------
-        (0x1004A288, bytes.fromhex("0bebe00b"), add_w(11, 11, line_height),
-         f"line height: content/8 -> literal {line_height}px"),
+        (0x1004A288, bytes.fromhex("0bebe00b"),
+         add_w(11, 11, line_height - LINE_HEIGHT_BASE),
+         f"line height: content/8 -> literal "
+         f"{line_height - LINE_HEIGHT_BASE} (+{LINE_HEIGHT_BASE} base "
+         f"= {line_height}px pitch)"),
 
         # --- page <-> line arithmetic (stubs in free flash) --------------
         *[(addr,
@@ -440,8 +448,11 @@ def main():
     ap.add_argument("--line-height", type=int,
                     help="override px per line (default content_height/lines)")
     ap.add_argument("--container-top", type=lambda s: int(s, 0),
-                    default=STOCK_CONT_Y,
-                    help="container Y; height becomes 264 - this")
+                    default=STOCK_CONT_Y, help="container Y position")
+    ap.add_argument("--container-sub", type=lambda s: int(s, 0), default=None,
+                    help="container height = 264 - this (defaults to --container-top). "
+                         "Make it smaller than --container-top to gain slack "
+                         "below the last line without moving the list up.")
     ap.add_argument("--outdir", help="write patched 4 KB sectors here")
     args = ap.parse_args()
 
@@ -457,13 +468,14 @@ def main():
     else:
         rec, text = record_layout(args.lines)
         top = args.container_top
-        ch = SCREEN_H - top
+        sub = args.container_sub if args.container_sub is not None else top
+        ch = SCREEN_H - sub
         if ch // lh != args.lines:
             print(f"ABORT: container {ch}px / {lh}px = {ch // lh} visible lines,"
                   f" but decode is {args.lines}. They must match exactly or the"
                   f" page turn will overlap or blank.")
             return 1
-        patches = build_patches_inplace(args.lines, lh, top)
+        patches = build_patches_inplace(args.lines, lh, top, sub)
         print(f"mode             : IN PLACE (contexts stay at their stock "
               f"addresses; no relocation)")
         print(f"lines per page   : {STOCK_LINES} -> {args.lines}")
@@ -472,10 +484,14 @@ def main():
               f"({0x60} -> {text} bytes)")
         print(f"context usage    : {HDR + args.lines * rec:#x} of "
               f"{STOCK_SIZE:#x}")
-        print(f"container        : y={top}, height={ch}px  -> "
-              f"{ch // lh} visible lines (must equal {args.lines})")
-        print(f"line height      : {lh} px  ({args.lines} x {lh} = "
-              f"{args.lines * lh} of {args.content_height} px)\n")
+        slack = ch - args.lines * lh
+        print(f"container        : y={top}, height={ch}px, bottom={top + ch} "
+              f"(screen {SCREEN_H})")
+        print(f"                   {ch // lh} visible lines "
+              f"(must equal {args.lines}), slack {slack}px")
+        print(f"line pitch       : {lh} px (literal {lh - LINE_HEIGHT_BASE} "
+              f"+ {LINE_HEIGHT_BASE} base)   {args.lines} x {lh} = "
+              f"{args.lines * lh}\n")
         bad = 0
         data2 = data
         for xip, old, new, desc in patches:
