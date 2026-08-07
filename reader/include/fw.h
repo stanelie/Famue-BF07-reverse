@@ -25,7 +25,9 @@
 /* [OBSERVED] _reading_create_content label loop */
 #define lv_obj_set_size   ((void (*)(void *, int16_t, int16_t))0x100f8083)
 #define lv_obj_set_pos    ((void (*)(void *, int16_t, int16_t))0x100f800d)
+/* [OBSERVED] confirmed on hardware: child0.y1 == 24 as measured */
 #define lv_obj_get_child  ((void *(*)(void *, uint32_t))0x100f9903)
+/* [OBSERVED] confirmed on hardware: returned 18 as measured */
 #define lv_obj_child_cnt  ((uint32_t (*)(void *))0x100f9921)
 #define lv_label_set_text ((void (*)(void *, const char *, int))0x100ec577)
 /* [INFERRED] style property getter: (obj, part, prop) -> value; 0x1004 = height */
