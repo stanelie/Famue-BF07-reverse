@@ -654,3 +654,42 @@ container height = N * pitch      (keep the bottom on-screen: T + height <= 264)
 ```
 
 12 lines: T=24, pitch 20, literal 19, height 240, bottom exactly 264.
+
+## A SECOND module owns the record layout
+
+The firmware named its own bug. With the 12-line build running, the UART showed, on every
+page turn:
+
+```
+<I> ebook_decode_page: ### NOT FULL PAGE, line count: 12
+```
+
+It had decoded 12 lines and still thought the page was incomplete, because
+`ebook_decode_page` keeps its **own** copy of both lines-per-page and the record layout:
+
+```
+1004bc6e  ldr  r3, [r5, #0x28]        ; decoded line count
+1004bc70  cmp  r3, #8                 ; its own lines-per-page
+1004bc82  movs r1, #0x74              ; its own record stride
+1004bc86  mla  r3, r1, r3, r5         ; indexes a record with it
+1004bc8e  ldrb.w r2, [r3, #0x94]      ; its own length-byte offset
+```
+
+Six sites, all in sector `0x5f000`:
+
+| XIP | stock | role |
+|---|---|---|
+| `0x1004bc70` | `cmp r3, #8` | lines per page |
+| `0x1004bc82` | `movs r1, #0x74` | record stride |
+| `0x1004bc8e` | `ldrb.w r2,[r3,#0x94]` | length byte |
+| `0x1004bcbc` | `ldrb.w r3,[r1,#0x94]` | length byte |
+| `0x1004b678` | `movs r2, #0x60` | `memset(rec+8, 0, text)` |
+| `0x1004be78` | `movs r2, #0x60` | `memset(rec+8, 0, text)` |
+
+Most other `#0x60` in that module are a 0x60-byte **stack** scratch (`add r0, sp, #0x10`)
+and must be left alone. The two above are records -- `0x1004be78` writes the record's file
+offset at `[r4,#4]` immediately before, which is what identifies `r4` as a record.
+
+**Lesson: a struct layout can be duplicated across modules.** Patching the layout where it
+is *defined* is not enough; every module that walks it needs the same treatment, and the
+firmware's own log was faster at finding this than any amount of scanning.

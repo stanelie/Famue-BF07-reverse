@@ -59,6 +59,21 @@ DIVP1_SITES = [(0x1004A572, 6), (0x1004BA96, 3), (0x1004BAA8, 3),
 DIVP1_REGS = [3, 6]
 DIVP1_BASE_INDEX = 5
 
+# ebook_decode_page and friends keep their OWN copy of the record layout and
+# lines-per-page. Found because the firmware logs
+#   "ebook_decode_page: ### NOT FULL PAGE, line count: 12"
+# -- it decoded 12 but its own `cmp r3,#8` said a page was not full.
+#   0x1004bc70  cmp r3, #8            lines per page
+#   0x1004bc82  movs r1, #0x74        record stride
+#   0x1004bc8e  ldrb.w r2,[r3,#0x94]  length byte
+#   0x1004bcbc  ldrb.w r3,[r1,#0x94]  length byte
+#   0x1004b678  movs r2, #0x60        memset(rec+8, 0, text)
+#   0x1004be78  movs r2, #0x60        memset(rec+8, 0, text)
+DECODE2_LINES = 0x1004BC70
+DECODE2_STRIDE = 0x1004BC82
+DECODE2_LENBYTE = [(0x1004BC8E, 2, 3), (0x1004BCBC, 3, 1)]   # addr, Rt, Rn
+DECODE2_TEXTLEN = [(0x1004B678, 2), (0x1004BE78, 2)]         # addr, Rd
+
 # The page-fill threshold, and therefore the page-advance amount:
 #     ldrd r6, r3, [r4]   ; r6 = line count
 #     adds r3, #8         ; threshold = start + LINES_PER_PAGE
@@ -321,6 +336,18 @@ def build_patches_inplace(lines, line_height, cont_top, cont_sub):
          f"write length byte {0x60:#x} -> {lb_render:#x}"),
         (0x1004928E, adds_imm8(5, REC), adds_imm8(5, rec),
          f"record stride {REC:#x} -> {rec:#x}"),
+
+        # --- ebook_decode_page: its own copy of the layout ---------------
+        (DECODE2_LINES, cmp_imm8(3, STOCK_LINES), cmp_imm8(3, lines),
+         f"decode_page lines/page {STOCK_LINES} -> {lines}"),
+        (DECODE2_STRIDE, movs_imm8(1, REC), movs_imm8(1, rec),
+         f"decode_page record stride {REC:#x} -> {rec:#x}"),
+        *[(a, ldrb_w(rt, rn, 0x94), ldrb_w(rt, rn, lb_decode),
+           f"decode_page length byte {0x94:#x} -> {lb_decode:#x}")
+          for a, rt, rn in DECODE2_LENBYTE],
+        *[(a, movs_imm8(rd, 0x60), movs_imm8(rd, text),
+           f"decode_page text len {0x60:#x} -> {text:#x}")
+          for a, rd in DECODE2_TEXTLEN],
 
         # --- container geometry ------------------------------------------
         # Reclaim the wasted pixels so that exactly `lines` labels fit.
