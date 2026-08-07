@@ -1,0 +1,60 @@
+/* Firmware entry points recovered by reverse engineering.
+ *
+ * CONFIDENCE LEVELS — respect these, a wrong signature crashes rather than
+ * misbehaves:
+ *   [OBSERVED] call site read in the disassembly, arguments confirmed by use
+ *   [INFERRED] plausible from context, NOT yet confirmed on hardware
+ *
+ * All call addresses carry the Thumb bit (+1).
+ */
+#ifndef FW_H
+#define FW_H
+#include <stdint.h>
+
+/* --- libc ------------------------------------------------------------- */
+/* [OBSERVED] _decode_one_page: memset(ctx+i*rec+0x2c, 0, rec) */
+#define fw_memset  ((void *(*)(void *, int, unsigned))0x100f1f4b)
+/* [OBSERVED] _decode_one_page: memcpy(sp+0xc, filebuf, len) */
+#define fw_memcpy  ((void *(*)(void *, const void *, unsigned))0x100f1f43)
+
+/* --- logging ---------------------------------------------------------- */
+/* [OBSERVED] printf-like: (fmt, s1, s2, value); reaches the UART console */
+#define fw_log     ((void (*)(const char *, const char *, const char *, int))0x100ee68b)
+
+/* --- LVGL wrappers ---------------------------------------------------- */
+/* [OBSERVED] _reading_create_content label loop */
+#define lv_obj_set_size   ((void (*)(void *, int16_t, int16_t))0x100f8083)
+#define lv_obj_set_pos    ((void (*)(void *, int16_t, int16_t))0x100f800d)
+#define lv_obj_get_child  ((void *(*)(void *, uint32_t))0x100f9903)
+#define lv_obj_child_cnt  ((uint32_t (*)(void *))0x100f9921)
+#define lv_label_set_text ((void (*)(void *, const char *, int))0x100ec577)
+/* [INFERRED] style property getter: (obj, part, prop) -> value; 0x1004 = height */
+#define lv_get_style_prop ((int32_t (*)(void *, uint32_t, uint32_t))0x100f9015)
+#define LV_PROP_WIDTH   0x1001
+#define LV_PROP_HEIGHT  0x1004
+
+/* --- text layout ------------------------------------------------------ */
+/* [OBSERVED] _decode_one_page: (buf, len, max, encoding) -> bytes in one line */
+#define fw_wrap_line ((int (*)(const char *, int, int, int))0x10049075)
+
+/* --- reader object ---------------------------------------------------- */
+/* [OBSERVED] global -> app object -> [+0x3c] is the reader */
+#define FW_APP_GLOBAL   0x18018978
+#define RD_OFF_LIST     0x14    /* lv_obj * label container            */
+#define RD_OFF_CTXS     0x190   /* page-context array base             */
+#define RD_OFF_LINE     0x194   /* reading position, in lines          */
+#define RD_OFF_TOTALPG  0x19c   /* total pages                         */
+
+/* Static page contexts. Replacing the vendor reader frees these:
+ * 0x18018a4c (0x3cc) + 0x18019098..0x18019bfc (0xb64) = 0xf30 bytes of
+ * known-good SRAM at fixed addresses. */
+#define FW_CTX_STANDALONE 0x18018a4c
+#define FW_CTX_ARRAY      0x18019098
+#define FW_CTX_TOTAL_BYTES 0xf30
+
+/* --- geometry (measured on hardware) ---------------------------------- */
+#define SCREEN_H        264
+#define LIST_X          4
+#define LINE_H_BASE     1      /* the +1 in `fp = [r4+0x1de] + literal` */
+
+#endif /* FW_H */
