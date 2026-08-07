@@ -192,3 +192,91 @@ python3 tools/patch_lines.py fw_code_full.bin --lines 11 --ram 0x181ee000 --outd
 ```
 
 Related: [ebook-layout.md](ebook-layout.md), [firmware-extraction.md](firmware-extraction.md)
+
+---
+
+# WHY THIS DOES NOT WORK YET (tested on hardware)
+
+The 11-line build above was flashed and **fails**: it crashes on page change, and the
+11th line is cut off by the bottom of the screen. Reverted to stock, byte-exact.
+
+## Root cause: lines-per-page is a SHIFT, in nine places
+
+The reader stores the reading position as a **line index** and derives the page number
+from it by dividing by 8 — as a hardcoded arithmetic shift:
+
+```
+    ldr.w r2, [r4, #0x198]   ; reading position, in lines
+    cmp   r2, #0
+    it    lt
+    addlt r2, #7             ; signed round-toward-zero
+    asrs  r2, r2, #3         ; page = line / 8
+    adds  r2, #1
+```
+
+That exact idiom appears at **nine** sites:
+
+| site | role |
+|---|---|
+| `0x1004944a` | page from position |
+| `0x100494ce` | page from position |
+| `0x10049560` | page from position |
+| `0x10049674` | page from position |
+| `0x1004981a` | **the page number printed on screen** (`'%d'`) |
+| `0x10049e38` | page from position |
+| `0x10049eb0` | page from position |
+| `0x1004a288` | line height (`content_height / 8`) — the only one patched |
+| `0x1004a312` | page written into each context (`[ctx+0x18] = page + i`) |
+
+Decoding 11 lines per page while the page arithmetic still assumes 8 makes the page index
+run ahead of reality; `0x1004a312` then stores a wrong page into every context, which is
+what faults on a page turn.
+
+## Consequence: only powers of two are reachable in place
+
+A shift can only divide by a power of two, so an in-place same-length patch can reach
+**8 (stock) or 16** lines and nothing else. 16 lines means `236/16 = 14 px`, far below the
+~20 px glyph height (descenders already clipped at 19 px). So 16 is not usable.
+
+**Arbitrary line counts require real division**, which does not fit in the 6 bytes the
+idiom occupies.
+
+## The way forward: injected division stubs
+
+This is tractable, and the two hard parts are already proven:
+
+- **Hardware division exists.** The firmware already uses `sdiv` 255 times and `udiv` 494
+  times, so a stub is a few instructions and fast.
+- **Code injection into free flash works** — see the stub at `0x1e7000`.
+
+Each site is a 6-byte `it lt / addlt #7 / asr #3`, and `bl <stub>` + `nop` is exactly 6.
+One stub per (register, divisor) pair, e.g. for `r1`:
+
+```
+    push {r0}
+    movs r0, #11
+    sdiv r1, r1, r0
+    pop  {r0}
+    bx   lr
+```
+
+`lr` is free to clobber at these sites because each enclosing function already saves it in
+its prologue — **verify this per site before patching.**
+
+Open questions before attempting this:
+
+- The inverse conversion (page -> line, `* 8`) has not been located. A byte scan for
+  `lsls rX, rY, #3` returns ~200 hits in the reader region, overwhelmingly misaligned
+  decodes of data, so it needs a different method — ideally disassembling from known
+  function entry points rather than linearly.
+- Whether `[r4+0x194]`/`[r4+0x198]` is truly a line index or something finer.
+- The `.BMK` bookmark files on the SD card cache reading positions; a stale one may need
+  deleting after any change to the line count.
+
+## Note on the ATJ21xx/22xx documents
+
+The Actions datasheets and programming guides collected for ATJ2135 / 2137 / 2236 / 2253 /
+2256 / 2259 / 227x are a **different chip generation** — proprietary-core MP3/MP4 parts
+from 2007-2012. The BF07 is a LARK (ATJ2158, ARM Cortex-M, Zephyr + LVGL). Likewise
+`atj2127decrypt` and the ATJ227x-era `ruizu-x02-rev` target the older families. The public
+LARK SDK remains the applicable reference; see [sdk.md](sdk.md).
