@@ -225,6 +225,22 @@ def bl(addr, target):
     return struct.pack("<HH", hw1, hw2)
 
 
+def bw(addr, target):
+    """B.W (T4) -- a branch, not a call: leaves lr untouched so the callee
+    still returns to our caller. Same encoding as BL but hw2 bit14 clear."""
+    off = target - (addr + 4)
+    if not -(1 << 24) <= off < (1 << 24) or off & 1:
+        raise ValueError(f"b.w out of range: {off:#x}")
+    S = (off >> 24) & 1
+    i1 = (off >> 23) & 1
+    i2 = (off >> 22) & 1
+    j1 = (i1 ^ 1) ^ S
+    j2 = (i2 ^ 1) ^ S
+    hw1 = 0xF000 | (S << 10) | ((off >> 12) & 0x3FF)
+    hw2 = 0x9000 | (j1 << 13) | (j2 << 11) | ((off >> 1) & 0x7FF)
+    return struct.pack("<HH", hw1, hw2)
+
+
 def stub_for(reg, lines):
     """rX = rX / lines, signed, preserving every other register AND the flags."""
     scratch = 1 if reg == 0 else 0
