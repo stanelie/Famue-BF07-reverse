@@ -50,6 +50,52 @@ def addw(rd, rn, imm12):
     return struct.pack("<HH", hw1, _t2_hw2(imm12, rd))
 
 
+def mod_imm(v):
+    """Encode v as a Thumb-2 modified immediate, or None.
+
+    Only the two forms we need: a bare 8-bit value, and an 8-bit value with
+    bit 7 set, rotated.  imm12[11:7] is the rotation, imm12[6:0] the low seven
+    bits of the byte (bit 7 is implicit).
+    """
+    if 0 <= v <= 0xFF:
+        return v
+    for k in range(1, 25):
+        if v & ((1 << k) - 1):
+            continue
+        x = v >> k
+        if 0x80 <= x <= 0xFF:
+            return ((32 - k) << 7) | (x & 0x7F)
+    return None
+
+
+def add_w(rd, rn, v):
+    """ADD.W Rd, Rn, #<modified immediate> (T3)."""
+    imm12 = mod_imm(v)
+    if imm12 is None:
+        raise ValueError(f"{v:#x} is not a Thumb-2 modified immediate")
+    hw1 = 0xF000 | ((imm12 >> 11) & 1) << 10 | 0x100 | (rn & 0xF)
+    return struct.pack("<HH", hw1, _t2_hw2(imm12 & 0x7FF, rd))
+
+
+def add_const(rd, rn, v):
+    """Widest-range 32-bit add: prefer ADDW, fall back to ADD.W."""
+    if v <= 0xFFF:
+        return addw(rd, rn, v)
+    return add_w(rd, rn, v)
+
+
+def pick_context_size(lines):
+    """Smallest word-aligned context size for `lines` whose array end offset
+    (3 * size) can be encoded in the single instruction at 0x1004c360."""
+    minimum = HDR + lines * REC
+    size = (minimum + 3) & ~3
+    while size < minimum + 0x40:
+        if 3 * size <= 0xFFF or mod_imm(3 * size) is not None:
+            return size
+        size += 4
+    raise ValueError(f"no encodable context size for {lines} lines")
+
+
 def cmp_imm8(rd, imm8):
     return struct.pack("<H", 0x2800 | (rd & 7) << 8 | (imm8 & 0xFF))
 
@@ -63,7 +109,7 @@ def le32(v):
 
 def build_patches(lines, new_base):
     """Return [(xip_addr, old_bytes, new_bytes, description)]."""
-    size = HDR + lines * REC
+    size = pick_context_size(lines)
     array = 3 * size
     ctx = [new_base + i * size for i in range(4)]   # standalone, a0, a1, a2
 
@@ -85,17 +131,17 @@ def build_patches(lines, new_base):
          f"memset size {STOCK_ARRAY:#x} -> {array:#x}"),
 
         # array walks: ctx += sizeof(context)
-        (0x10049FBA, bytes.fromhex("07f57377"), addw(7, 7, size),
+        (0x10049FBA, bytes.fromhex("07f57377"), add_const(7, 7, size),
          f"stride r7 {STOCK_SIZE:#x} -> {size:#x}"),
         (0x1004A318, bytes.fromhex("4ff4737a"), movw(10, size),
          f"stride sl {STOCK_SIZE:#x} -> {size:#x}"),
-        (0x1004A440, bytes.fromhex("07f57377"), addw(7, 7, size),
+        (0x1004A440, bytes.fromhex("07f57377"), add_const(7, 7, size),
          f"stride r7 {STOCK_SIZE:#x} -> {size:#x}"),
-        (0x1004C39A, bytes.fromhex("05f57375"), addw(5, 5, size),
+        (0x1004C39A, bytes.fromhex("05f57375"), add_const(5, 5, size),
          f"stride r5 {STOCK_SIZE:#x} -> {size:#x}"),
 
         # the array end pointer: end = base + 3 * sizeof(context)
-        (0x1004C360, addw(3, 5, STOCK_ARRAY), addw(3, 5, array),
+        (0x1004C360, addw(3, 5, STOCK_ARRAY), add_const(3, 5, array),
          f"array end {STOCK_ARRAY:#x} -> {array:#x}"),
 
         # the other literal pool, in _reading_create_content
@@ -120,7 +166,9 @@ def main():
     total = 4 * size
 
     print(f"lines per page   : {STOCK_LINES} -> {args.lines}")
-    print(f"context size     : {STOCK_SIZE:#x} -> {size:#x}")
+    slack = size - (HDR + args.lines * REC)
+    print(f"context size     : {STOCK_SIZE:#x} -> {size:#x}"
+          + (f"  (+{slack} pad, to keep 3*size encodable)" if slack else ""))
     print(f"array (3 ctx)    : {STOCK_ARRAY:#x} -> {array:#x}")
     print(f"relocated block  : {args.ram:#x} .. {args.ram + total:#x} "
           f"({total} bytes)")
