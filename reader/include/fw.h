@@ -51,8 +51,17 @@ typedef struct { void *filep; void *mp; uint8_t flags; } fs_file_t;
 #define fs_seek  ((int (*)(fs_file_t *, int32_t, int))0x1007fde1)
 
 /* --- text layout ------------------------------------------------------ */
-/* [OBSERVED] _decode_one_page: (buf, len, max, encoding) -> bytes in one line */
-#define fw_wrap_line ((int (*)(const char *, int, int, int))0x10049075)
+/* WRONG: marked [OBSERVED] from one call site, but a single call consumed a
+   whole 512-byte buffer. Do not use.
+   #define fw_wrap_line ((int (*)(const char *, int, int, int))0x10049075) */
+
+/* [OBSERVED] the real measurer, from txt_analy_one_line at 0x100490d6..e6:
+ *   r0 buf, r1 len, r2 encoding, r3 info (0xbc scratch, zeroed),
+ *   [sp] max width in PIXELS, [sp+4] -> bytes consumed
+ * The vendor passes width 0xc0 and clamps len to 0x60. */
+#define fw_measure ((void (*)(const char *, int, int, void *, int, int *))0x100eb4b9)
+#define FW_MEASURE_INFO 0xbc
+#define FW_MEASURE_MAXLEN 0x60
 
 /* --- reader object ---------------------------------------------------- */
 /* [OBSERVED] global -> app object -> [+0x3c] is the reader */

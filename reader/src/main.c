@@ -86,9 +86,10 @@ __attribute__((naked)) void probe(void)
         "bx    r12\n");
 }
 
-#define INJ_MAGIC 0x52444234u   /* bump on every state-layout change */
+#define INJ_MAGIC 0x52444235u   /* bump on every state-layout change */
 #define MAXW      44      /* buffer per displayed line          */
-#define CPL       34      /* characters per line (tune to the font) */
+#define CPL       34      /* fallback only, if measuring fails      */
+#define LINE_PX  168      /* label width, measured on hardware       */
 #define BACKSTACK 48      /* how many page-starts we can go back through */
 
 /* Lives in the freed standalone page context (0x18018a4c, 0x3cc bytes).
@@ -187,20 +188,38 @@ static int book_read(int32_t off, char *buf, uint32_t len)
  * the vendor entirely.
  *
  * Returns bytes to consume for one displayed line, including any newline. */
+static uint8_t measure_info[FW_MEASURE_INFO];
+
 static int wrap_one(const char *p, int avail)
 {
     if (avail <= 0) return 0;
-    int n = (avail < CPL) ? avail : CPL;
+    int n = (avail < FW_MEASURE_MAXLEN) ? avail : FW_MEASURE_MAXLEN;
 
     for (int i = 0; i < n; i++)              /* hard newline wins */
         if (p[i] == '\n') return i + 1;
 
-    if (avail <= CPL) return avail;          /* tail of the buffer */
+    /* Measure in PIXELS with the vendor's own font handling. It wants a
+       NUL-terminated copy, as txt_analy_one_line prepares. */
+    char tmp[FW_MEASURE_MAXLEN + 1];
+    fw_memcpy(tmp, p, n);
+    tmp[n] = 0;
+    fw_memset(measure_info, 0, sizeof measure_info);
+    int used = 0;
+    fw_measure(tmp, n, 1, measure_info, LINE_PX, &used);
 
-    for (int i = n; i > 0; i--)              /* break at the last space */
+    if (used > 0 && used <= n) {
+        if (used < avail) {                  /* prefer a word boundary */
+            for (int i = used; i > 0; i--)
+                if (tmp[i] == ' ') return i + 1;
+        }
+        return used;
+    }
+
+    /* Fallback: character count, so a bad return can never overrun. */
+    if (avail <= CPL) return avail;
+    for (int i = CPL; i > 0; i--)
         if (p[i] == ' ') return i + 1;
-
-    return n;                                /* no space: hard break */
+    return CPL;
 }
 
 /* Re-wrap one page starting at st.offset. Reads once, only when the page
