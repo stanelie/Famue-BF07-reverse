@@ -90,3 +90,43 @@ this one gets verified before any more flashing.
 
 Device is on **fully stock firmware** and working. All reader work is committed;
 nothing is lost.
+
+## Status: Stage 1 working (2026-08-07)
+
+The injected reader displays real text from the book, on the correct threads, without
+crashing. Confirmed on hardware.
+
+**Architecture as built**
+
+- **Display thread** — `reader_main` replaces `0x1004937c`, the timer callback registered
+  by `_reading_create_content` (`timer_create` at `0x100a1130`, period 2, ~3 calls/sec).
+  It detects a page change, records `st.offset` and sets `need_prep`, and draws the cached
+  page. **No file I/O, ever.**
+- **`ebook` thread** — `prepare_hook` wraps `msg_manager_receive_msg` at `0x1004c002`, the
+  unconditional top of `_ebook_reading_event_handle`'s message loop. It performs the file
+  read and wrapping just before the loop blocks, i.e. in idle time.
+- **File access** reuses the vendor's own open handle at `0x1801a084` (`fs_seek` + `fs_read`
+  only). No second handle, no open/close.
+- **Our RAM** is the line-record area of the standalone page context, `0x18018a78`
+  (`0x3a0` = 928 bytes). The context header is left alone -- it holds a live mutex.
+
+**Bugs found and fixed getting here**, each by measurement:
+
+1. `fs_file_t` is 20 bytes, not 12 -- a short stack copy let `fs_open` corrupt the stack.
+2. We opened the book a second time while the vendor held it open.
+3. Our `.bss` overwrote the kernel mutex at the head of a page context.
+4. `mkflash.py` hardcoded the sector list, silently dropping the `0x1004c002` hook -- a
+   patch that reported success while never being written.
+
+## Stage 2: the pre-render, and what it needs
+
+Two page buffers plus the back-stack do not fit in 928 bytes. Options, in order of
+preference:
+
+1. **Find a general allocator.** The symbol map only names subsystem allocators
+   (`res_mem_alloc`, `bt_mem_malloc`); Zephyr's `k_heap_alloc` is unnamed because it never
+   logs. `dbg kheap` shows heaps with a few KB free.
+2. **Verify `0x18018e98..0x18019098`** (~512 bytes). References stop around `0x18018e95`,
+   so the tail may be free -- but it must be canaried **under load**, not at idle.
+3. **Shrink** -- store the next page as raw bytes rather than wrapped text, since the SD
+   read dominates and wrapping is cheap. Fits only with an uncomfortably small buffer.
