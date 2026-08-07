@@ -86,8 +86,35 @@ __attribute__((naked)) void probe(void)
         "bx    r12\n");
 }
 
+#define INJ_MAGIC 0x52444234u   /* bump on every state-layout change */
+#define MAXW      44      /* buffer per displayed line          */
+#define CPL       34      /* characters per line (tune to the font) */
+#define BACKSTACK 48      /* how many page-starts we can go back through */
+
+/* Lives in the freed standalone page context (0x18018a4c, 0x3cc bytes).
+   Nothing zeroes it, so `magic` gates initialisation. */
+struct inj_state {
+    uint32_t magic;
+    uint32_t calls;
+    int32_t  offset;                  /* byte offset: start of current page */
+    int32_t  next_offset;             /* byte offset: start of next page    */
+    int32_t  last_line;               /* last vendor reading_line seen      */
+    uint16_t nlines;                  /* lines currently cached             */
+    uint8_t  sp;                      /* back-stack depth                   */
+    char     text[INJ_LINES][MAXW];   /* the wrapped page                   */
+    int32_t  back[BACKSTACK];
+};
+static struct inj_state st;
+
+void after_render(void);
+
 /* ---- M4: draw the page ourselves ----------------------------------- */
 
+/* Instrumented: we have no writable data section, so instead of a call
+   counter we display the LIVE reading position, read straight out of the
+   reader object. If a page turn re-enters this hook, the number on screen
+   changes; if it does not, the hook is not running on page turns. Also logs
+   every call so the UART shows the firing pattern. */
 void after_render(void)
 {
     void *rd = reader_obj();
@@ -101,13 +128,7 @@ void after_render(void)
     for (uint32_t i = 0; i < n; i++) {
         void *c = lv_obj_get_child(cont, i);
         if (!c) continue;
-        char line[40], *p = line;
-        p = put(p, "INJ line ");
-        p = put_u(p, i + 1);
-        p = put(p, " of ");
-        p = put_u(p, n);
-        *p = 0;
-        lv_label_set_text(c, line, 0);
+        lv_label_set_text(c, (i < st.nlines) ? st.text[i] : "", 0);
     }
 }
 
@@ -121,4 +142,170 @@ __attribute__((naked)) void render_hook(void)
         "bl    after_render\n"
         "pop   {r0-r3, lr}\n"
         "bx    lr\n");
+}
+
+/* ---- M6: replace the decode+render function outright --------------- */
+
+#define fw_lock    ((void (*)(void))0x100fd8b9)   /* 0x1004937c entry pair   */
+#define fw_prep    ((void (*)(void))0x100491b1)   /* called before decoding  */
+#define fw_decode  ((int  (*)(void *))0x10049299) /* _decode_one_page        */
+#define fw_render  ((void (*)(void *))0x1004922d) /* fills the labels        */
+
+/* OUR RAM -- the freed standalone context. Nothing zeroes .bss here, so a
+   magic word tells us whether it has been initialised. */
+
+/* ---- book file access ---------------------------------------------- */
+
+/* The mount is "/SD1:", NOT "/SD:" -- found by searching live SRAM, where the
+   firmware's own paths read "/SD1:C/sans16.font" and "/SD1://EBOOK.LIB".
+   Using "/SD:" made fs_open return -ENOENT (-2). */
+static const char book[] = "/SD1:/The Last Town - Blake Crouch.txt";
+
+/* Reads `len` bytes at `off`. Returns bytes read, or a negative error.
+   Called only when the page changes -- never per frame. */
+static int book_read(int32_t off, char *buf, uint32_t len)
+{
+    fs_file_t f;
+    fw_memset(&f, 0, sizeof f);          /* Zephyr wants a zeroed handle */
+    int rc = fs_open(&f, book, FS_O_READ);
+    if (rc < 0) return rc;
+    if (off) {
+        rc = fs_seek(&f, off, FS_SEEK_SET);
+        if (rc < 0) { fs_close(&f); return rc; }
+    }
+    rc = fs_read(&f, buf, len);
+    fs_close(&f);
+    return rc;
+}
+
+/* Our own word wrap.
+ *
+ * fw_wrap_line (0x10049074) was [INFERRED] from a single call site to return
+ * "bytes in one line". It does not: one call swallowed the whole 512-byte
+ * buffer, so a page rendered as a single line. Rather than keep guessing at an
+ * undocumented signature, wrap ourselves -- predictable, and independent of
+ * the vendor entirely.
+ *
+ * Returns bytes to consume for one displayed line, including any newline. */
+static int wrap_one(const char *p, int avail)
+{
+    if (avail <= 0) return 0;
+    int n = (avail < CPL) ? avail : CPL;
+
+    for (int i = 0; i < n; i++)              /* hard newline wins */
+        if (p[i] == '\n') return i + 1;
+
+    if (avail <= CPL) return avail;          /* tail of the buffer */
+
+    for (int i = n; i > 0; i--)              /* break at the last space */
+        if (p[i] == ' ') return i + 1;
+
+    return n;                                /* no space: hard break */
+}
+
+/* Re-wrap one page starting at st.offset. Reads once, only when the page
+   changes -- the render function polls ~3x/second, so per-frame I/O is out. */
+static void repaginate(void)
+{
+    char raw[512];
+    int rc = book_read(st.offset, raw, sizeof raw);
+    st.nlines = 0;
+    if (rc <= 0) {
+        static const char e[] = "%s%s: book_read rc=%d\n";
+        fw_log(e, "", "inj", rc);
+        st.next_offset = st.offset;
+        return;
+    }
+
+    static const char ok[] = "%s%s: repaginate off=%d rc=%d\n";
+    fw_log(ok, "", "inj", st.offset);
+
+    int pos = 0;
+    for (int i = 0; i < INJ_LINES && pos < rc; i++) {
+        int take = wrap_one(raw + pos, rc - pos);
+        if (take <= 0) break;
+
+        int k = 0;
+        for (int j = 0; j < take && k < MAXW - 1; j++) {
+            char ch = raw[pos + j];
+            if (ch == '\n' || ch == '\r') continue;
+            st.text[i][k++] = ch;
+        }
+        st.text[i][k] = 0;
+        pos += take;
+        st.nlines++;
+    }
+    st.next_offset = st.offset + pos;
+}
+
+static void push_back(int32_t off)
+{
+    if (st.sp < BACKSTACK) st.back[st.sp++] = off;
+}
+
+void reader_body(void)
+{
+    if (st.magic != INJ_MAGIC) {
+        st.magic = INJ_MAGIC;
+        st.calls = 0;
+        st.offset = 0;
+        st.next_offset = 0;
+        st.last_line = -1;
+        st.nlines = 0;
+        st.sp = 0;
+    }
+    st.calls++;
+
+    /* Keep the vendor's three array contexts decoded so its own paging keeps
+       working; the standalone context is ours now. */
+    fw_prep();
+    void *a0 = (void *)FW_CTX_ARRAY;
+    void *a1 = (void *)(FW_CTX_ARRAY + 0x3cc);
+    void *a2 = (void *)(FW_CTX_ARRAY + 2 * 0x3cc);
+    void *last = a2;
+    if (fw_decode(a0) == 0)      last = a0;
+    else if (fw_decode(a1) == 0) last = a1;
+    else if (fw_decode(a2) == 0) last = a2;
+    fw_render(last);
+
+    /* Use the vendor's position purely as a page-turn SIGNAL. Its magnitude
+       is its own (8 lines/page); ours is however much text we consumed. */
+    void *rd = reader_obj();
+    if (!rd) return;
+    int line = *(volatile int *)((uint32_t)rd + RD_OFF_LINE);
+
+    if (st.last_line < 0 || st.nlines == 0) {
+        /* SRAM survives a warm reset, so stale state can otherwise leave us
+           with an empty cache and no page-change to trigger a fill. */
+        repaginate();
+    } else if (line > st.last_line) {          /* next */
+        push_back(st.offset);
+        st.offset = st.next_offset;
+        repaginate();
+    } else if (line < st.last_line) {          /* previous */
+        if (st.sp) st.offset = st.back[--st.sp];
+        else       st.offset = 0;
+        repaginate();
+    }
+    st.last_line = line;
+
+    after_render();
+}
+
+/* Replaces 0x1004937c entirely. Reproduces its lock/unlock contract:
+   `push {r4,lr}; mov r4,r0` at entry, `mov r0,r4; pop; b.w unlock` at exit. */
+__attribute__((naked)) void reader_main(void)
+{
+    __asm__ volatile(
+        "push  {r4, lr}\n"
+        "mov   r4, r0\n"
+        "movw  r12, #0xd8b9\n"      /* 0x100fd8b8 | thumb -- lock  */
+        "movt  r12, #0x100f\n"
+        "blx   r12\n"
+        "bl    reader_body\n"
+        "mov   r0, r4\n"
+        "pop   {r4, lr}\n"
+        "movw  r12, #0xd8c3\n"      /* 0x100fd8c2 | thumb -- unlock */
+        "movt  r12, #0x100f\n"
+        "bx    r12\n");
 }
