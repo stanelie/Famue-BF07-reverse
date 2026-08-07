@@ -74,6 +74,17 @@ DECODE2_STRIDE = 0x1004BC82
 DECODE2_LENBYTE = [(0x1004BC8E, 2, 3), (0x1004BCBC, 3, 1)]   # addr, Rt, Rn
 DECODE2_TEXTLEN = [(0x1004B678, 2), (0x1004BE78, 2)]         # addr, Rd
 
+# A THIRD module: the shared text-view library at 0x100eb000, which the scroll
+# path calls into. It keeps its own lines-per-page, its own *8 and /8, and its
+# own record stride. Found by a WHOLE-IMAGE scan for [rX,#0x194]; every earlier
+# scan was confined to 0x10048000..0x1004e000.
+LIB_CMP_MUL = [(0x100EB42C, 4, 3), (0x100EB5B8, 3, 2)]  # cmp Rn, Rm<<3 -> Rn vs Rm*N
+LIB_DIV = [0x100EB436, 0x100EB5C0]        # it lt / addlt / asr  (6 bytes) on r3
+LIB_MOVW_MUL = 0x100EB444                 # mov.w sl,#0x3cc + lsls r6,r3,#3
+LIB_SUB_MUL = 0x100EB538                  # subs r3,r1,#1 + lsls r3,r3,#3
+LIB_STRIDE32 = 0x100EB494                 # add.w ip, ip, #0x74
+LIB_STRIDE16 = 0x100EB49C                 # movs r0, #0x74
+
 # The page-fill threshold, and therefore the page-advance amount:
 #     ldrd r6, r3, [r4]   ; r6 = line count
 #     adds r3, #8         ; threshold = start + LINES_PER_PAGE
@@ -239,6 +250,37 @@ def mul_stub(lines):
             + sub_w(1, 0, 1) + push_pop(0, pop=True) + BX_LR)
 
 
+def cmp_rr(rn, rm):
+    return struct.pack("<H", 0x4280 | ((rm & 7) << 3) | (rn & 7))
+
+
+def subs_i3(rd, rn, imm3):
+    return struct.pack("<H", 0x1E00 | ((imm3 & 7) << 6) | ((rn & 7) << 3)
+                       | (rd & 7))
+
+
+def lib_cmp_stub(rn, rm, lines):
+    """flags = cmp Rn, Rm*lines. Nothing after the cmp touches flags."""
+    return (push_pop(0) + mov_w(0, lines) + mul_rr(0, rm, 0) + cmp_rr(rn, 0)
+            + push_pop(0, pop=True) + BX_LR)
+
+
+def lib_movw_mul_stub(lines):
+    """sl = 0x3cc (as the original did) and r6 = r3 * lines."""
+    return (mov_w(10, STOCK_SIZE) + movs_imm8(6, lines) + mul_rr(6, 3, 6)
+            + BX_LR)
+
+
+def lib_sub_mul_stub(lines):
+    """r3 = (r1 - 1) * lines."""
+    return (push_pop(0) + subs_i3(3, 1, 1) + mov_w(0, lines) + mul_rr(3, 3, 0)
+            + push_pop(0, pop=True) + BX_LR)
+
+
+LIB_STUBS = ["cmp_r4_r3", "cmp_r3_r2", "movw_mul", "sub_mul"]
+LIB_BASE_INDEX = 7
+
+
 def build_stub_sector(lines):
     """4 KB image for STUB_FLASH: erased 0xFF with one stub per register."""
     sec = bytearray(b"\xff" * 0x1000)
@@ -251,6 +293,11 @@ def build_stub_sector(lines):
     for j, reg in enumerate(DIVP1_REGS):
         code = divp1_stub(reg, lines)
         off = (DIVP1_BASE_INDEX + j) * STUB_STRIDE
+        sec[off:off + len(code)] = code
+    for j, code in enumerate([
+            lib_cmp_stub(4, 3, lines), lib_cmp_stub(3, 2, lines),
+            lib_movw_mul_stub(lines), lib_sub_mul_stub(lines)]):
+        off = (LIB_BASE_INDEX + j) * STUB_STRIDE
         sec[off:off + len(code)] = code
     return bytes(sec)
 
@@ -348,6 +395,28 @@ def build_patches_inplace(lines, line_height, cont_top, cont_sub):
         *[(a, movs_imm8(rd, 0x60), movs_imm8(rd, text),
            f"decode_page text len {0x60:#x} -> {text:#x}")
           for a, rd in DECODE2_TEXTLEN],
+
+        # --- text-view library at 0x100eb000 -----------------------------
+        *[(a, bytes.fromhex({0x100EB42C: "b4ebc30f",
+                             0x100EB5B8: "b3ebc20f"}[a]),
+           bl(a, STUB_XIP + (LIB_BASE_INDEX + i) * STUB_STRIDE),
+           f"lib: cmp r{rn}, r{rm}*8 -> *{lines} via stub")
+          for i, (a, rn, rm) in enumerate(LIB_CMP_MUL)],
+        *[(a, bytes.fromhex({0x100EB436: "b8bfe31ddb10",
+                             0x100EB5C0: "b8bf0733db10"}[a]),
+           bl(a, STUB_XIP + DIV_REGS.index(3) * STUB_STRIDE) + NOP,
+           f"lib: page=line/8 -> /{lines} via stub (r3)")
+          for a in LIB_DIV],
+        (LIB_MOVW_MUL, bytes.fromhex("4ff4737ade00"),
+         bl(LIB_MOVW_MUL, STUB_XIP + (LIB_BASE_INDEX + 2) * STUB_STRIDE) + NOP,
+         f"lib: sl=0x3cc, r6=r3*{lines} via stub"),
+        (LIB_SUB_MUL, bytes.fromhex("4b1edb00"),
+         bl(LIB_SUB_MUL, STUB_XIP + (LIB_BASE_INDEX + 3) * STUB_STRIDE),
+         f"lib: reading_line=(page-1)*{lines} via stub"),
+        (LIB_STRIDE32, bytes.fromhex("0cf1740c"), add_w(12, 12, rec),
+         f"lib: record stride {REC:#x} -> {rec:#x}"),
+        (LIB_STRIDE16, movs_imm8(0, REC), movs_imm8(0, rec),
+         f"lib: record stride {REC:#x} -> {rec:#x}"),
 
         # --- container geometry ------------------------------------------
         # Reclaim the wasted pixels so that exactly `lines` labels fit.
