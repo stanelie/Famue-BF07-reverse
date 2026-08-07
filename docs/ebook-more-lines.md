@@ -322,3 +322,65 @@ Details that matter:
 
 Revert: `revert11.py` restores the three code sectors to stock. The stubs can be left in
 place — with no `bl` pointing at them they are inert.
+
+---
+
+# THE RELOCATED RAM IS THE PROBLEM (hardware evidence)
+
+With the division stubs in place and verified live on the device
+(`0x101d3010` reads back as `push {r0} / mov.w r0,#0xb / sdiv r1,r1,r0 / pop {r0} / bx lr`,
+and `0x10049446` as `bl` + `nop`), the page turn **still reboots**. The stubs were not the
+fix. The UART fault says why:
+
+```
+***** BUS FAULT *****
+  Imprecise data bus error
+r0/a1: 0x00000000   r1/a2: 0x0000000b   r2/a3: 0x000000c4
+r3/a4: 0x000000c4  r12/ip: 0x00000001  r14/lr: 0x100e56a3
+ fpscr: 0x182108f4
+Faulting instruction address (r15/pc): 0x100e594c
+>>> ZEPHYR FATAL ERROR 0: CPU exception on CPU 0
+Current thread: 0x1002140 (ui_service)
+
+[<100e594c>] (add_to_waitq_locked+0x54/0x80) from [<07f19c79>] (0x7f19c78)
+```
+
+Three things to read out of that:
+
+- **`fpscr: 0x182108f4`** is a pointer into the relocated block (`array[0]` lives at
+  `0x18210528..0x18210a50`) sitting where a saved FPU register belongs.
+- **The return address `0x07f19c78` is garbage** — a kernel wait-queue structure has been
+  corrupted.
+- An **imprecise data bus error** is the classic signature of a write to memory that is not
+  properly backed, reported asynchronously after the write buffer drains.
+
+## What was actually wrong with the canary test
+
+`0x18210000..0x18280000` passed every test it was given: fills landed exactly on the
+boundary, repeated reads were stable, distinct values at 4 KB spacing proved it was not
+aliased, and a full 24 KB scan returned 0 deviations over 17 minutes.
+
+**Every one of those tests ran while the device was idle.** The gap was known and flagged,
+and it is exactly where the failure lives. The likely truth: SRAM ends near `0x181f5000`
+(above it, writes decay by single bits), and `0x18210000` is in **PSRAM managed by a
+runtime allocator** — empty at idle, claimed the moment the reader runs.
+
+**Rule: memory is only proven free if the canary survives the workload that will share it.**
+
+## Next candidate
+
+`dbg uimem` puts the UI framebuffer pool at `0x18291400..0x1833a000`. The region **above**
+that pool, `0x1833a000..0x18400000` (~790 KB, and `0x18400000` wraps to `0x18000000`), sits
+past every pool located so far and is the better candidate.
+
+It must be validated under load, not at idle:
+
+1. Revert to stock so the reader's own writes cannot contaminate the result.
+2. Canary both `0x18210000..0x18280000` and `0x1833a000..0x18400000`.
+3. Open a book, turn pages, play audio.
+4. Re-scan **every word** of both.
+
+Whichever region survives the workload is the one to relocate into. If neither does, the
+fixed-address approach is dead and the contexts must come from the firmware's own
+allocator, which needs the literal loads to gain a level of indirection — and those are
+2-byte `ldr rX,[pc,#imm]` instructions with no room to grow.
