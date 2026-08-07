@@ -84,6 +84,9 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
  * 0x18018a4c (0x3cc) + 0x18019098..0x18019bfc (0xb64) = 0xf30 bytes of
  * known-good SRAM at fixed addresses. */
 #define FW_CTX_STANDALONE 0x18018a4c
+/* A page context STARTS WITH A KERNEL MUTEX; its header (0x00..0x2b) is live.
+   Only the line records behind it may be reused. */
+#define FW_CTX_HEADER     0x2c
 #define FW_CTX_ARRAY      0x18019098
 #define FW_CTX_TOTAL_BYTES 0xf30
 
