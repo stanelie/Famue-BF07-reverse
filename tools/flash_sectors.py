@@ -15,18 +15,15 @@ import usb.util
 from lark_cd import Adfu, OP_EXEC1, OP_WRITE
 
 SPD = "$BF07_WORK/"
-OUT = SPD + "out11/"
+OUT = SPD + "outip/"
 dump = open("$BF07_BACKUPS/bf07_flash_full_2026-08-05.bin", "rb").read()
 
 JOBS = [
     (0x5D000, OUT + "sector_05d000.bin",
-     [0x340, 0x3C0, 0x440, 0x4C0, 0x540, 0x560, 0x660, 0x800,
-      0xE20, 0xEA0, 0xF00, 0xF20, 0xFA0], True),
-    (0x5E000, OUT + "sector_05e000.bin", [0x100, 0x280, 0x300, 0x440, 0x4E0], True),
-    (0x60000, OUT + "sector_060000.bin", [0x360, 0x380], True),
-    # stub sector: erased flash, so write ONLY the blocks holding code.
-    # Writing the 0xFF filler would encrypt it and leave the sector non-erased.
-    (0x1E7000, OUT + "sector_1e7000.bin", [0x0, 0x20], False),
+     [0x260, 0x280, 0x2C0, 0x2E0, 0x300, 0x320, 0x340, 0x440, 0x4C0,
+      0x540, 0x560, 0x660, 0x800, 0xE20, 0xEA0], True),
+    (0x5E000, OUT + "sector_05e000.bin", [0x280, 0x300], True),
+    (0x1E7000, OUT + "sector_1e7000.bin", [0x0, 0x20, 0x40], False),
 ]
 
 
@@ -158,5 +155,5 @@ for FLASH, path, expect_blocks, full in JOBS:
           f"expected {[hex(x) for x in expect_blocks]}  "
           f"{'OK' if good else 'MISMATCH'}", flush=True)
 
-print("RESULT:", "ALL FOUR SECTORS PATCHED CORRECTLY" if ok else "PROBLEM",
+print("RESULT:", "IN-PLACE 11-LINE BUILD FLASHED" if ok else "PROBLEM",
       flush=True)
