@@ -86,9 +86,9 @@ __attribute__((naked)) void probe(void)
         "bx    r12\n");
 }
 
-#define INJ_MAGIC 0x52444235u   /* bump on every state-layout change */
+#define INJ_MAGIC 0x52444237u   /* bump on every state-layout change */
 #define MAXW      44      /* buffer per displayed line          */
-#define CPL       34      /* fallback only, if measuring fails      */
+#define CPL       25      /* fallback: measured by eye at 168px      */
 #define LINE_PX  168      /* label width, measured on hardware       */
 #define BACKSTACK 48      /* how many page-starts we can go back through */
 
@@ -188,38 +188,57 @@ static int book_read(int32_t off, char *buf, uint32_t len)
  * the vendor entirely.
  *
  * Returns bytes to consume for one displayed line, including any newline. */
-static uint8_t measure_info[FW_MEASURE_INFO];
+/* Proportional width estimate.
+ *
+ * 0x100eb4b8 was tried and rejected: its THIRD argument is a mode selector
+ * (0x7b/0x7c/0x7d are special-cased), not an encoding as the call site
+ * suggested, and the path our value takes simply returns the width argument
+ * instead of measuring -- the log showed used == n for every line. That is the
+ * second wrong signature inferred from txt_analy_one_line, so we stop guessing
+ * and estimate ourselves.
+ *
+ * Widths are in 1/8 px for a ~16px sans face. Not pixel-exact, but it is
+ * proportional, self-contained and cannot overrun. Tune WIDTH_SCALE if lines
+ * come out consistently short or long. */
+static int char_w8(unsigned char c)
+{
+    if (c == ' ') return 36;
+    if (c < 0x20) return 0;
+    if (c >= 0x80) return 88;                       /* non-ASCII: assume wide */
+    switch (c) {
+    case 'i': case 'j': case 'l': case '.': case ',': case ':': case ';':
+    case '\'': case '!': case '|': case '`':          return 26;
+    case 'f': case 'r': case 't': case '(': case ')':
+    case '[': case ']': case '-':                    return 38;
+    case 'm': case 'w': case 'M': case 'W': case '@': return 88;
+    default:
+        if (c >= 'A' && c <= 'Z') return 68;
+        if (c >= '0' && c <= '9') return 60;
+        return 56;                                   /* lower-case average */
+    }
+}
+
+#define WIDTH_SCALE 8                                /* 1/8 px units */
 
 static int wrap_one(const char *p, int avail)
 {
     if (avail <= 0) return 0;
-    int n = (avail < FW_MEASURE_MAXLEN) ? avail : FW_MEASURE_MAXLEN;
 
-    for (int i = 0; i < n; i++)              /* hard newline wins */
-        if (p[i] == '\n') return i + 1;
+    int w8 = 0, i = 0, last_space = -1;
+    int limit = LINE_PX * WIDTH_SCALE;
 
-    /* Measure in PIXELS with the vendor's own font handling. It wants a
-       NUL-terminated copy, as txt_analy_one_line prepares. */
-    char tmp[FW_MEASURE_MAXLEN + 1];
-    fw_memcpy(tmp, p, n);
-    tmp[n] = 0;
-    fw_memset(measure_info, 0, sizeof measure_info);
-    int used = 0;
-    fw_measure(tmp, n, 1, measure_info, LINE_PX, &used);
-
-    if (used > 0 && used <= n) {
-        if (used < avail) {                  /* prefer a word boundary */
-            for (int i = used; i > 0; i--)
-                if (tmp[i] == ' ') return i + 1;
-        }
-        return used;
+    while (i < avail && i < MAXW - 1) {
+        unsigned char c = (unsigned char)p[i];
+        if (c == '\n') return i + 1;                 /* hard newline wins */
+        if (c == ' ') last_space = i;
+        w8 += char_w8(c);
+        if (w8 > limit) break;
+        i++;
     }
 
-    /* Fallback: character count, so a bad return can never overrun. */
-    if (avail <= CPL) return avail;
-    for (int i = CPL; i > 0; i--)
-        if (p[i] == ' ') return i + 1;
-    return CPL;
+    if (i >= avail) return avail;                    /* tail of the buffer */
+    if (last_space > 0) return last_space + 1;       /* break at a word */
+    return i > 0 ? i : 1;                            /* long word: hard break */
 }
 
 /* Re-wrap one page starting at st.offset. Reads once, only when the page
