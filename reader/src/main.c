@@ -14,8 +14,8 @@
  */
 #include "fw.h"
 
-#define PITCH     19        /* +1 base in the caller = 20px pitch */
-#define INJ_LINES 12
+#define PITCH     18        /* +1 base in the caller = 19px pitch */
+#define INJ_LINES 13
 
 /* ---- M1: line height ---------------------------------------------- */
 
@@ -86,7 +86,7 @@ __attribute__((naked)) void probe(void)
         "bx    r12\n");
 }
 
-#define INJ_MAGIC 0x52444237u   /* bump on every state-layout change */
+#define INJ_MAGIC 0x52444238u   /* bump on every state-layout change */
 #define MAXW      44      /* buffer per displayed line          */
 #define CPL       25      /* fallback: measured by eye at 168px      */
 #define LINE_PX  168      /* label width, measured on hardware       */
@@ -212,9 +212,9 @@ static int char_w8(unsigned char c)
     case '[': case ']': case '-':                    return 38;
     case 'm': case 'w': case 'M': case 'W': case '@': return 88;
     default:
-        if (c >= 'A' && c <= 'Z') return 68;
+        if (c >= 'A' && c <= 'Z') return 72;
         if (c >= '0' && c <= '9') return 60;
-        return 56;                                   /* lower-case average */
+        return 58;                                   /* lower-case average */
     }
 }
 
@@ -225,7 +225,10 @@ static int wrap_one(const char *p, int avail)
     if (avail <= 0) return 0;
 
     int w8 = 0, i = 0, last_space = -1;
-    int limit = LINE_PX * WIDTH_SCALE;
+    /* 4px of margin: the estimate is occasionally a hair narrow and a single
+       character was still overshooting. Erring short is invisible; erring long
+       is not. */
+    int limit = (LINE_PX - 4) * WIDTH_SCALE;
 
     while (i < avail && i < MAXW - 1) {
         unsigned char c = (unsigned char)p[i];
