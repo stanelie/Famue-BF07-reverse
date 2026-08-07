@@ -86,7 +86,7 @@ __attribute__((naked)) void probe(void)
         "bx    r12\n");
 }
 
-#define INJ_MAGIC 0x5244423du   /* bump on every state-layout change */
+#define INJ_MAGIC 0x5244423fu   /* bump on every state-layout change */
 #define MAXW      44      /* buffer per displayed line          */
 #define CPL       25      /* fallback: measured by eye at 168px      */
 #define LINE_PX  168      /* label width, measured on hardware       */
@@ -109,6 +109,8 @@ struct inj_state {
 static struct inj_state st;
 
 void after_render(void);
+static void repaginate(void);
+static void push_back(int32_t off);
 
 /* ---- M4: draw the page ourselves ----------------------------------- */
 
@@ -126,6 +128,29 @@ void after_render(void)
 
     uint32_t n = lv_obj_child_cnt(cont);
     if (n > INJ_LINES) n = INJ_LINES;
+
+    /* The vendor's timer callback is left INTACT so its decode chain and list
+       scrolling keep working -- replacing it wholesale left all three contexts
+       with ln=0 and froze reading_line, so no page turn was ever detectable.
+       We use reading_line only as a SIGNAL (direction, not magnitude). */
+    int line = *(volatile int *)((uint32_t)rd + RD_OFF_LINE);
+    if (st.magic != INJ_MAGIC) {
+        st.magic = INJ_MAGIC; st.calls = 0; st.offset = 0; st.next_offset = 0;
+        st.last_line = -1; st.nlines = 0; st.sp = 0; st.need_prep = 1;
+    }
+    st.calls++;
+    if (st.last_line < 0 || st.nlines == 0) {
+        st.need_prep = 1;
+    } else if (line > st.last_line) {
+        push_back(st.offset);
+        st.offset = st.next_offset;
+        st.need_prep = 1;
+    } else if (line < st.last_line) {
+        if (st.sp) st.offset = st.back[--st.sp];
+        else       st.offset = 0;
+        st.need_prep = 1;
+    }
+    st.last_line = line;
 
     for (uint32_t i = 0; i < n; i++) {
         void *c = lv_obj_get_child(cont, i);
@@ -274,83 +299,6 @@ static void repaginate(void)
 static void push_back(int32_t off)
 {
     if (st.sp < BACKSTACK) st.back[st.sp++] = off;
-}
-
-void reader_body(void)
-{
-    if (st.magic != INJ_MAGIC) {
-        st.magic = INJ_MAGIC;
-        st.calls = 0;
-        st.offset = 0;
-        st.next_offset = 0;
-        st.last_line = -1;
-        st.nlines = 0;
-        st.sp = 0;
-    }
-    st.calls++;
-
-    /* Keep the vendor's three array contexts decoded so its own paging keeps
-       working; the standalone context is ours now. */
-    fw_prep();
-    void *a0 = (void *)FW_CTX_ARRAY;
-    void *a1 = (void *)(FW_CTX_ARRAY + 0x3cc);
-    void *a2 = (void *)(FW_CTX_ARRAY + 2 * 0x3cc);
-    /* Faithful to the original at 0x10049394..0x100493a8: render ONLY if some
-       decode returned 0. The original's `cbnz r0, 0x100493ac` skips the render
-       when the last decode fails; calling it anyway renders an un-decoded
-       context and corrupts the semaphore inside 0x1004922c, which surfaces as
-       ASSERTION FAIL [thread->base.pended_on] in the scheduler. */
-    void *last = 0;
-    if (fw_decode(a0) == 0)      last = a0;
-    else if (fw_decode(a1) == 0) last = a1;
-    else if (fw_decode(a2) == 0) last = a2;
-    if (last) fw_render(last);
-
-    /* Use the vendor's position purely as a page-turn SIGNAL. Its magnitude
-       is its own (8 lines/page); ours is however much text we consumed. */
-    void *rd = reader_obj();
-    if (!rd) return;
-    int line = *(volatile int *)((uint32_t)rd + RD_OFF_LINE);
-
-    /* We are on the DISPLAY thread (this function is a timer callback,
-       registered by _reading_create_content via timer_create at 0x100a1130,
-       period 2 -- hence the ~3 calls/second measured).
-       Never touch the filesystem here: doing so raced ebook_calculate_pages on
-       the ebook thread and produced ASSERTION FAIL [pended_on]. Just record
-       what is wanted and let prepare_hook, which runs on the ebook thread, do
-       the work. */
-    if (st.last_line < 0 || st.nlines == 0) {
-        st.need_prep = 1;
-    } else if (line > st.last_line) {          /* next */
-        push_back(st.offset);
-        st.offset = st.next_offset;
-        st.need_prep = 1;
-    } else if (line < st.last_line) {          /* previous */
-        if (st.sp) st.offset = st.back[--st.sp];
-        else       st.offset = 0;
-        st.need_prep = 1;
-    }
-    st.last_line = line;
-
-    after_render();
-}
-
-/* Replaces 0x1004937c entirely. Reproduces its lock/unlock contract:
-   `push {r4,lr}; mov r4,r0` at entry, `mov r0,r4; pop; b.w unlock` at exit. */
-__attribute__((naked)) void reader_main(void)
-{
-    __asm__ volatile(
-        "push  {r4, lr}\n"
-        "mov   r4, r0\n"
-        "movw  r12, #0xd8b9\n"      /* 0x100fd8b8 | thumb -- lock  */
-        "movt  r12, #0x100f\n"
-        "blx   r12\n"
-        "bl    reader_body\n"
-        "mov   r0, r4\n"
-        "pop   {r4, lr}\n"
-        "movw  r12, #0xd8c3\n"      /* 0x100fd8c2 | thumb -- unlock */
-        "movt  r12, #0x100f\n"
-        "bx    r12\n");
 }
 
 /* ---- page preparation, on the EBOOK thread ------------------------- */
