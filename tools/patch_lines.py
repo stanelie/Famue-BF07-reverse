@@ -41,6 +41,14 @@ DIV_SITES = [
 ]
 DIV_REGS = [0, 1, 2, 3]     # one stub per destination register
 
+# The INVERSE conversion, page -> line, at 0x10049266:
+#     rsb r1, r1, r3, lsl #3      ; r1 = (page-1)*8 - reading_position
+# The x8 is a shift buried inside an RSB, which is why a byte scan for a bare
+# `lsls #3` never found it.  Replaced by a bl to a fifth stub computing
+# r1 = r3*lines - r1.  4 bytes in, 4 bytes out.
+MUL_SITE = 0x10049266
+MUL_STUB_INDEX = 4
+
 # --- Thumb-2 encoders -------------------------------------------------------
 
 
@@ -124,6 +132,16 @@ def sdiv(rd, rn, rm):
                        0xF0F0 | ((rd & 0xF) << 8) | (rm & 0xF))
 
 
+def mul_rr(rd, rn, rm):
+    return struct.pack("<HH", 0xFB00 | (rn & 0xF),
+                       0xF000 | ((rd & 0xF) << 8) | (rm & 0xF))
+
+
+def sub_w(rd, rn, rm):
+    """SUB.W Rd, Rn, Rm (register, no shift) -- does not set flags."""
+    return struct.pack("<HH", 0xEBA0 | (rn & 0xF), ((rd & 0xF) << 8) | (rm & 0xF))
+
+
 def push_pop(reg, pop=False):
     return struct.pack("<H", (0xBC00 if pop else 0xB400) | (1 << reg))
 
@@ -154,12 +172,21 @@ def stub_for(reg, lines):
             + push_pop(scratch, pop=True) + BX_LR)
 
 
+def mul_stub(lines):
+    """r1 = r3 * lines - r1, preserving every other register and the flags."""
+    return (push_pop(0) + mov_w(0, lines) + mul_rr(0, 3, 0)
+            + sub_w(1, 0, 1) + push_pop(0, pop=True) + BX_LR)
+
+
 def build_stub_sector(lines):
     """4 KB image for STUB_FLASH: erased 0xFF with one stub per register."""
     sec = bytearray(b"\xff" * 0x1000)
     for i, reg in enumerate(DIV_REGS):
         code = stub_for(reg, lines)
         sec[i * STUB_STRIDE:i * STUB_STRIDE + len(code)] = code
+    code = mul_stub(lines)
+    off = MUL_STUB_INDEX * STUB_STRIDE
+    sec[off:off + len(code)] = code
     return bytes(sec)
 
 
@@ -226,6 +253,11 @@ def build_patches(lines, new_base, line_height):
            bl(addr, STUB_XIP + DIV_REGS.index(reg) * STUB_STRIDE) + NOP,
            f"page=line/8 -> /{lines} via stub (r{reg})")
           for addr, reg in DIV_SITES],
+
+        # page -> line: `rsb r1, r1, r3, lsl #3` -> bl to the multiply stub
+        (MUL_SITE, bytes.fromhex("c1ebc301"),
+         bl(MUL_SITE, STUB_XIP + MUL_STUB_INDEX * STUB_STRIDE),
+         f"page*8 -> page*{lines} via stub"),
 
         # the other literal pool, in _reading_create_content
         (0x1004A110, le32(0x18018A4C), le32(ctx[0]), "literal standalone"),

@@ -384,3 +384,69 @@ Whichever region survives the workload is the one to relocate into. If neither d
 fixed-address approach is dead and the contexts must come from the firmware's own
 allocator, which needs the literal loads to gain a level of indirection — and those are
 2-byte `ldr rX,[pc,#imm]` instructions with no room to grow.
+
+---
+
+# PSRAM IS A DEAD END; SHRINK THE RECORD INSTEAD
+
+## Both candidate regions are unreliable memory
+
+Canaried under a real workload (boot, read, page turns, music), then scanned every word:
+
+| region | size | words | deviating | verdict |
+|---|---|---|---|---|
+| `0x18210000..0x18280000` | 448 KB | 114,258 | 18,170 (16%) | bit rot |
+| `0x18340000..0x18400000` | 768 KB | 196,571 | 47,606 (24%) | bit rot |
+
+**Every deviation is bit rot, not data.** Classify per *byte*, not per word: `0xa5` decays to
+`85/25/b5/e5` and `0x5a` to `4a/da/7a/3a/fa` — each one or two bits off the canary. An
+earlier classifier judged the whole 32-bit word and mislabelled multi-byte rot (`25a5a525`)
+as a "real write", which badly overstated how much was in use. **Nothing wrote real data
+into either region.**
+
+Note the earlier 17-minute watch of `0x18210000` reported 0 errors across 30 full scans,
+within a single session. The 16% appeared only after a reboot — consistent with PSRAM
+losing refresh across reset. Regardless: writing these regions **garbled the font on a
+stock device**, so the accesses have side effects on live data. PSRAM outside the vendor's
+configured pools is not usable.
+
+## The x8 site that was missed
+
+```
+1004925e  ldr r1, [r4, #0x18]        ; page number
+10049266  rsb r1, r1, r3, lsl #3     ; (page-1)*8 - reading position
+```
+
+This is the **page -> line** inverse, and it was flashed against while still listed as an
+open question. The `x8` is a shift *inside* an RSB, which is why scanning for a bare
+`lsls #3` never found it. Pattern-matching the 32-bit encoding (`hw1` in `0xEA00..0xEBFF`,
+`hw2 & 0x70F0 == 0x00C0`) finds four `lsl #3` sites in the reader; the other three are
+ordinary 8-byte array indexing (`add.w rX, base, idx, lsl #3` then `ldr [rX, #imm]`).
+
+## The approach that needs no new RAM
+
+The line record is `0x74`, of which `0x60` is the text buffer:
+
+```
+rec+0x00  line index      (str.w r3,[fp,#0x2c] ; render: ldr r3,[r5,#-8])
+rec+0x04  file offset     (str.w sl,[fp,#0x30])
+rec+0x08  text, 0x60      (ctx+0x34 ; memcpy len 0x60)
+rec+0x68  length byte     (strb.w r6,[fp,#0x94] ; render: ldrb.w r3,[r5,#0x60])
+rec+0x69..0x73  padding
+```
+
+Records occupy `0x3cc - 0x2c = 0x3a0`. Shrinking the text buffer shrinks the record:
+
+| text buf | record | lines | total | vs 0x3cc |
+|---|---|---|---|---|
+| 0x60 (stock) | 0x6c..0x74 | 8 | 0x38c | fits |
+| 0x48 | 0x54 | **11** | 0x3c8 | fits |
+| 0x40 | 0x4c | **12** | 0x3bc | fits |
+
+So the contexts **stay exactly where they are**. No relocation, no PSRAM, and the context
+literals, both memset sizes and every stride remain stock — ten fewer patch sites.
+
+**Trade-off:** the per-line text cap drops from 96 to 72 bytes. At a 168 px wrap an English
+line is ~30-40 characters, so ASCII has ample room, but multi-byte (UTF-8/CJK) text could
+truncate. The line-length cap at `0x100492da`/`0x100492e0` (`cmp r6,#0x60` / `movge r6,#0x60`)
+must come down with it, or the memcpy will read past what the record can hold.
