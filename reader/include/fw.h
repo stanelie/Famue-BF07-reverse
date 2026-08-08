@@ -59,6 +59,18 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
 /* [OBSERVED] "%sfile seek error (%d)" */
 #define fs_seek  ((int (*)(fs_file_t *, int32_t, int))0x1007fde1)
 
+/* --- allocation --------------------------------------------------------
+ * [OBSERVED] 0x100a0644 names itself in its own error string:
+ *   "couldn't allocate memory (%lu bytes)" ... lv_mem.c ... 'lv_mem_alloc'
+ * A general allocator over LVGL's heap. */
+#define lv_mem_alloc ((void *(*)(uint32_t))0x100a0645)
+
+/* Anchor for our heap pointer: 0x18018e98..0x18019098 (512 bytes) survived a
+ * full workload canary -- reading, paging, AUDIO PLAYBACK and scene changes --
+ * with 0 of 128 words touched. Only 8 bytes are used; everything else lives in
+ * allocated memory, so no further region has to stay free. */
+#define INJ_ANCHOR 0x18018e98
+
 /* --- text layout ------------------------------------------------------ */
 /* WRONG: marked [OBSERVED] from one call site, but a single call consumed a
    whole 512-byte buffer. Do not use.
