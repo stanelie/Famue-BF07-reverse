@@ -86,7 +86,7 @@ __attribute__((naked)) void probe(void)
         "bx    r12\n");
 }
 
-#define INJ_MAGIC 0x52444240u   /* bump on every state-layout change */
+#define INJ_MAGIC 0x52444243u   /* bump on every state-layout change */
 #define MAXW      44      /* buffer per displayed line          */
 #define CPL       25      /* fallback: measured by eye at 168px      */
 #define LINE_PX  168      /* label width, measured on hardware       */
@@ -150,20 +150,32 @@ void after_render(void)
            redisplay the same text;
        (b) the labels are rewritten on every pass regardless, otherwise the
            vendor's own text shows through between our redraws. */
-    if (st.need_prep) {
-        /* preparation still outstanding: ignore further turns for now */
-    } else if (st.last_line < 0 || st.nlines == 0) {
+    if (st.last_line < 0) {
+        /* Establish the baseline ONCE and commit it. The previous version
+           guarded the commit with `if (!need_prep)`, but the initial fill sets
+           need_prep, so last_line stayed -1 forever, every pass re-took this
+           branch, and no turn was ever detected -- the trace showed
+           `prep off=0` repeating with no TURN+ at all. */
+        st.last_line = line;
         st.need_prep = 1;
-    } else if (line > st.last_line) {
-        push_back(st.offset);
-        st.offset = st.next_offset;
-        st.need_prep = 1;
-    } else if (line < st.last_line) {
-        if (st.sp) st.offset = st.back[--st.sp];
-        else       st.offset = 0;
+    } else if (st.need_prep) {
+        /* Preparation outstanding. Deliberately leave last_line alone so a turn
+           arriving now is still seen once the ebook thread has caught up. */
+    } else if (line != st.last_line) {
+        if (line > st.last_line) {
+            push_back(st.offset);
+            st.offset = st.next_offset;
+        } else {
+            if (st.sp) st.offset = st.back[--st.sp];
+            else       st.offset = 0;
+        }
+        {
+            static const char t[] = "%s%s: TURN off->%d\n";
+            fw_log(t, "", "inj", st.offset);
+        }
+        st.last_line = line;
         st.need_prep = 1;
     }
-    if (!st.need_prep) st.last_line = line;   /* only commit once serviced */
 
     for (uint32_t i = 0; i < n; i++) {
         void *c = lv_obj_get_child(cont, i);
@@ -288,8 +300,10 @@ static void repaginate(void)
         return;
     }
 
-    static const char ok[] = "%s%s: repaginate off=%d rc=%d\n";
-    fw_log(ok, "", "inj", st.offset);
+    static const char r1[] = "%s%s: prep off=%d\n";
+    static const char r2[] = "%s%s: prep rc=%d\n";
+    fw_log(r1, "", "inj", st.offset);
+    fw_log(r2, "", "inj", rc);
 
     int pos = 0;
     for (int i = 0; i < INJ_LINES && pos < rc; i++) {
@@ -309,6 +323,12 @@ static void repaginate(void)
     st.next_offset = st.offset + pos;
     st.have_offset = st.offset;
     st.gen++;
+    {
+        static const char r3[] = "%s%s: prep next=%d\n";
+        static const char r4[] = "%s%s: prep nlines=%d\n";
+        fw_log(r3, "", "inj", st.next_offset);
+        fw_log(r4, "", "inj", st.nlines);
+    }
 }
 
 static void push_back(int32_t off)
