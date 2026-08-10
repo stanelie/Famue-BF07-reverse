@@ -401,9 +401,26 @@ So `cmp r6, #0xb` (`LV_EVENT_SCROLL`) in the scroll callback was a red herring:
 the function exists but is not on the turn path, and the view does not actually
 scroll -- the vendor repaints the labels in its timer instead.
 
-**Next step on resume:** find the writer of `reader+0x194` statically -- search
-the image for stores to that offset within the ebook module. That is the true
-input path, and every other route has now been eliminated.
+**That search was done, and came back empty** -- which is itself a result:
+
+- no store to `[rX, #0x194]` anywhere in the image
+- no instruction mentioning `0x194` at all
+- no literal equal to the live field or object address, so the reader object is
+  heap-allocated rather than static
+- the only ebook-module stores with displacements `0x170`-`0x1b0` are stack
+  writes in an unrelated function
+
+So `reader+0x194` is **not a plain field written by ebook code**. It is almost
+certainly inside an embedded sub-structure, reached as a small displacement from
+an interior pointer -- which no search for `0x194` can find. The reading view
+creates a **textarea** (`lv_textarea_set_align: Deprecated` appears in the log),
+so the position may live inside an embedded widget.
+
+**Better lead:** the file size sits at the *static* address `0x1801a090`,
+mirrored at `0x18019e24`, next to the vendor's open file handle (`0x1801a084`).
+That is an ebook context in static memory, and unlike the heap object, code
+touching it IS findable by literal search. Look there for the position writer
+and for the `.bmk` pagination fields.
 
 ## What the firmware tells us about itself
 
