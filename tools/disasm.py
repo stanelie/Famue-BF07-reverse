@@ -6,9 +6,15 @@ import sys
 
 from capstone import CS_ARCH_ARM, CS_MODE_THUMB, Cs
 
+import os
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.environ.get("BF07_ROOT", os.path.dirname(_HERE))
+_BACKUPS = os.environ.get("BF07_BACKUPS", os.path.join(os.path.dirname(_ROOT), "bf07-backups"))
+PORT = os.environ.get("BF07_PORT", "/dev/cu.usbserial-XXXX")
+
 XIP = 0x10000000
-IMG = "$BF07_BACKUPS/fw_code_full.bin"
-SYMS = "$BF07_ROOT/docs/symbols.txt"
+IMG = os.path.join(_BACKUPS, "fw_code_full.bin")
+SYMS = os.path.join(_ROOT, "docs", "symbols.txt")
 
 d = open(IMG, "rb").read()
 md = Cs(CS_ARCH_ARM, CS_MODE_THUMB)

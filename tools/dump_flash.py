@@ -29,7 +29,7 @@ import time
 
 import serial
 
-PORT = "/dev/cu.usbserial-XXXX"
+PORT = os.environ.get("BF07_PORT", "/dev/cu.usbserial-XXXX")
 BAUD = 2000000
 BLOCK = 512
 

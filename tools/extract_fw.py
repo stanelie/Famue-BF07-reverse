@@ -8,9 +8,10 @@ import serial
 import re
 import time
 import json
+import os
 import sys
 
-PORT = '/dev/cu.usbserial-XXXX'
+PORT = os.environ.get("BF07_PORT", "/dev/cu.usbserial-XXXX")
 BAUD = 2000000
 SCRATCH = '/private/tmp/claude-504/-Users-user/5d7d024b-ca45-4829-b929-aa9b9dba425d/scratchpad'
 

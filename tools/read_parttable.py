@@ -40,12 +40,13 @@ Usage:
 import argparse
 import re
 import struct
+import os
 import sys
 import time
 
 import serial
 
-PORT = "/dev/cu.usbserial-XXXX"
+PORT = os.environ.get("BF07_PORT", "/dev/cu.usbserial-XXXX")
 BAUD = 2000000
 PTR_ADDR = 0x1801D684
 MAGIC = 0x54504341          # 'ACPT'

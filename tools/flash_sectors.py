@@ -8,15 +8,21 @@ import struct
 import sys
 import time
 
-sys.path.insert(0, '$BF07_ROOT/tools')
+import os
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.environ.get("BF07_ROOT", os.path.dirname(_HERE))
+_BACKUPS = os.environ.get("BF07_BACKUPS", os.path.join(os.path.dirname(_ROOT), "bf07-backups"))
+PORT = os.environ.get("BF07_PORT", "/dev/cu.usbserial-XXXX")
+
+sys.path.insert(0, os.path.join(_ROOT, 'tools'))
 import serial
 import usb.core
 import usb.util
 from lark_cd import Adfu, OP_EXEC1, OP_WRITE
 
-SPD = "$BF07_WORK/"
+SPD = os.environ.get("BF07_WORK", os.getcwd()) + "/"
 OUT = SPD + "outfull/"
-dump = open("$BF07_BACKUPS/bf07_flash_full_2026-08-05.bin", "rb").read()
+dump = open(os.path.join(_BACKUPS, os.environ.get("BF07_DUMP", "bf07_flash_full.bin")), "rb").read()
 
 JOBS = [
     (0x5D000, OUT + "sector_05d000.bin", [0x260, 0x280, 0x2c0, 0x2e0, 0x300, 0x320, 0x340, 0x440, 0x4c0, 0x540, 0x560, 0x660, 0x800, 0xe20, 0xea0], True),
@@ -50,7 +56,7 @@ def payload_alive():
 
 ALREADY = payload_alive()
 if not ALREADY and not usb.core.find(idVendor=0x10D6, idProduct=0x10D6):
-    s = serial.Serial("/dev/cu.usbserial-XXXX", 2000000, timeout=0.2)
+    s = serial.Serial(PORT, 2000000, timeout=0.2)
     s.write(b"dbg reboot adfu\r\n")
     s.flush()
     time.sleep(1.2)

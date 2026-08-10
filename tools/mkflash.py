@@ -1,17 +1,17 @@
 import sys,re,os
-sys.path.insert(0,'$BF07_ROOT/tools')
+sys.path.insert(0, os.path.join(os.environ.get('BF07_ROOT', os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'tools'))
 import patch_lines as P
 FW0=0x14000; XIP=0x10000000
 CONT_TOP=24; CONT_SUB=24   # container y=12, height=264-12=252
 out=sys.argv[1]; hooks=eval(sys.argv[2])   # {site: symbol_addr}
 bwh=eval(sys.argv[3]) if len(sys.argv)>3 else {}  # sites needing B.W not BL
 os.makedirs(out,exist_ok=True)
-blob=open('$BF07_ROOT/reader/reader.bin','rb').read()
+blob=open(os.path.join(_ROOT,'reader','reader.bin'),'rb').read()
 assert len(blob)<=0x1000, "blob exceeds one sector"
 sec=bytearray(b'\xff'*0x1000); sec[0:len(blob)]=blob
 open(f'{out}/sector_1e7000.bin','wb').write(bytes(sec))
 bs=[i for i in range(0,0x1000,32) if bytes(sec[i:i+32])!=b'\xff'*32]
-stock=open('$BF07_BACKUPS/fw_code_full.bin','rb').read()
+stock=open(os.path.join(_BACKUPS,'fw_code_full.bin'),'rb').read()
 data=bytearray(stock)
 data[0x1004A1FC-XIP:0x1004A1FC-XIP+2]=P.movs_imm8(2,CONT_TOP)
 data[0x1004A222-XIP:0x1004A222-XIP+2]=P.sub_imm8(0,CONT_SUB)
