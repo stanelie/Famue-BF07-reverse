@@ -23,6 +23,9 @@
 #define LINE_PX  168        /* label width, measured on hardware  */
 #define BACKSTACK 48
 #define INJ_MAGIC 0x52444252u
+/* The vendor paginates 8 of its own lines to a page (its reading_line at
+   +0x194 advances by 8 per turn; +0x19c holds its total page count). */
+#define VENDOR_LINES_PER_PAGE 8
 
 /* ---- state ---------------------------------------------------------- */
 
@@ -42,6 +45,9 @@ struct inj_state {
     uint8_t  nxt_valid;
     uint8_t  sp;
     volatile uint8_t need_prep;
+    int32_t  jump_line;               /* absolute seek requested, or -1    */
+    int32_t  scan_line;               /* cache: line reached ...           */
+    int32_t  scan_off;                /* ... at this byte offset           */
     struct page cur;                  /* on screen                         */
     struct page nxt;                  /* pre-rendered, ready to swap in    */
     int32_t  back[BACKSTACK];
@@ -103,6 +109,7 @@ static struct inj_state *state(void)
         n->gen = 1;
         n->last_line = -1;
         n->want = 0;
+        n->jump_line = -1;
     }
     ANCHOR->st = n;
     ANCHOR->magic = INJ_MAGIC;
@@ -291,6 +298,41 @@ static void fill_page(struct page *p, int32_t off)
     p->end = off + pos;
 }
 
+/* Byte offset where the vendor's line N begins.
+ *
+ * The vendor stores only a line index (+0x194) and a total page count
+ * (+0x19c); it never records a byte offset, so this has to be derived. Its
+ * layout honours the file's own line breaks, so a vendor line is a line in the
+ * FILE -- counting newlines reproduces its numbering without emulating its
+ * wrapping. The scan is cached and resumed forward, so paging on from a jump
+ * costs nothing and only a backwards jump rescans.
+ */
+static int32_t offset_of_line(struct inj_state *S, int32_t target)
+{
+    char buf[256];
+    int32_t off = 0, seen = 0;
+
+    if (target <= 0) return 0;
+    if (S->scan_line > 0 && S->scan_line <= target) {
+        off = S->scan_off;                 /* resume, don't restart */
+        seen = S->scan_line;
+    }
+    while (seen < target) {
+        int rc = book_read(off, buf, sizeof buf);
+        if (rc <= 0) break;                /* EOF: clamp to the last page */
+        int i = 0;
+        while (i < rc && seen < target) {
+            if (buf[i] == '\n') seen++;
+            i++;
+        }
+        off += i;
+        if (rc < (int)sizeof buf && seen < target) break;
+    }
+    S->scan_line = seen;
+    S->scan_off = off;
+    return off;
+}
+
 void prepare_body(void)
 {
     /* Services only what the display thread asked for; never creates state. */
@@ -298,6 +340,19 @@ void prepare_body(void)
     struct inj_state *S = ANCHOR->st;
     if (!S->need_prep) return;
     S->need_prep = 0;
+
+    if (S->jump_line >= 0) {
+        int32_t off = offset_of_line(S, S->jump_line);
+        S->jump_line = -1;
+        fill_page(&S->nxt, off);
+        S->nxt_valid = 1;
+        S->want = off;                     /* after_render swaps it in */
+        {
+            static const char j[] = "%s%s: JUMP off=%d\n";
+            fw_log(j, "", "inj", off);
+        }
+        return;
+    }
 
     if (S->want >= 0) {
         if (!S->nxt_valid || S->nxt.start != S->want) {
@@ -352,6 +407,14 @@ static void disable_tts_button(void *cont)
 {
     uint32_t scr = *(volatile uint32_t *)((uint32_t)cont + 4);   /* parent */
     if (scr < 0x01000000) return;
+
+    /* Only while the READING scene is actually on screen. A loose match here
+       froze the device: the geometry test also caught a button in the ebook
+       menu, and re-clearing its CLICKABLE every render pass left the UI
+       unusable. The reading scene's signature is that our label container is
+       the screen's first child. */
+    if ((uint32_t)lv_obj_get_child((void *)scr, 0) != (uint32_t)cont) return;
+
     uint32_t n = lv_obj_child_cnt((void *)scr);
     if (n > 16) n = 16;
     for (uint32_t i = 0; i < n; i++) {
@@ -361,8 +424,8 @@ static void disable_tts_button(void *cont)
         int16_t y1 = *(volatile int16_t *)(c + 0x16);
         int16_t x2 = *(volatile int16_t *)(c + 0x18);
         int16_t y2 = *(volatile int16_t *)(c + 0x1a);
-        if (y1 >= 0 && y1 < 25 && x1 >= 27 && x1 <= 49 &&
-            (x2 - x1) <= 24 && (y2 - y1) <= 24) {
+        /* exactly the measured icon: 16x16 at (33,8) */
+        if (x1 == 33 && y1 == 8 && (x2 - x1) == 15 && (y2 - y1) == 15) {
             *(volatile uint32_t *)(c + 0x1c) &= ~2u;
         }
     }
@@ -370,12 +433,14 @@ static void disable_tts_button(void *cont)
 
 void after_render(void)
 {
-    struct inj_state *S = state();
-    if (!S) return;
+    /* Establish the scene FIRST. state() can allocate, and allocating once per
+       render pass outside the reading scene would leak ~1.1 KB a tick. */
     void *rd = reader_obj();
     if (!rd) return;
     void *cont = *(void **)((uint32_t)rd + RD_OFF_LIST);
     if ((uint32_t)cont < 0x01000000) return;
+    struct inj_state *S = state();
+    if (!S) return;
 
     disable_tts_button(cont);
 
@@ -390,7 +455,16 @@ void after_render(void)
         S->want = 0;
         S->need_prep = 1;
     } else if (S->want < 0 && line != S->last_line) {
-        if (line > S->last_line) {
+        int delta = line - S->last_line;
+        if (delta < 0) delta = -delta;
+        if (delta > VENDOR_LINES_PER_PAGE) {
+            /* More than one vendor page in one step: this is "select page",
+               an ABSOLUTE position, not a turn. Treating every change as a
+               +/-1 turn is why picking page 10 walked one page instead.
+               The offset is resolved on the ebook thread, which owns the file. */
+            S->jump_line = line;
+            S->sp = 0;
+        } else if (delta > 0 && line > S->last_line) {
             push_back(S, S->cur.start);
             S->want = S->cur.end;
         } else {
