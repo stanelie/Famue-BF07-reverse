@@ -114,3 +114,13 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
    [OBSERVED] live at 0x1801a090 and mirrored at 0x18019e24. Exact, so the
    binary-search probe is only a fallback now. */
 #define FW_BOOK_SIZE ((volatile uint32_t *)0x1801a090)
+
+/* Ebook context in static RAM (so, unlike the heap reader object, code that
+   touches it is findable by literal search).
+   [OBSERVED] confirmed live and from both sides of ebook_bmk_init /
+   ebook_calculate_pages, which seek to these header offsets and fs_write them. */
+#define FW_TOTAL_LINES  ((volatile uint32_t *)0x1801a030)  /* lines in the book */
+#define FW_CUR_LINE     ((volatile uint32_t *)0x1801a080)  /* saved position    */
+#define FW_LINES_PER_PG ((volatile uint8_t  *)0x1801a098)  /* divisor, not a shift */
+#define FW_BMK_FILE     ((fs_file_t *)0x1801a0ac)          /* the .bmk handle   */
+#define fs_write ((int (*)(fs_file_t *, const void *, uint32_t))0x1007fd75)

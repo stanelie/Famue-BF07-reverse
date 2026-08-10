@@ -371,6 +371,15 @@ void prepare_body(void)
     if (!S->need_prep) return;
     S->need_prep = 0;
 
+    /* Tell the vendor how many lines a page actually holds.
+     *
+     * ebook_calculate_pages computes pages as (total - 1 + n) / n with a
+     * hardware udiv, where n is this BYTE in RAM -- not the hardcoded /8 shift
+     * that defeated the old constant-patching route. Setting it to our line
+     * count makes the vendor's page numbers, its select-page menu, its totals
+     * and its .bmk index describe the pages we actually draw. */
+    if (*FW_LINES_PER_PG != INJ_LINES) *FW_LINES_PER_PG = INJ_LINES;
+
     /* Detect a different book and resync to ITS saved position.
      *
      * Our state block survives across books (it is recovered by magic, not
@@ -409,10 +418,9 @@ void prepare_body(void)
     }
 
     if (S->jump_line >= 0) {
-        void *rdj = reader_obj();
-        int32_t total = rdj ? (int32_t)(*(volatile uint32_t *)((uint32_t)rdj + 0x19c)
-                                        * VENDOR_LINES_PER_PAGE) : 0;
-        int32_t off = offset_of_line(S, S->jump_line, total);
+        /* total LINES, read straight from the ebook context -- no more
+           deriving it from a page count times an assumed page size */
+        int32_t off = offset_of_line(S, S->jump_line, (int32_t)*FW_TOTAL_LINES);
         S->jump_line = -1;
         fill_page(&S->nxt, off);
         S->nxt_valid = 1;
@@ -604,7 +612,7 @@ void after_render(void)
     } else if (S->want < 0 && line != S->last_line) {
         int delta = line - S->last_line;
         if (delta < 0) delta = -delta;
-        if (delta > VENDOR_LINES_PER_PAGE) {
+        if (delta > (int)*FW_LINES_PER_PG) {
             /* More than one vendor page in one step: this is "select page",
                an ABSOLUTE position, not a turn. Treating every change as a
                +/-1 turn is why picking page 10 walked one page instead.
