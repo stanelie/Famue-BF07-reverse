@@ -35,6 +35,7 @@ struct page {
 
 struct inj_state {
     uint32_t magic;
+    uint32_t gen;                     /* generation: newest block wins     */
     uint32_t calls;
     int32_t  last_line;               /* vendor position: a SIGNAL only    */
     int32_t  want;                    /* offset we want shown, or -1       */
@@ -49,16 +50,60 @@ struct inj_state {
 struct inj_anchor { uint32_t magic; struct inj_state *st; };
 #define ANCHOR ((volatile struct inj_anchor *)INJ_ANCHOR)
 
+/* The anchor lives at 0x18018e98, which measurement showed is inside the
+   READING SCENE's own data -- _reading_unload_resource owns 0x18018e20 /
+   0x18018e35 / 0x18018e95, three bytes below us, and clears the area. Pressing
+   the speaker icon unloads scene resources, wiping the anchor, so we allocated
+   a fresh state and restarted the book at offset 0 while the vendor's own page
+   counter carried on. That is the reported bug.
+
+   The state BLOCK survives: lv_mem_alloc'd and never freed. Only the pointer
+   is lost. So when the anchor is gone, search the LVGL heap for the newest
+   block still carrying our magic and adopt it. Nothing durable is required.
+
+   Bounds are the observed allocation window (both live states seen at
+   0x010059xx / 0x010086xx); the ADFU payload loads at 0x01010000, so this is
+   mapped RAM and safe to read. */
+#define HEAP_LO 0x01000000u
+#define HEAP_HI 0x01020000u
+
+static struct inj_state *recover(void)
+{
+    struct inj_state *best = 0;
+    uint32_t best_gen = 0;
+    for (uint32_t a = HEAP_LO; a < HEAP_HI - sizeof(struct inj_state); a += 4) {
+        struct inj_state *c = (struct inj_state *)a;
+        if (c->magic != INJ_MAGIC) continue;
+        /* cheap plausibility check so heap junk can't impersonate a state */
+        if (c->cur.nlines > INJ_LINES || c->nxt.nlines > INJ_LINES) continue;
+        if (c->cur.start < 0 || c->sp > BACKSTACK) continue;
+        if (c->gen >= best_gen) { best_gen = c->gen; best = c; }
+    }
+    return best;
+}
+
 static struct inj_state *state(void)
 {
     if (ANCHOR->magic == INJ_MAGIC && ANCHOR->st) return ANCHOR->st;
-    void *p = lv_mem_alloc(sizeof(struct inj_state));
-    if (!p) return 0;
-    fw_memset(p, 0, sizeof(struct inj_state));
-    struct inj_state *n = (struct inj_state *)p;
-    n->magic = INJ_MAGIC;
-    n->last_line = -1;
-    n->want = 0;
+
+    struct inj_state *n = recover();
+    if (n) {
+        /* Adopted an existing page: redraw where the reader actually was.
+           Bump the generation so this block outranks any stale twin later. */
+        n->gen++;
+        n->want = n->cur.start;
+        n->nxt_valid = 0;
+        n->need_prep = 1;
+    } else {
+        void *p = lv_mem_alloc(sizeof(struct inj_state));
+        if (!p) return 0;
+        fw_memset(p, 0, sizeof(struct inj_state));
+        n = (struct inj_state *)p;
+        n->magic = INJ_MAGIC;
+        n->gen = 1;
+        n->last_line = -1;
+        n->want = 0;
+    }
     ANCHOR->st = n;
     ANCHOR->magic = INJ_MAGIC;
     return n;
@@ -286,6 +331,43 @@ static void push_back(struct inj_state *S, int32_t off)
     if (S->sp < BACKSTACK) S->back[S->sp++] = off;
 }
 
+/* Disable the TTS (speaker) button.
+ *
+ * It starts the vendor's text-to-speech, which walks ITS OWN reading-line
+ * counter automatically. Our reader treats a change in that counter as a page
+ * turn, so the page ran away on its own; and the scene resource unload it
+ * triggers clears the anchor. The two position systems -- our byte offsets and
+ * the vendor's line index -- are not reconcilable, so the button is turned off.
+ *
+ * It is a 16x16 icon at (33,8), a direct child of the SCREEN (not of the status
+ * bar container), sitting just right of the back button. Identified by geometry
+ * rather than child index, and re-applied every render pass because the scene
+ * reallocates its objects -- writing the flag once from the debugger only ever
+ * hit a stale object.
+ *
+ * lv_obj_t: coords at +0x14 (x1,y1,x2,y2 as int16), flags at +0x1c.
+ * Clearing LV_OBJ_FLAG_CLICKABLE (1<<1) takes it out of hit-testing.
+ */
+static void disable_tts_button(void *cont)
+{
+    uint32_t scr = *(volatile uint32_t *)((uint32_t)cont + 4);   /* parent */
+    if (scr < 0x01000000) return;
+    uint32_t n = lv_obj_child_cnt((void *)scr);
+    if (n > 16) n = 16;
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t c = (uint32_t)lv_obj_get_child((void *)scr, i);
+        if (c < 0x01000000) continue;
+        int16_t x1 = *(volatile int16_t *)(c + 0x14);
+        int16_t y1 = *(volatile int16_t *)(c + 0x16);
+        int16_t x2 = *(volatile int16_t *)(c + 0x18);
+        int16_t y2 = *(volatile int16_t *)(c + 0x1a);
+        if (y1 >= 0 && y1 < 25 && x1 >= 27 && x1 <= 49 &&
+            (x2 - x1) <= 24 && (y2 - y1) <= 24) {
+            *(volatile uint32_t *)(c + 0x1c) &= ~2u;
+        }
+    }
+}
+
 void after_render(void)
 {
     struct inj_state *S = state();
@@ -294,6 +376,8 @@ void after_render(void)
     if (!rd) return;
     void *cont = *(void **)((uint32_t)rd + RD_OFF_LIST);
     if ((uint32_t)cont < 0x01000000) return;
+
+    disable_tts_button(cont);
 
     uint32_t n = lv_obj_child_cnt(cont);
     if (n > INJ_LINES) n = INJ_LINES;

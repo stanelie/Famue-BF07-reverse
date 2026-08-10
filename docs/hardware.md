@@ -57,3 +57,8 @@ transient states; `ioreg -p IOUSB -l -w 0` takes ~0.03 s. Look for `"idVendor" =
 `device list` shows both `SD` and `SD1` controllers. The microSD card is on **SD1**
 (mounted `SD1:`); `SD` (MMC_0) is unpopulated. This matters — see
 [dead-ends.md](dead-ends.md) for why it kills the SD-card OTA path.
+
+## Input
+
+The BF07 has a **touchscreen** in addition to its physical buttons; the reading
+status bar icons are touch targets, so LVGL hit-testing flags apply to them.

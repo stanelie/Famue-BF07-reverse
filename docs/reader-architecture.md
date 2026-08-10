@@ -241,3 +241,78 @@ fields into one integer works, but give each field enough room: packing
 `why*10000 + px*100 + chars` let a `px` above 99 carry into the reason field and
 corrupt it. The data was still recoverable only because width and character count
 must agree at roughly 7 px per character.
+
+---
+
+# The speaker (TTS) button, and state recovery
+
+## Symptom
+
+Pressing the speaker icon in the reading status bar restarted the book from the
+beginning while the vendor's page counter carried on unchanged.
+
+## What was actually happening
+
+Two separate faults, found by watching state over UART across a real press:
+
+1. **The anchor is not ours.** `0x18018e98` sits inside the READING SCENE's own
+   data. Searching the image for literals in that range found
+   `_reading_unload_resource` owning `0x18018e20`, `0x18018e35` and
+   `0x18018e95` -- three bytes below the anchor -- and `txt_analy_one_line`
+   using `0x18018e18`/`0x18018e1c`. The button triggers a scene resource unload,
+   which clears the area; a live trace caught the anchor holding `0x0000005d`,
+   a real value rather than a memset. The original canary passed because it
+   covered reading, paging, audio and scene changes, but never this path.
+2. **TTS drives the vendor's line counter.** With the anchor fixed, the page
+   still walked away on its own: the trace showed `reading_line` climbing
+   1040 -> 1088 -> 1136 with no user input. Our reader treats a change in that
+   counter as a page-turn signal.
+
+## State recovery (fix for 1)
+
+No durable RAM is needed. The state block is `lv_mem_alloc`'d and **never
+freed** -- only the 8-byte pointer to it is lost. When the anchor is missing,
+`recover()` scans the LVGL heap (`0x01000000`-`0x01020000`, the observed
+allocation window) for the newest block carrying our magic and adopts it,
+resuming at `cur.start`. A `gen` counter incremented on each adoption keeps a
+stale twin from outranking the live block, and plausibility checks on line
+counts and offsets stop heap junk impersonating a state. Confirmed working: a
+trace showed `gen` climbing 3 -> 4 -> 5 -> 6 across repeated presses.
+
+## Disabling the button (fix for 2)
+
+Our position is a byte offset into the file; TTS's is a line index into the
+vendor's pagination. They are not reconcilable without adopting the vendor's
+line model -- the very thing replaced to get 12 reflowed lines. So the button
+is disabled.
+
+It is a **16x16 icon at (33,8), a direct child of the SCREEN**, not of the
+status bar container, sitting just right of the back button.
+`disable_tts_button()` finds it by geometry and clears
+`LV_OBJ_FLAG_CLICKABLE` (`1<<1`).
+
+## Two traps this exposed
+
+- **The scene reallocates its objects.** `screen` moved from `0x0100497c` to
+  `0x0100498c` between a dump and the next press. Flags written from the
+  debugger land on stale objects and appear to do nothing -- the tests read as
+  negative when they were merely invalid. The flag must be re-applied from the
+  render pass, every tick.
+- **A gap in the statics table is not free RAM.** Canaries written to eight
+  addresses chosen that way crashed the device: one belonged to the audio
+  player. Verify a region is unused *at runtime* before writing to it.
+
+## LVGL v8 object layout on this build
+
+Established by decoding the screen's own extent (`0x010700af` = x2 175, y2 263,
+exactly the 176x264 panel):
+
+```
++0x00 class_p   +0x04 parent   +0x08 spec_attr   +0x0c styles
++0x14 coords: x1,y1,x2,y2 as int16      +0x1c flags
+spec_attr: +0x00 children**  +0x04 child_cnt
+LV_OBJ_FLAG_HIDDEN = 1<<0     LV_OBJ_FLAG_CLICKABLE = 1<<1
+```
+
+The reading screen has 6 children: [0] the 18-child label container, [3] the
+status bar (back button, page counter, two icons), [4] the TTS icon.
