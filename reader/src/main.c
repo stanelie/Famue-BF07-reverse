@@ -106,22 +106,90 @@ static int char_w8(unsigned char c)
     }
 }
 
-static int wrap_one(const char *p, int avail)
-{
-    if (avail <= 0) return 0;
-    int w8 = 0, i = 0, last_space = -1;
-    int limit = (LINE_PX - 4) * 8;          /* margin: erring short is invisible */
+/* REFLOW. Measured on a real book: 143 of 178 lines ended at a newline in the
+   FILE and 84 of those were blank, so half the page was the file's own layout
+   and the text lines ran ~16 chars against a 24-char width. So a single newline
+   is soft -- it becomes a space -- and only a blank line is a real break.
 
-    while (i < avail && i < MAXW - 1) {
+   Emits the line into `out` and returns SOURCE bytes consumed, so the caller
+   keeps a true file offset without a second buffer or an index map.
+   why: 1 = paragraph break, 2 = ran out of width, 3 = hit MAXW, 4 = end of buf */
+#define WHY_PARA 1
+#define WHY_WIDTH 2
+#define WHY_MAXW 3
+#define WHY_EOB 4
+
+static int wrap_one(const char *p, int avail, char *out, int indent,
+                    int *px_out, int *why_out)
+{
+    *px_out = 0;
+    *why_out = 0;
+    out[0] = 0;
+    if (avail <= 0) return 0;
+
+    const int limit = (LINE_PX - 4) * 8;    /* margin: erring short is invisible */
+    int i = 0, k = 0, w8 = 0;
+    int sp_src = -1, sp_out = -1;           /* last space, in both spaces */
+
+    for (int n = 0; n < indent && k < MAXW - 1; n++) {
+        out[k++] = ' ';
+        w8 += char_w8(' ');
+    }
+
+    while (i < avail && k < MAXW - 1) {
         unsigned char c = (unsigned char)p[i];
-        if (c == '\n') return i + 1;
-        if (c == ' ') last_space = i;
+
+        if (c == '\r') { i++; continue; }
+
+        if (c == '\n') {
+            /* look ahead: a second newline (blank line) is a paragraph break */
+            int j = i + 1, nl = 1;
+            while (j < avail && (p[j] == '\r' || p[j] == ' ' || p[j] == '\t')) j++;
+            if (j < avail && p[j] == '\n') nl = 2;
+
+            if (nl == 2) {
+                while (j < avail && (p[j] == '\n' || p[j] == '\r' ||
+                                     p[j] == ' ' || p[j] == '\t')) j++;
+                out[k] = 0;
+                *px_out = w8 / 8;
+                *why_out = WHY_PARA;
+                return j;
+            }
+            if (j >= avail) {              /* can't tell yet -- stop cleanly */
+                out[k] = 0;
+                *px_out = w8 / 8;
+                *why_out = WHY_EOB;
+                return i + 1;
+            }
+            c = ' ';                        /* soft: join the lines */
+            i = j - 1;                      /* resume at the next real char */
+        }
+
+        if (c == ' ' || c == '\t') {
+            if (k == 0) { i++; continue; }  /* no leading space on a line */
+            if (k > 0 && out[k - 1] == ' ') { i++; continue; }  /* collapse runs */
+            c = ' ';
+        }
+
         w8 += char_w8(c);
-        if (w8 > limit) break;
+        if (w8 > limit) { *why_out = WHY_WIDTH; break; }
+
+        if (c == ' ') { sp_src = i; sp_out = k; }
+        out[k++] = (char)c;
         i++;
     }
-    if (i >= avail) return avail;
-    if (last_space > 0) return last_space + 1;
+
+    *px_out = w8 / 8;
+    if (!*why_out) *why_out = (i >= avail) ? WHY_EOB : WHY_MAXW;
+
+    if (i >= avail && *why_out == WHY_EOB) { out[k] = 0; return i; }
+
+    /* break at the last space so words stay whole */
+    if (sp_out > 0) {
+        out[sp_out] = 0;
+        return sp_src + 1;
+    }
+    out[k] = 0;
     return i > 0 ? i : 1;
 }
 
@@ -129,7 +197,8 @@ static int wrap_one(const char *p, int avail)
 
 static void fill_page(struct page *p, int32_t off)
 {
-    char raw[512];
+    /* reflow packs ~50% more text per page, so the read window grew with it */
+    char raw[768];
     p->start = off;
     p->nlines = 0;
     int rc = book_read(off, raw, sizeof raw);
@@ -142,18 +211,37 @@ static void fill_page(struct page *p, int32_t off)
     if (rc <= 0) { p->end = off; return; }
 
     int pos = 0;
+    int blank = 0;                  /* a paragraph break owes a blank line */
     for (int i = 0; i < INJ_LINES && pos < rc; i++) {
-        int take = wrap_one(raw + pos, rc - pos);
-        if (take <= 0) break;
-        int k = 0;
-        for (int j = 0; j < take && k < MAXW - 1; j++) {
-            char ch = raw[pos + j];
-            if (ch == '\n' || ch == '\r') continue;
-            p->text[i][k++] = ch;
+        /* Spend a real line on the paragraph gap -- reflow consumes the file's
+           blank line, so the separation has to be put back deliberately.
+           Never at the top of a page: a page opening on blank looks broken. */
+        if (blank && i > 0) {
+            p->text[i][0] = 0;
+            p->nlines++;
+            blank = 0;
+            continue;
         }
-        p->text[i][k] = 0;
+        blank = 0;
+
+        int px = 0, why = 0;
+        int take = wrap_one(raw + pos, rc - pos, p->text[i], 0, &px, &why);
+        if (take <= 0) break;
+        /* Ran off the end of the read window with more file behind it: the
+           line would break mid-word, so drop it rather than show a fragment. */
+        if (why == WHY_EOB && rc == (int)sizeof raw) { p->text[i][0] = 0; break; }
         pos += take;
         p->nlines++;
+        blank = (why == WHY_PARA);
+        {
+            /* one int per log call -- fw_log takes exactly one.
+               px can exceed 99, so it gets its own decade: the first packing
+               let px*100 carry into the why field and corrupted the reason. */
+            static const char rl[] = "%s%s: L why*100000+px*100+chars=%d\n";
+            int n = 0;
+            while (p->text[i][n]) n++;
+            fw_log(rl, "", "inj", why * 100000 + px * 100 + n);
+        }
     }
     p->end = off + pos;
 }

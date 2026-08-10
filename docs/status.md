@@ -20,9 +20,24 @@ Written to be honest rather than encouraging. If you're picking this up, read th
 | Payload upload via `write_mem` | ✅ |
 | **Starting the payload (handoff)** | ✅ `cd 20` @ 0x01010000 |
 | **Reading flash over ADFU** | ✅ byte-identical to the serial dump, 693 KB/s |
-| **Writing anything to flash** | ⚠️ primitives known (`ws`/`es`), untested |
+| **Writing flash** | ✅ 32-byte transactions, plaintext + address bit 31 |
+| **Verifying a write byte-exactly** | ✅ ECB no tweak: unchanged blocks re-encrypt identically |
+| **Reverting to stock exactly** | ✅ zero differing blocks, done repeatedly |
+| **Symbol recovery (1267 functions)** | ✅ from the firmware's own log calls |
+| **Running our own code on the device** | ✅ at XIP `0x101d3000` |
+| **A replacement ebook reader** | ✅ reflow, pagination, pre-render, back-paging |
 
-## The blocker — identified 2026-08-05
+The write path and its rules are documented in [flashing.md](flashing.md).
+
+## Still open
+
+- Writing the whole `fw0_sys` partition at once (only individual sectors so far).
+- Any recovery from firmware that fails **before** the shell starts. Keep serial wired.
+- Exact glyph metrics: the reader estimates character widths rather than calling
+  `bitmap_font_get_glyph_dsc` (`0x100decbc`), so a line can occasionally overshoot by
+  one character.
+
+## Historical: the blocker as it stood on 2026-08-05
 
 **`CDB[0]` is a constant escape byte `0xCD`; the opcode goes in `CDB[1]`.**
 Every command this project ever sent put the opcode in `CDB[0]`, so the ROM

@@ -1,3 +1,12 @@
+> **Superseded.** This documents the constant-patching route to more lines per page,
+> which was pushed as far as it goes and then abandoned. The reader stores its position
+> as a line index and derives the page as `line / 8` at 43 sites, and
+> `ebook_calculate_pages` loops on exact equality — so changing the divisor makes
+> repagination never terminate. Lines per page is also an array bound, not a display
+> limit. What replaced it: a **replacement reader** injected into free flash, which owns
+> its own wrapping and pagination — see [reader-architecture.md](reader-architecture.md).
+> Kept because the failures here are the reason the current design looks the way it does.
+
 # Increasing lines per page (the full, correct recipe)
 
 Raising `cmp r3, #7` alone **corrupts memory**. This document records why, and what the

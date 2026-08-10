@@ -1,15 +1,18 @@
 # Famue BF07 — Reverse Engineering Notes
 
-Research notes on the **Famue BF07**, a 2.7" e-ink e-reader / audio player, with the
-goal of modifying its ebook renderer (line spacing, reflow, hyphenation).
+Research notes and working code for the **Famue BF07**, a 2.7" e-ink e-reader / audio
+player. The goal was a better ebook reader; the result is a **replacement reader
+injected into the vendor firmware**.
 
 Everything here was derived from a live device over its debug UART plus static analysis
-of publicly available files. No proprietary source was used.
+of publicly available files. No proprietary source was used, and no vendor firmware is
+redistributed here — the tools read firmware from the user's own device.
 
-> **Status: analysis complete, modification not yet achieved.**
-> The firmware is fully understood and the exact bytes to change are known. What is
-> missing is a working *write* path. See [docs/status.md](docs/status.md) for an honest
-> account of what works, what doesn't, and what was ruled out.
+> **Status: a replacement ebook reader is running on the device.**
+> Read/write/verify/restore over ADFU all work. The injected reader draws 12 reflowed
+> lines per page with a pre-rendered next page, and reverting to stock is byte-exact.
+> See [docs/status.md](docs/status.md) for what is and isn't done, and
+> [docs/dead-ends.md](docs/dead-ends.md) for what was ruled out.
 
 ## The device
 
@@ -29,6 +32,9 @@ of publicly available files. No proprietary source was used.
 | Doc | Contents |
 |---|---|
 | [docs/status.md](docs/status.md) | What works, what's blocked, what was ruled out |
+| [docs/flashing.md](docs/flashing.md) | **Backup, restore, patch** — the complete write path and its rules |
+| [docs/reader-architecture.md](docs/reader-architecture.md) | The replacement reader: threading, memory, pre-render, reflow |
+| [docs/reader-map.md](docs/reader-map.md) | Map of the vendor ebook app (lifecycle, scenes, pagination, input) |
 | [docs/hardware.md](docs/hardware.md) | Board, UART, chip identification |
 | [docs/debug-shell.md](docs/debug-shell.md) | The Zephyr shell: commands, quirks, traps |
 | [docs/firmware-extraction.md](docs/firmware-extraction.md) | How to dump the decrypted firmware |
@@ -46,13 +52,25 @@ of publicly available files. No proprietary source was used.
 | [tools/extract_fw.py](tools/extract_fw.py) | Dump decrypted firmware over UART via `dbg mdw` |
 | [tools/ota_tool.py](tools/ota_tool.py) | Build/verify `AOTA` OTA images |
 | [tools/fwdis.py](tools/fwdis.py) | ARM Thumb-2 disassembler for the extracted image |
+| [tools/disasm.py](tools/disasm.py) | Annotated disassembler, resolves `bl` targets against `symbols.txt` |
+| [tools/extract_symbols.py](tools/extract_symbols.py) | Recovers 1267 function names from the firmware's own log calls |
+| [tools/mkflash.py](tools/mkflash.py) | Builds a verifying sector flasher from a patch table |
+| [tools/lark_cd.py](tools/lark_cd.py) | LARK ADFU host implementation (CBW framing, `cd` opcodes) |
+| [reader/](reader/) | The replacement ebook reader — C, built for XIP `0x101d3000` |
 
 ## Key results
 
+- **A replacement ebook reader running on the device** — own wrapping, reflow,
+  pagination and pre-render, injected into 53 KB of free space in the XIP partition.
+- **1267 firmware functions recovered by name**, because every function passes its own
+  name to the logger. This turned static analysis from guesswork into map-reading.
+- **Full read/write/verify/restore of flash over ADFU**, byte-exact in both directions.
 - **Full engineering shell** over UART at **2,000,000 baud**.
 - **Byte-exact decrypted firmware dump** (1,966,080 B = the whole `fw0_sys` partition),
   verified 20/20 against the live device.
 - **Exact patch offsets** for the text layout — wrap width, lines/page, word-break set.
+  (Constant-patching turned out to be a dead end for line count; see
+  [docs/ebook-more-lines.md](docs/ebook-more-lines.md) for why, and what replaced it.)
 - **OTA container format** reverse engineered by hand, then confirmed field-for-field
   against Actions' own `build_ota_image.py`.
 - **LARK ADFU protocol** recovered from `HardwareEx.dll` — CBW framing, valid opcodes,

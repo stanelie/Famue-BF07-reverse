@@ -39,7 +39,12 @@ an allocation bound. Wrap width (`0x4903e`) is the remaining safe target.
 Limitation: most interesting behaviour is not a constant. Lines-per-page looked
 like one and was an array bound.
 
-## Route B — new code in free space (recommended)
+> **Update:** Route B was taken and works. A replacement reader now runs from the
+> padding at `0x1e7000`. Routes A, C and D below are kept for the reasoning; the
+> current state is in [reader-architecture.md](reader-architecture.md) and the write
+> path in [flashing.md](flashing.md).
+
+## Route B — new code in free space (TAKEN — this is what runs today)
 
 `fw0_sys` has **53 KB of unused `0xFF` padding at `0x1e7000`–`0x1f4000`** —
 inside the XIP-mapped, hardware-encrypted partition, so code written there
@@ -82,14 +87,23 @@ does not currently do:
 whole app. It is Route B plus a loader — worth doing only after Route B works,
 and its real payoff is iteration speed (no flash write per change).
 
-## Suggested order
+## Done
 
-1. Wrap width via Route A — safe, immediate, tests the remaining constant.
-2. Build the Route B toolchain: assemble a trivial routine into the padding,
-   redirect one call, confirm it runs. Small and low risk.
-3. Reimplement line layout properly in the padding — spacing, wrapping,
-   hyphenation, unbound by the 8-line array.
-4. Optionally add the SD loader (Route D) for fast iteration.
+1. ~~Wrap width via Route A~~ — done, then superseded by owning layout outright.
+2. ~~Route B toolchain~~ — done: C compiled for XIP, `bl` redirection, verified flashing.
+3. ~~Reimplement line layout~~ — done: own wrapping, reflow, pagination, pre-render,
+   back-paging, 12 lines unbound by the vendor's 8-line array.
+
+## Next
+
+1. **Exact glyph metrics** — call `bitmap_font_get_glyph_dsc` (`0x100decbc`) instead of
+   estimating character widths. Fixes the occasional one-character overshoot and lets
+   lines fill confidently to the margin.
+2. **Hyphenation** — the original goal, and now trivially ours to implement: nothing in
+   the firmware does it, and we own the wrapper.
+3. **User-facing backup/restore/patch tool** — spec in [flashing.md](flashing.md).
+4. **Font size / line count as user settings**, rather than compile-time constants.
+5. Optionally the SD loader (Route D) for fast iteration without a flash write.
 
 ## For a user-facing tool
 
