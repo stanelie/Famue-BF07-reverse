@@ -48,6 +48,7 @@ struct inj_state {
     int32_t  jump_line;               /* absolute seek requested, or -1    */
     uint32_t book_sig;                /* identity of the open book         */
     int32_t  size;                    /* file size, found once per book    */
+    int32_t  last_sy;                 /* container scroll offset, observed */
     struct page cur;                  /* on screen                         */
     struct page nxt;                  /* pre-rendered, ready to swap in    */
     int32_t  back[BACKSTACK];
@@ -306,6 +307,12 @@ static int32_t book_size(struct inj_state *S)
     char b;
     int32_t lo = 0, hi = 1 << 23;              /* 8 MB ceiling */
     if (S->size > 0) return S->size;
+    /* The vendor already knows it -- it logs "open ebook ok, size: N" -- so
+       take the exact value and skip the probe entirely. */
+    {
+        uint32_t v = *FW_BOOK_SIZE;
+        if (v > 0 && v < 0x400000u) { S->size = (int32_t)v; return S->size; }
+    }
     while (lo < hi) {
         int32_t mid = lo + (hi - lo + 1) / 2;
         if (book_read(mid - 1, &b, 1) > 0) lo = mid;
@@ -466,6 +473,56 @@ __attribute__((naked)) void prepare_hook(void)
         "pop   {r4, r5, pc}\n");
 }
 
+/* ---- scroll probe: stage 1 of owning input -------------------------- */
+
+/* Detour on _reading_scroll_event_cb (0x10049684).
+ *
+ * Page turns never reach the ebook thread -- captured message traffic shows
+ * open (cmd 4,5), the menu (cmd 3) and back (cmd 12), but nothing at all for a
+ * turn. They arrive here instead, as LV_EVENT_SCROLL (0x0b): the reading view
+ * is a tall scrolled container and reading_line is derived from where it sits.
+ *
+ * This first version only reports, so the takeover is built on measurement
+ * rather than assumption: event code, the container's scroll offset and the
+ * vendor's line, once per event.
+ */
+void scroll_probe(void *e)
+{
+    unsigned code = lv_event_get_code(e);
+    void *rd = reader_obj();
+    int32_t sy = 0, line = -1;
+    if (rd) {
+        uint32_t cont = *(volatile uint32_t *)((uint32_t)rd + RD_OFF_LIST);
+        line = *(volatile int32_t *)((uint32_t)rd + RD_OFF_LINE);
+        if (cont >= 0x01000000) {
+            uint32_t spec = *(volatile uint32_t *)(cont + 8);
+            if (spec >= 0x01000000)
+                sy = *(volatile int32_t *)(spec + 0x14);
+        }
+    }
+    {
+        static const char m[] = "%s%s: SCROLL code=%d\n";
+        fw_log(m, "", "inj", (int)code);
+        static const char n[] = "%s%s: SCROLL sy=%d\n";
+        fw_log(n, "", "inj", sy);
+        static const char o[] = "%s%s: SCROLL line=%d\n";
+        fw_log(o, "", "inj", line);
+    }
+}
+
+/* Replicates the original prologue, then re-enters it past the patched bytes. */
+__attribute__((naked)) void scroll_hook(void)
+{
+    __asm__ volatile(
+        "push  {r0-r3, lr}\n"
+        "bl    scroll_probe\n"
+        "pop   {r0-r3, lr}\n"
+        "push.w {r4, r5, r6, r7, r8, r9, lr}\n"   /* the overwritten insn */
+        "movw  r12, #0x9689\n"                    /* 0x10049688 | thumb  */
+        "movt  r12, #0x1004\n"
+        "bx    r12\n");
+}
+
 /* ---- drawing and turn detection (display thread) -------------------- */
 
 static void push_back(struct inj_state *S, int32_t off)
@@ -577,6 +634,21 @@ void after_render(void)
         S->nxt_valid = 0;
         S->want = -1;
         S->need_prep = 1;               /* pre-render the following page */
+    }
+
+    /* Does a page turn move the container's scroll offset? If it does, turns
+       can be taken from the scroll position in this very pass -- no vendor line
+       and no event callback, which is what owning input actually needs. */
+    {
+        uint32_t spec = *(volatile uint32_t *)((uint32_t)cont + 8);
+        if (spec >= 0x01000000) {
+            int32_t sy = *(volatile int32_t *)(spec + 0x14);
+            if (sy != S->last_sy) {
+                S->last_sy = sy;
+                static const char sm[] = "%s%s: SY=%d\n";
+                fw_log(sm, "", "inj", sy);
+            }
+        }
     }
 
     /* Always write the labels: the vendor fills them on every render, so

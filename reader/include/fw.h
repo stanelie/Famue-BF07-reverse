@@ -108,3 +108,9 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
 #define LINE_H_BASE     1      /* the +1 in `fp = [r4+0x1de] + literal` */
 
 #endif /* FW_H */
+#define lv_event_get_code ((uint32_t (*)(void *))0x100f6871)   /* [OBSERVED] reading scroll cb tests its result against 0x0b = LV_EVENT_SCROLL */
+
+/* Book file size, kept by ebook_file_init ("open ebook ok, size: 495465!").
+   [OBSERVED] live at 0x1801a090 and mirrored at 0x18019e24. Exact, so the
+   binary-search probe is only a fallback now. */
+#define FW_BOOK_SIZE ((volatile uint32_t *)0x1801a090)

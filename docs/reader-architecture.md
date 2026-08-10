@@ -379,3 +379,64 @@ jumps and position are ours, while the vendor's resource-built widgets are still
 used for drawing (we already fill them). At that point nothing is read from
 vendor state and the coupling bugs cannot recur; replacing the widgets
 themselves becomes optional polish rather than a prerequisite.
+
+---
+
+# Session state, 2026-08-10 (pause point)
+
+## The input path is still unidentified
+
+Owning input was the plan; it is blocked on finding where a page turn actually
+comes from. Four candidates were tested and **all four are ruled out by
+measurement**:
+
+| candidate | result |
+|---|---|
+| ebook-thread message | no message on a turn (open = cmd 4,5; menu = cmd 3; back = cmd 12; turns absent) |
+| `_reading_scroll_event_cb` (`0x10049684`) | detour installed and byte-verified in flash; **never fires** on a turn |
+| container scroll offset (`spec_attr+0x14`) | logged on change from the render pass; **never changes** on a turn |
+| a vendor callback logging its own name | nothing logged but `sys_wake_lock`/`unlock`, then `reading_line` has moved |
+
+So `cmp r6, #0xb` (`LV_EVENT_SCROLL`) in the scroll callback was a red herring:
+the function exists but is not on the turn path, and the view does not actually
+scroll -- the vendor repaints the labels in its timer instead.
+
+**Next step on resume:** find the writer of `reader+0x194` statically -- search
+the image for stores to that offset within the ebook module. That is the true
+input path, and every other route has now been eliminated.
+
+## What the firmware tells us about itself
+
+`ebook_file_init` and `ebook_bmk_init` print their own state, which is worth
+more than the disassembly:
+
+```
+ebook_file_init: open ebook ok, size: 495465!
+ebook_file_init: ebook path[39]: /SD1://Neuromancer - William Gibson.txt
+ebook_bmk_init: bmk name: /SD1://Neuromancer - William Gibson.BMK, size: 41472
+ebook_bmk_init: file size: 495465, current line: 352
+ebook_bmk_init: page_magic: 0x0, total: 19656.
+ebook_bmk_init: the last page offset: 445200.
+_reading_create_content: last reading line: 352, line_height: 20
+```
+
+- **File size is live at `0x1801a090`** (mirrored at `0x18019e24`), so the reader
+  reads it exactly and the binary-search probe is now only a fallback.
+- 495465 bytes over 19656 lines is **25.2 bytes per vendor line**, and our own
+  lines measure 25 characters at 167 px -- so the interpolation's structure is
+  sound, and `total_lines = pages x 8` is consistent.
+- **The `.bmk` carries pagination**, not just bookmarks: `page_magic`, a total,
+  and "the last page offset". Reading it could give an EXACT line-to-offset map
+  and replace interpolation altogether. Worth doing before more guessing --
+  it also explains why deleting a `.bmk` changed resume behaviour.
+
+## Reflow is measuring well
+
+Wrap diagnostics now report `why=2` (ran out of width) at ~167 px and 25
+characters per line, against a 168 px label. The earlier complaint -- pages
+holding ~16 characters a line, half of them blank -- is resolved.
+
+## Diagnostics currently compiled in
+
+`MSG`, `SCROLL`, `SY`, `L` and `JUMP`/`TURN`/`BOOK` logging is enabled in the
+flashed build (3922 bytes). Strip it once the input path is settled.
