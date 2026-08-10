@@ -3,3 +3,7 @@
 *.fw
 venv/
 __pycache__/
+.DS_Store
+*.o
+*.elf
+*.map
