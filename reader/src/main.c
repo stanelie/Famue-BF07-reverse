@@ -46,8 +46,8 @@ struct inj_state {
     uint8_t  sp;
     volatile uint8_t need_prep;
     int32_t  jump_line;               /* absolute seek requested, or -1    */
-    int32_t  scan_line;               /* cache: line reached ...           */
-    int32_t  scan_off;                /* ... at this byte offset           */
+    uint32_t book_sig;                /* identity of the open book         */
+    int32_t  size;                    /* file size, found once per book    */
     struct page cur;                  /* on screen                         */
     struct page nxt;                  /* pre-rendered, ready to swap in    */
     int32_t  back[BACKSTACK];
@@ -298,38 +298,61 @@ static void fill_page(struct page *p, int32_t off)
     p->end = off + pos;
 }
 
+/* File size, by binary search on the last readable byte.
+   Zephyr's fs_tell is not in the symbol map, and fs_seek reports only success,
+   so the size is probed: ~23 one-byte reads, once per book. */
+static int32_t book_size(struct inj_state *S)
+{
+    char b;
+    int32_t lo = 0, hi = 1 << 23;              /* 8 MB ceiling */
+    if (S->size > 0) return S->size;
+    while (lo < hi) {
+        int32_t mid = lo + (hi - lo + 1) / 2;
+        if (book_read(mid - 1, &b, 1) > 0) lo = mid;
+        else hi = mid - 1;
+    }
+    S->size = lo;
+    return lo;
+}
+
 /* Byte offset where the vendor's line N begins.
  *
  * The vendor stores only a line index (+0x194) and a total page count
- * (+0x19c); it never records a byte offset, so this has to be derived. Its
- * layout honours the file's own line breaks, so a vendor line is a line in the
- * FILE -- counting newlines reproduces its numbering without emulating its
- * wrapping. The scan is cached and resumed forward, so paging on from a jump
- * costs nothing and only a backwards jump rescans.
+ * (+0x19c); it never records a byte offset, so this has to be derived.
+ *
+ * An earlier version counted newlines, on the theory that the vendor honours
+ * the file's own line breaks. That holds only for a HARD-WRAPPED file. Given a
+ * book of long flowing paragraphs the vendor wraps each paragraph into many
+ * lines while the file holds one newline, so counting overshot and landed near
+ * the end -- one book resumed correctly and the other did not.
+ *
+ * Interpolating on file size works for either format: the vendor's lines are a
+ * fixed width, so line number is proportional to position, whatever the source
+ * line breaks look like. The result is snapped forward to a line start so a
+ * page never begins mid-word.
+ *
+ * Done in 32-bit arithmetic on purpose: a 64-bit divide would emit a call to
+ * __aeabi_ldivmod, which does not exist in this freestanding image.
  */
-static int32_t offset_of_line(struct inj_state *S, int32_t target)
+static int32_t offset_of_line(struct inj_state *S, int32_t target,
+                              int32_t total_lines)
 {
-    char buf[256];
-    int32_t off = 0, seen = 0;
+    char buf[128];
+    int32_t size, q, r, off;
 
-    if (target <= 0) return 0;
-    if (S->scan_line > 0 && S->scan_line <= target) {
-        off = S->scan_off;                 /* resume, don't restart */
-        seen = S->scan_line;
+    if (target <= 0 || total_lines <= 0) return 0;
+    size = book_size(S);
+    if (size <= 0) return 0;
+    if (target >= total_lines) return size;
+
+    q = size / total_lines;
+    r = size % total_lines;                    /* r < total_lines, so r*target */
+    off = q * target + (r * target) / total_lines;   /* cannot overflow int32 */
+
+    int rc = book_read(off, buf, sizeof buf);
+    for (int i = 0; i < rc; i++) {
+        if (buf[i] == '\n') { off += i + 1; break; }
     }
-    while (seen < target) {
-        int rc = book_read(off, buf, sizeof buf);
-        if (rc <= 0) break;                /* EOF: clamp to the last page */
-        int i = 0;
-        while (i < rc && seen < target) {
-            if (buf[i] == '\n') seen++;
-            i++;
-        }
-        off += i;
-        if (rc < (int)sizeof buf && seen < target) break;
-    }
-    S->scan_line = seen;
-    S->scan_off = off;
     return off;
 }
 
@@ -341,8 +364,48 @@ void prepare_body(void)
     if (!S->need_prep) return;
     S->need_prep = 0;
 
+    /* Detect a different book and resync to ITS saved position.
+     *
+     * Our state block survives across books (it is recovered by magic, not
+     * owned by the scene), so without this the previous book's byte offset
+     * carried over -- which is what made a return visit resume in the wrong
+     * place. Identity is a hash of the first bytes plus the vendor's total
+     * page count; the vendor's own line index then supplies the position. */
+    {
+        char sig[64];
+        uint32_t h = 2166136261u;
+        int rc = book_read(0, sig, sizeof sig);
+        if (rc > 0) {
+            for (int i = 0; i < rc; i++)
+                h = (h ^ (unsigned char)sig[i]) * 16777619u;
+            /* Identity comes from the FILE only. Mixing in the vendor's page
+               count via reader_obj() made the hash unstable -- that pointer
+               alternates between two reader objects and is sometimes null, so
+               the signature changed constantly and every prepare re-jumped to
+               the vendor's line, dragging the page back on each turn. */
+            void *rd = reader_obj();
+            int32_t vline = 0;
+            if (rd) vline = *(volatile int32_t *)((uint32_t)rd + RD_OFF_LINE);
+            if (h != S->book_sig) {
+                S->book_sig = h;
+                S->size = 0;              /* re-probe: different file */
+                S->sp = 0;
+                S->nxt_valid = 0;
+                S->last_line = vline;
+                S->jump_line = vline;
+                {
+                    static const char b[] = "%s%s: BOOK line=%d\n";
+                    fw_log(b, "", "inj", vline);
+                }
+            }
+        }
+    }
+
     if (S->jump_line >= 0) {
-        int32_t off = offset_of_line(S, S->jump_line);
+        void *rdj = reader_obj();
+        int32_t total = rdj ? (int32_t)(*(volatile uint32_t *)((uint32_t)rdj + 0x19c)
+                                        * VENDOR_LINES_PER_PAGE) : 0;
+        int32_t off = offset_of_line(S, S->jump_line, total);
         S->jump_line = -1;
         fill_page(&S->nxt, off);
         S->nxt_valid = 1;
@@ -365,6 +428,28 @@ void prepare_body(void)
     }
 }
 
+/* Inspect each message the reading loop receives.
+ *
+ * Confirmed layout: the loop does `add r0, sp, #0x18` before the receive, and
+ * then reads the TYPE from [sp+0x19] and the COMMAND from [sp+0x1a] -- so from
+ * the pointer we already hold, type is +1 and command is +2.
+ *
+ * Step one of owning input: learn which message each physical press and each
+ * touch actually sends, so the reader can act on them itself instead of
+ * inferring a page turn from the vendor's line counter moving.
+ */
+void prepare_msg(void *msg)
+{
+    if (!msg) return;
+    unsigned t = *(volatile unsigned char *)((uint32_t)msg + 1);
+    unsigned c = *(volatile unsigned char *)((uint32_t)msg + 2);
+    /* cmd 1 and 8 are periodic housekeeping -- 10946 and 806 of them in one
+       short session -- and drown the timeline. Only user-facing traffic. */
+    if (t == 8 && (c == 1 || c == 8)) return;
+    static const char m[] = "%s%s: MSG type*1000+cmd=%d\n";
+    fw_log(m, "", "inj", (int)(t * 1000 + c));
+}
+
 __attribute__((naked)) void prepare_hook(void)
 {
     __asm__ volatile(
@@ -374,6 +459,8 @@ __attribute__((naked)) void prepare_hook(void)
         "movt  r12, #0x100f\n"
         "blx   r12\n"
         "mov   r5, r0\n"
+        "mov   r0, r4\n"
+        "bl    prepare_msg\n"
         "bl    prepare_body\n"
         "mov   r0, r5\n"
         "pop   {r4, r5, pc}\n");
@@ -451,8 +538,11 @@ void after_render(void)
     S->calls++;
 
     if (S->last_line < 0) {
+        /* Resume where the VENDOR says we were. It restores its saved line on
+           open (observed reading 904 before any input), so its per-book
+           persistence is reused rather than duplicated. */
         S->last_line = line;
-        S->want = 0;
+        S->jump_line = line;
         S->need_prep = 1;
     } else if (S->want < 0 && line != S->last_line) {
         int delta = line - S->last_line;

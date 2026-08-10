@@ -316,3 +316,66 @@ LV_OBJ_FLAG_HIDDEN = 1<<0     LV_OBJ_FLAG_CLICKABLE = 1<<1
 
 The reading screen has 6 children: [0] the 18-child label container, [3] the
 status bar (back button, page counter, two icons), [4] the TTS icon.
+
+---
+
+# What a scene takeover requires (measured, 2026-08-10)
+
+Groundwork for replacing the vendor's reading scene rather than sharing state
+with it. Two structural facts change the design.
+
+## Paging is scrolling
+
+`_reading_scroll_event_cb` (`0x10049684`) tests `cmp r6, #0xb` --
+**`LV_EVENT_SCROLL`**. The reading view is a tall scrolled container of labels
+and `reading_line` (`+0x194`) is *derived from the scroll position*. Our page
+model and the vendor's scroll model are different things laid over the same
+widgets, which is the root of every coupling bug: the speaker reset, the runaway
+page, the page-jump mismatch and the wrong resume.
+
+## Page turns send no message
+
+Captured over UART with every message the reading loop receives:
+
+| action | messages |
+|---|---|
+| open book | `type=8 cmd=4` then `cmd=5` |
+| **next / previous page** | **none** |
+| select-page menu | `cmd=5`, 6x `cmd=3`, then `cmd=4`+`cmd=5` on confirm |
+| back to list | `cmd=5`, `cmd=12` |
+
+`type=8 cmd=1` (10946 in one short session) and `cmd=8` (806) are periodic
+housekeeping, not input. Turns never reach the ebook thread -- they are handled
+on the display side by LVGL touch callbacks. So input must be taken at the
+event callback, not at the message loop.
+
+## The UI is resource-driven
+
+Scene creation calls `lvgl_res_load_scene`, `lvgl_res_load_group_from_scene`,
+`lvgl_res_load_pictures_from_scene`, `lvgl_res_load_strings_from_scene`. Widgets
+come from resource definitions, not hand-written LVGL calls, so a replacement
+scene has to build its own objects programmatically.
+
+That needs LVGL constructors, which the symbol map does not name (only functions
+that log get names). They are reachable: every object stores its class pointer
+at `+0x00`, and the class struct is confirmed LVGL v8 --
+
+```
+image class 0x1012c7d4:
+  +0x00 base_class 0x1012bee0   +0x04 constructor 0x100fe6a1
+  +0x08 destructor 0x100fe6f5   +0x10 event_cb   0x100a3329
+  +0x14 width_def/height_def = 0x27d1 0x27d1  (LV_SIZE_CONTENT, confirms v8)
+```
+
+Five literals reference that class; the code ones are the image constructor's
+callers. The same method finds the label class from any label object's `+0x00`.
+
+## Staging
+
+Full UI replacement also needs fonts (resource-loaded via
+`lvgl_bitmap_font_open`), styles and the exit path. A cheaper first stage gets
+the whole behavioural benefit: **take the scroll event callback**, so turns,
+jumps and position are ours, while the vendor's resource-built widgets are still
+used for drawing (we already fill them). At that point nothing is read from
+vendor state and the coupling bugs cannot recur; replacing the widgets
+themselves becomes optional polish rather than a prerequisite.
