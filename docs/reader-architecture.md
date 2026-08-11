@@ -643,3 +643,49 @@ value and stores it, so the reading line is written through an interior pointer
 whose base we have not identified. That, and the clamp that pins it at ~1%,
 are the two questions the next pass should answer -- now that the call graph
 and data references are trustworthy.
+
+## Input path: three callbacks eliminated by probe, writer still unidentified
+
+With the map trustworthy, the input question was attacked directly. All three
+candidates are now ruled out by INSTALLED, byte-verified probes rather than by
+reading disassembly:
+
+| candidate | probe result |
+|---|---|
+| ebook-thread message | no message of any kind on a turn |
+| `_reading_scroll_event_cb` (`0x10049684`) | 0 hits; never runs |
+| `_reading_btn_event_cb` (`0x10048d64`) | 6 hits, all at scene setup, none on a turn |
+
+And the static picture is contradictory: across the WHOLE image only three
+instructions store to `[rX,#0x194]` -- one belongs to a music view, one is the
+scene entry (runs once), one is inside the scroll callback that never runs. The
+timer callback contains no stores at all. Yet the value moves by +/-8 per press.
+
+The resolution is that the field is reached through a POINTER CHAIN. The scene
+itself writes it that way:
+
+```
+0x1004a296  ldr   r2, [sp, #0xc]
+0x1004a29c  ldr   r2, [r2]
+0x1004a2a4  str   r3, [r2, #4]      <- the reading line, as +4 of an interior pointer
+```
+
+So any component holding that pointer updates the line with a small offset and
+never mentions `0x194`. Offset searches cannot find it; this needs dataflow.
+
+Two theories killed by measurement along the way:
+
+- **"Two reader objects"** -- the pointer had been seen holding both
+  `0x18007a00` and `0x18007c00`, so the deltas might have been sampling
+  artefacts. Logging the source object with every delta showed **one object,
+  27/27 samples**. Wrong.
+- **"The scroll callback is the input path"** -- the map shows it holds the
+  only runtime writer, so it looked certain. The probe says it never executes.
+
+## Current workaround (heuristic, not a fix)
+
+At the frontier of its pagination the vendor refuses to advance its line: a
+press moves it +8 and it pulls it back -8, which the reader followed as a page
+back -- the 0.9 <-> 1.0% bounce. A negative delta arriving within ~3 frames of
+a forward turn is now rejected as that rebound. A real back press never lands
+that fast. This restores usable reading; it does not explain the behaviour.

@@ -63,6 +63,7 @@ struct inj_state {
     int32_t  saved_off;               /* position last written to the .bmk  */
     int32_t  last_sy;                 /* container scroll offset, observed */
     int32_t  last_pm;                 /* last shown progress, in tenths    */
+    uint32_t fwd_frame;               /* frame of the last forward turn    */
     uint8_t  want_prev;               /* back with no history: find it      */
     /* The page read buffer lives HERE, not on the stack. The ebook thread has
        a 2280-byte stack and Zephyr reported only 328 bytes ever unused -- a
@@ -825,6 +826,16 @@ __attribute__((naked)) void exit_hook(void)
  */
 void scroll_probe(void *e)
 {
+    /* Minimal: log first, touch nothing. The previous version called
+       lv_event_get_code and reader_obj BEFORE logging, so a bad address there
+       would produce silence -- which is exactly what we saw, and it was read
+       as "this callback never fires". The map since proved this function holds
+       the only runtime writer of the reading line (str.w r1,[r4,#0x194] at
+       0x1004974c), so it must be on the input path. */
+    {
+        static const char m0[] = "%s%s: SCROLLCB\n";
+        fw_log(m0, "", "inj", 0);
+    }
     unsigned code = lv_event_get_code(e);
     void *rd = reader_obj();
     int32_t sy = 0, line = -1;
@@ -845,6 +856,30 @@ void scroll_probe(void *e)
         static const char o[] = "%s%s: SCROLL line=%d\n";
         fw_log(o, "", "inj", line);
     }
+}
+
+/* Probe on _reading_btn_event_cb (0x10048d64), the reading scene's OTHER event
+   callback. It was dismissed early as "menu and bookmark widgets" on a guess.
+   The scroll callback provably never runs, and no instruction writes the
+   reading line with a #0x194 immediate -- the scene writes it through a
+   pointer chain (`str r3,[r2,#4]`), so a generic component could update it via
+   a small offset. If taps land here, this is the input path. */
+void btn_probe(void)
+{
+    static const char m[] = "%s%s: BTNCB\n";
+    fw_log(m, "", "inj", 0);
+}
+
+__attribute__((naked)) void btn_hook(void)
+{
+    __asm__ volatile(
+        "push  {r0-r3, lr}\n"
+        "bl    btn_probe\n"
+        "pop   {r0-r3, lr}\n"
+        "push.w {r4, r5, r6, r7, r8, lr}\n"   /* the overwritten insn */
+        "movw  r12, #0x8d69\n"                /* 0x10048d68 | thumb  */
+        "movt  r12, #0x1004\n"
+        "bx    r12\n");
 }
 
 /* Replicates the original prologue, then re-enters it past the patched bytes. */
@@ -949,14 +984,40 @@ void after_render(void)
            the zero then got saved, so the book reopened at the beginning.
            A line of 0 is only a real destination if we are already there. */
         {
+            /* Log WHICH reader object this line came from.
+             *
+             * No instruction in the image writes [rX,#0x194] on the frame path
+             * -- the timer callback has no stores at all, and the only two
+             * writers are the scene enter and a scroll callback that a probe
+             * shows never runs. Yet the value moves by +/-8. The reader pointer
+             * (app_global+0x3c) has been seen alternating between 0x18007a00
+             * and 0x18007c00, so these may be TWO OBJECTS whose lines differ,
+             * not one line changing -- which would be a phantom turn. */
             static const char dl[] = "%s%s: DELTA=%d\n";
             fw_log(dl, "", "inj", delta);
+            static const char do_[] = "%s%s: from obj=0x%x\n";
+            fw_log(do_, "", "inj", (int)(uint32_t)rd);
         }
         /* BASELINE RULE (the one that demonstrably paged correctly): any
            change is a turn, direction by sign. The bounded and exact-delta
            variants were both flashed but never confirmed working, so they are
            not part of the baseline. */
-        if (line <= 0 && S->cur.start > 0) {
+        /* Reject the vendor's rebound.
+         *
+         * At the frontier of its own pagination it refuses to let the line
+         * advance: a press moves it +8 and it pulls it straight back -8, which
+         * we followed as a page back -- the 0.9 <-> 1.0% bounce. A real back
+         * press never lands within a frame or two of a forward one, so a
+         * negative delta arriving that soon after a forward turn is the
+         * rebound, not the user. This is a heuristic, not a diagnosis: the
+         * actual writer of the line is still unidentified (no #0x194 store
+         * runs on the frame path; the scene reaches it through a pointer
+         * chain, and both scene callbacks are proven not to fire on turns). */
+        if (delta < 0 && S->calls - S->fwd_frame <= 3) {
+            S->last_line = line;
+            static const char rb[] = "%s%s: REBOUND ignored d=%d\n";
+            fw_log(rb, "", "inj", delta);
+        } else if (line <= 0 && S->cur.start > 0) {
             /* Not a page turn. The background pagination keeps adjusting the
                line as total_lines grows, and mapping those through
                size * line / total_lines walked the reader BACKWARDS by a
@@ -966,6 +1027,7 @@ void after_render(void)
         } else if (delta > 0) {
             push_back(S, S->cur.start);
             S->want = S->cur.end;
+            S->fwd_frame = S->calls;
         } else if (S->sp) {
             S->want = S->back[--S->sp];
         } else if (S->cur.start > 0) {
