@@ -1434,7 +1434,15 @@ which makes each test cost a human round trip. Three routes tried:
 | exec stub clearing `RTC_REMAIN3` to magic\|NORMAL then `WD_CTL=0x5f` | stays in ADFU -- consistent with dead-ends.md, the boot ROM consumes the reboot reason itself |
 | ADFU opcode `0xcb` (ATJ "reboot") | CSW status 2, unsupported |
 | ADFU opcode `0xb0` (ATJ "reset") | no CSW, device unchanged |
-| **ADFU opcode `0x22`** | **powers the device OFF** (leaves ADFU, no shell, stays dark until the power button) |
+| **ADFU opcode `0x22`** | **reboots into a LIMITED USB/transfer mode** -- leaves ADFU and mounts as mass storage, but the app and the debug shell never start |
+
+`0x22` is genuinely a reboot, not a power-off (an early reading here was wrong:
+the UART went silent and that was misread as a dead device). But it is not a
+NORMAL boot. Plugged in, a button reset also enters transfer mode -- yet there
+the debug shell still answers. After `0x22` it does not, and ejecting the
+volume (`diskutil eject /Volumes/BF07`) does not bring the app up either. So it
+reaches some minimal USB mode, and a physical reset is still required to get a
+full boot.
 
 **Warning for exec stubs:** end them with `bx lr`, not `b .`. A stub that spins
 leaves the device hung with neither shell nor ADFU when the reset does not take,
