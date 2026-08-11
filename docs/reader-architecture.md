@@ -750,3 +750,58 @@ store exists anywhere and why every offset search failed.
 Test the cross-thread hypothesis first, since it needs no path: do our file
 reads on the SAME thread as the vendor's decode, or take the FS lock around
 them. If the vendor's decode stops failing, the stall goes with it.
+
+# The filesystem layer, mapped (0x1007f900-0x10080200)
+
+Read because every recent failure lived here: a handle copy that did not work, a
+getter that reboots, a decode that breaks when we seek.
+
+## Shape
+
+`fs_read`/`fs_seek`/`fs_write`/`fs_close` are thin dispatchers through a vtable
+reached as `file->mp->fs` (`[r0,#4]` then `[r3,#0x1c]`), with slots:
+
+```
++0x00 open   +0x04 read   +0x08 write  +0x0c lseek
++0x10 tell   +0x14 truncate  +0x18 sync
+```
+
+**There is no `tell` wrapper in this build** -- the slot exists, nothing calls
+it. So a save/restore of the vendor's file position is not available, which
+kills that approach outright.
+
+Each wrapper starts TWO BYTES before its push, with `ldr r3, [r0, #4]`. A
+prologue scan lands after that and makes the function look like it takes the
+mount pointer in r3. It does not: `fs_read(file, buf, size)` is correct, and our
+existing addresses (`0x1007fd3d`, `0x1007fde1`) are right.
+
+## No locking, anywhere
+
+None of the wrappers take a mutex. The FS layer does **not** serialize
+concurrent access, so two threads sharing one `fs_file_t` will corrupt each
+other's position -- our reads run on the EBOOK thread, the vendor's decode on
+the DISPLAY thread. That is the cross-thread hypothesis confirmed, and it means
+there is no FS lock to take: the fix has to be a separate handle.
+
+## fs_file_t, corrected
+
+```
++0x00 filep   +0x04 mount point   +0x08 flags   +0x0c FILE SIZE
+```
+(the size at `+0x0c` read 0x78f69 = 495465, matching the open book)
+
+## A second open IS allowed
+
+`fs_open` rejects only a handle already in use (`ldr r2,[r5,#4]; cbnz r2` ->
+error -0x10). A fresh `fs_file_t` opens fine. It also requires a path of length
+> 1 starting with `/`.
+
+## The way around the missing path: open by cluster
+
+`fs_open_cluster` (`0x1007fc4c`) opens a file by **cluster and directory entry**,
+no path string required -- and the ebook app logs exactly those values when it
+opens a book (`file topdir: %s, cluster: %d, entry: %d`). Since the book path is
+NOT retained in RAM, this is the route to our own handle.
+
+Next: locate the topdir/cluster/entry the app holds, then call
+`fs_open_cluster` with them.
