@@ -1,0 +1,389 @@
+# recursive-descent map of 0x10047000-0x1004d000
+# 52 named entry points
+
+## borwser_create_dirlist  0x1004702c  (68 insns)
+   calls    : app_dirlist_in_assign_folder, display_composer_post+0x2dc8, display_composer_post+0x63c6, display_composer_post+0x9c7e, display_composer_post+0x9c86
+   refs     : "%s%s: init_param.path = %s,path = %s
+
+", "borwser_create_dirlist", "browser", ram:0x180187c4, ram:0x180187cc
+
+## file_send_progress_bar_layout  0x100473e4  (42 insns)
+   calls    : borwser_create_dirlist+0x254, display_composer_post+0x63c6
+   refs     : "%s%s: ==paint msg %d==
+
+", "browser_view_paint"
+
+## _ebook_event_handle  0x10047860  (168 insns)
+   calls    : _res_file_close+0x2d78, _res_file_close+0x5380, _res_file_close+0x53a8, app_manager_thread_exit, bt_msg_handle, display_composer_post+0x16da8, display_composer_post+0x16dba, display_composer_post+0x1790a, display_composer_post+0x63c6, display_composer_post+0x9c16, display_composer_post+0x9c36, display_composer_post+0x9c4e, display_composer_post+0x9c7e, display_composer_post+0x9c86, ebook_reading, ebook_view_init, ebook_view_init+0x40, file_send_progress_bar_layout+0x454, hotplug_event_report+0x98, send_msg_to_app
+   refs     : "%s%s: ### recv msg: type %d, cmd %d.
+
+", "%s%s: enter ++
+", "%s%s: exit --
+", "%s%s: file topdir: %s, cluster: %d, entry: %d
+", "%s%s: list topdir: %s, cluster: %d, entry: %d
+", "/SD1:/", "/SD:", "APP_EBOOK_TILE_INFO", "APP_FILE_PATH_INFO", "_ebook_app_loop", "_ebook_event_handle", "browser", "ebook", "launcher" (+6 more)
+
+## _ebook_view_layout  0x10047aac  (105 insns)
+   calls    : _diskio_flush_cache_req+0x29c, _diskio_flush_cache_req+0xaf9c, _diskio_flush_cache_req+0xeaa8, _diskio_flush_cache_req+0xf318, _nofile_msgbox_cb+0x6c, display_composer_post+0x10f18, display_composer_post+0x15498, display_composer_post+0x155c2, display_composer_post+0x16dba, display_composer_post+0x16dc2, display_composer_post+0x16e7a, display_composer_post+0x16e90, display_composer_post+0x213bc, display_composer_post+0x63c6, display_composer_post+0x9c86, display_composer_post+0xf170, ebook_scene_file_list_enter, lvgl_bitmap_font_open
+   refs     : "%s%s: ### enter ++
+
+", "%s%s: error: layout failed!
+
+", "/SD1:C/fang16.font", "/SD1:C/fang18.font", "/SD1:C/sans16.font", "/SD1:C/sans18.font", "/SD1:C/you16.font", "/SD1:C/you18.font", "APP_EBOOK_DATA_INFO", "SYS_LANGUAGE_ID", "_ebook_view_layout", ram:0x18018978, ram:0x18065018
+
+## _ebook_msgbox_cb  0x10047bf0  (10 insns)
+   calls    : _res_file_close+0x2d78, display_composer_post+0x63c6
+   refs     : "%s%s: ### sem give 
+", "_ebook_msgbox_cb", ram:0x18018980
+
+## send_msg_to_app  0x10047c4c  (35 insns)
+   called by: _ebook_event_handle, _ebook_flag_btn_event_cb, _ebook_return_btn_event_cb, _nofile_msgbox_cb, _reading_btn_event_cb, book_filelist_cb, bookmark_list_cb, chapter_list_cb, dialog_bmk_del_cb, dialog_del_file_cb, ebook_scene_bmk_enter, ebook_scene_file_list_enter, ebook_scene_file_tile_enter, ebook_scene_reading_enter
+   calls    : display_composer_post+0x219e0, display_composer_post+0x63c6, display_composer_post+0x8fc6, display_composer_post+0x9c86, srv_manager_init_service+0x410
+   refs     : "%s%s: sem take failed!
+", "ebook", "send_msg_to_app", ram:0x18018998
+
+## _ebook_view_dialog  0x10047cb8  (32 insns)
+   called by: _ebook_view_paint
+   calls    : display_composer_post+0x63c6, display_composer_post+0x9c86, msgbox_create
+   refs     : "%s%s: title_id: 0x%x
+", "_ebook_view_dialog", ram:0x18018978
+
+## _ebook_view_delete  0x10047d34  (55 insns)
+   calls    : _diskio_flush_cache_req+0xbe84, _reading_unload_resource, display_composer_post+0x1178a, display_composer_post+0x16e90, display_composer_post+0x2e6e, display_composer_post+0x2f42, display_composer_post+0x63c6, ebook_scene_bmk_enter+0x190, ebook_scene_file_list_exit, ebook_scene_file_tile_exit, lvgl_bitmap_font_open+0xcc
+   refs     : "%s%s: ### scene: %d
+
+", "_ebook_view_delete", ram:0x18018978
+
+## _ebook_view_paint  0x10047e0c  (66 insns)
+   calls    : _ebook_view_dialog, _reading_unload_resource, display_composer_post+0x2e6e, display_composer_post+0x2f42, display_composer_post+0x63c6, ebook_scene_bmk_enter+0x190, ebook_scene_file_list_exit, ebook_scene_file_tile_exit
+   refs     : "%s%s: scene is undefine!
+", "_ebook_view_paint", ram:0x1801897c
+
+## ebook_view_init  0x10047ef8  (18 insns)
+   called by: _ebook_event_handle
+   calls    : display_composer_post+0x63c6, view_handle_set_register
+   refs     : "%s%s: ok
+
+", "ebook_view_init", ram:0x18065018
+
+## book_filelist_cb  0x10047fcc  (136 insns)
+   calls    : app_manager_thread_exit, dirlist_delete, display_composer_post+0x16a, display_composer_post+0x16e7a, display_composer_post+0x16e90, display_composer_post+0x1790a, display_composer_post+0x1a2, display_composer_post+0x1b0, display_composer_post+0x1e2, display_composer_post+0x213bc, display_composer_post+0x63c6, display_composer_post+0x9c1e, display_composer_post+0x9c86, file_send_progress_bar_layout+0x454, hotplug_event_report+0x98, send_msg_to_app
+   refs     : "%s%s: scene[%d] not filelist
+", "/SD:", "book_filelist_cb", "ebook", "launcher"
+
+## _nofile_msgbox_cb  0x10048144  (29 insns)
+   calls    : display_composer_post+0x1790a, display_composer_post+0x213bc, display_composer_post+0x63c6, hotplug_event_report+0x98, send_msg_to_app
+   refs     : "%s%s: ### send msg exit !
+", "/SD:", "_nofile_msgbox_cb"
+
+## ebook_scene_file_list_enter  0x100482f8  (119 insns)
+   called by: _ebook_view_layout
+   calls    : _nofile_msgbox_cb+0xc8, dirlist_create, display_composer_post+0x16e7a, display_composer_post+0x188, display_composer_post+0x63c6, display_composer_post+0x9c86, fnavi_create, msgbox_create, send_msg_to_app
+   refs     : "%s%s: ### no file !
+", "%s%s: enter ++
+", "%s%s: fnavi create failed!
+", "%s%s: malloc failed!
+
+", "%s%s: ret: %d, list total: %d
+", "ebook", "ebook_scene_file_list_enter", ram:0x1806500d
+
+## ebook_scene_file_list_exit  0x10048464  (24 insns)
+   called by: _ebook_view_delete, _ebook_view_paint
+   calls    : dirlist_delete, display_composer_post+0x16a, display_composer_post+0x16e90, display_composer_post+0x63c6
+   refs     : "%s%s: exit --
+", "ebook_scene_file_list_exit"
+
+## ebook_scene_file_tile_exit  0x1004868c  (45 insns)
+   called by: _ebook_view_delete, _ebook_view_paint
+   calls    : _res_file_close+0x74, app_menulist_delete+0x10a, display_composer_post+0x1178a, display_composer_post+0x16a, display_composer_post+0x16dba, display_composer_post+0x16dbe, display_composer_post+0x16e90, display_composer_post+0x63c6, display_composer_post+0x9c86, lvgl_bitmap_font_open+0xcc, lvgl_res_load_strings_from_group+0x140
+   refs     : "%s%s: exit --
+", "APP_EBOOK_DATA_INFO", "ebook_scene_file_tile_exit"
+
+## ebook_scene_file_tile_enter  0x10048720  (321 insns)
+   calls    : _diskio_flush_cache_req+0x100e8, _diskio_flush_cache_req+0x102dc, _diskio_flush_cache_req+0x29c, _diskio_flush_cache_req+0xaf9c, _diskio_flush_cache_req+0xd604, _diskio_flush_cache_req+0xe1ec, _diskio_flush_cache_req+0xe204, _diskio_flush_cache_req+0xeaa8, _nofile_msgbox_cb+0xc8, _res_file_close+0x74, app_menulist_delete+0x3e, display_composer_post+0x10246, display_composer_post+0x115e6, display_composer_post+0x11614, display_composer_post+0x11620, display_composer_post+0x166f4, display_composer_post+0x16b22, display_composer_post+0x16dba, display_composer_post+0x16e7a, display_composer_post+0x1790a, display_composer_post+0x188, display_composer_post+0x63c6, display_composer_post+0x9c5e, display_composer_post+0x9c86, display_composer_post+0xe5b8, display_composer_post+0xf170, display_composer_post+0xfd48, display_composer_post+0xfdbe, ebook_scene_file_list_exit+0x44, fnavi_create, hotplug_event_report+0x98, lvgl_bitmap_font_open, lvgl_res_load_pictures_from_scene, lvgl_res_load_scene, lvgl_res_load_strings_from_group+0x140, msgbox_create, send_msg_to_app
+   refs     : "%s", "%s%s: ### no file !
+", "%s%s: enter ++
+", "%s%s: fnavi create failed!
+", "%s%s: malloc failed!
+
+", "%s%s: ret: %d, list total: %d
+", "%sscene not found!
+", "/NOR:K/ebook.", "/NOR:K/ebook.res", "/NOR:K/ebook.sty", "/SD1:C/sans16.font", "/SD:", "/SD:/", "APP_EBOOK_DATA_INFO" (+1 more)
+
+## _ebook_flag_btn_event_cb  0x10048bf4  (39 insns)
+   calls    : display_composer_post+0x63c6, display_composer_post+0xe5ac, display_composer_post+0xe5b4, send_msg_to_app
+   tails to : display_composer_post+0x213bc
+   refs     : "%s%s: OPTION
+", "_ebook_flag_btn_event_cb", ram:0x18018978, ram:0x180189b0
+
+## _reading_btn_event_cb  0x10048d64  (119 insns)
+   calls    : _diskio_flush_cache_req+0xc1ec, display_composer_post+0x1178a, display_composer_post+0x16dba, display_composer_post+0x213bc, display_composer_post+0x63c6, display_composer_post+0x9c1e, display_composer_post+0x9c36, display_composer_post+0x9c4e, display_composer_post+0x9c86, display_composer_post+0xe5a4, display_composer_post+0xe5ac, display_composer_post+0xe5b4, msgbox_create, send_msg_to_app
+   refs     : "%s%s: OPTION
+", "%s%s: init_scene =======%d
+
+", "%s%s: scene[%d] not reading
+", "APP_FILE_PATH_INFO", "_reading_btn_event_cb", "browser", ram:0x18018978, ram:0x180189b8, ram:0x18018a1c, ram:0x18065018
+
+## _get_line_len_utf8  0x10048f60  (105 insns)
+   called by: txt_analy_one_line
+   calls    : _reading_btn_event_cb+0x1d8, display_composer_post+0x10d50, display_composer_post+0x15838, display_composer_post+0x1b00, display_composer_post+0x63c6, display_composer_post+0x9c86
+   refs     : "%s%s: not get any word
+", "_get_line_len_utf8", ram:0x18018978
+
+## txt_analy_one_line  0x10049074  (123 insns)
+   called by: _decode_one_page
+   calls    : _get_line_len_utf8, display_composer_post+0x1b34, display_composer_post+0x31f4, display_composer_post+0x63c6, display_composer_post+0x9c1e, display_composer_post+0x9c7e, display_composer_post+0x9c86, read_string_data_unicode+0x1f0
+   refs     : "%s%s: copy len overflow, %d > %d !!!!!!!!!!!!!!!
+", "%s%s: param error! txt: %p, len: %d
+", "txt_analy_one_line", ram:0x18065019
+
+## _decode_one_page  0x10049298  (87 insns)
+   calls    : display_composer_post+0x3038, display_composer_post+0x3584, display_composer_post+0x63c6, display_composer_post+0x8fdc, display_composer_post+0x9c1e, display_composer_post+0x9c7e, display_composer_post+0x9c86, txt_analy_one_line
+   refs     : "%s%s: ### txt analy error, len: %d
+", "_decode_one_page"
+
+## _ebook_return_btn_event_cb  0x100494dc  (91 insns)
+   calls    : _diskio_flush_cache_req+0xc1ec, display_composer_post+0x1163e, display_composer_post+0x1178a, display_composer_post+0x16ba0, display_composer_post+0x213bc, display_composer_post+0x3270, display_composer_post+0x42b2, display_composer_post+0x63c6, display_composer_post+0x98be, display_composer_post+0xe5ac, display_composer_post+0xe5b4, display_composer_post+0xf5c6, send_msg_to_app
+   tails to : send_msg_to_app
+   refs     : " ", "%s%s: RETURN
+", "_ebook_return_btn_event_cb", ram:0x18018978
+
+## _reading_scroll_event_cb  0x10049684  (92 insns)
+   calls    : display_composer_post+0x1020c, display_composer_post+0x1163e, display_composer_post+0x1165c, display_composer_post+0x3140, display_composer_post+0x32c2, display_composer_post+0x3396, display_composer_post+0x63c6, display_composer_post+0x9c86, display_composer_post+0xe5a4, display_composer_post+0xe5ac, display_composer_post+0xe5b4
+   refs     : "%s%s: something error, no visable item!
+
+", "_reading_scroll_event_cb", ram:0x18018a48
+
+## ebook_scene_reading_enter  0x10049ec0  (429 insns)
+   calls    : _diskio_flush_cache_req+0x1de4, _diskio_flush_cache_req+0x29c, _diskio_flush_cache_req+0x504, _diskio_flush_cache_req+0xab10, _diskio_flush_cache_req+0xc1ac, _diskio_flush_cache_req+0xd604, _headbar_layout+0x2b0, _reading_scroll_event_cb+0x30c, _reading_scroll_event_cb+0xf8, _res_file_close+0x74, display_composer_post+0x103b4, display_composer_post+0x10d50, display_composer_post+0x10f18, display_composer_post+0x11548, display_composer_post+0x11568, display_composer_post+0x15498, display_composer_post+0x155c2, display_composer_post+0x155f4, display_composer_post+0x16dba, display_composer_post+0x16dbe, display_composer_post+0x16e7a, display_composer_post+0x16e90, display_composer_post+0x21836, display_composer_post+0x3022, display_composer_post+0x3038, display_composer_post+0x429c, display_composer_post+0x42b2, display_composer_post+0x63c6, display_composer_post+0x8fdc, display_composer_post+0x9c5e, display_composer_post+0x9c86, display_composer_post+0xe5b8, display_composer_post+0xf170, display_composer_post+0xf1d4, display_composer_post+0xfd48, display_composer_post+0xfdbe, launcher_view_init+0x27ac, lvgl_res_load_group_from_scene, lvgl_res_load_pictures_from_scene, lvgl_res_load_scene, lvgl_res_load_strings_from_group+0x140, lvgl_res_load_strings_from_scene, send_msg_to_app, srv_manager_init_service, srv_manager_init_service+0x134, sys_wake_lock, system_set_common_volume+0x80
+   refs     : "%s%s: enter ++
+", "%s%s: last reading line: %d
+", "%s%s: line_height:%d
+", "%s%s: list height *************%d
+
+", "%s%s: load resource failed!
+", "%s%s: load resource succeed.
+", "%s%s: mallo failed!
+", "%s%s: malloc for scene data failed!
+
+", "%s%s: send sync msg failed
+", "%sEBOOK_HEADBAR_GROUP not found!
+", "%sscene not found!
+", "/NOR:K/ebook.", "/NOR:K/ebook.res", "/NOR:K/ebook.sty" (+10 more)
+
+## _reading_unload_resource  0x1004a418  (73 insns)
+   called by: _ebook_view_delete, _ebook_view_paint
+   calls    : _diskio_flush_cache_req+0xbe84, _diskio_flush_cache_req+0xc1ec, _headbar_layout+0x2b0, _res_file_close+0x5c, _res_file_close+0x74, _res_file_close+0x98, display_composer_post+0x1178a, display_composer_post+0x16e90, display_composer_post+0x63c6, lvgl_res_load_strings_from_group+0x140, srv_manager_init_service+0x134, srv_manager_thread_exit+0xcc, sys_wake_unlock, system_set_common_volume+0x68
+   tails to : display_composer_post+0x63c6
+   refs     : "%s%s: exit --
+", "%s%s: unload resource
+", "_reading_unload_resource", "ebook_scene_reading_exit", "ttssrv", ram:0x18018978, ram:0x18019098
+
+## dialog_bmk_del_cb  0x1004a73c  (24 insns)
+   calls    : dirlist_del_item, display_composer_post+0x63c6, send_msg_to_app
+   refs     : "%s%s: event: %d
+", "dialog_bmk_del_cb"
+
+## dialog_del_file_cb  0x1004a784  (35 insns)
+   calls    : display_composer_post+0x213bc, display_composer_post+0x63c6, send_msg_to_app
+   refs     : "%s%s: event: %d
+", "dialog_del_file_cb"
+
+## bookmark_list_cb  0x1004a8a4  (123 insns)
+   calls    : _diskio_flush_cache_req+0x74c, dirlist_delete, display_composer_post+0x213bc, display_composer_post+0x580a, display_composer_post+0x63c6, display_composer_post+0x9c16, display_composer_post+0x9c1e, display_composer_post+0x9c36, display_composer_post+0x9c86, display_composer_post+0xea72, send_msg_to_app, timebox_create+0x7f0
+   refs     : "%s%s: event: %d
+", "%s%s: scene[%d] not bmklist
+", "?", "bookmark_list_cb", ram:0x18019bfc
+
+## chapter_list_cb  0x1004aa18  (131 insns)
+   calls    : dirlist_delete, display_composer_post+0x213bc, display_composer_post+0x63c6, display_composer_post+0x9c1e, display_composer_post+0x9c36, display_composer_post+0x9c86, fs_open_cluster+0x194, fs_open_cluster+0xf0, send_msg_to_app
+   refs     : "%s%s: cha_page_num :%d,cha_tmp_offset =%d
+
+", "%s%s: sel_row_data :%s
+
+", "chapter_list_cb", ram:0x1801a0ac
+
+## ebook_scene_bmk_enter  0x1004b078  (122 insns)
+   calls    : _res_file_close+0x98, app_menulist_load_res_id+0xb4, display_composer_post+0x15498, display_composer_post+0x155c2, display_composer_post+0x155cc, display_composer_post+0x16e7a, display_composer_post+0x63c6, display_composer_post+0x9c5e, display_composer_post+0x9c86, lvgl_bitmap_font_open, lvgl_res_load_scene, lvgl_res_load_strings_from_group+0x140, lvgl_res_load_strings_from_scene, send_msg_to_app
+   refs     : "%s%s: load resource failed!
+", "%s%s: malloc for scene data failed!
+
+", "%s%s: ok
+", "%s%s: total: %d
+", "%sscene not found!
+", "/NOR:K/ebook.", "/NOR:K/ebook.res", "/NOR:K/ebook.sty", "/SD1:C/sans16.font", "_bmk_load_resource", "ebook_scene_bmk_enter", ram:0x18018978
+
+## ebook_scene_bmk_exit  0x1004b20c  (46 insns)
+   calls    : _diskio_flush_cache_req+0xbe84, _res_file_close+0x98, app_menulist_load_res_id+0x144, dirlist_delete, display_composer_post+0x16e90, display_composer_post+0x580a, display_composer_post+0x63c6, lvgl_bitmap_font_open+0xcc, lvgl_res_load_strings_from_group+0x140
+   refs     : "%s%s: exit --
+", "%s%s: unload resource
+", "_bmk_unload_resource"
+
+## ebook_file_init  0x1004b29c  (203 insns)
+   called by: ebook_reading
+   calls    : display_composer_post+0x16dc2, display_composer_post+0x1b58, display_composer_post+0x3554, display_composer_post+0x63c6, display_composer_post+0x9c16, display_composer_post+0x9c36, display_composer_post+0x9c86, ebook_bmk_init, fs_open_cluster, fs_open_cluster+0x194, fs_open_cluster+0xf0, fs_opendir_cluster, fs_opendir_cluster+0x1cc, fs_opendir_cluster+0xc8, transcode_set_language, watchdog_stop+0xfdc
+   refs     : "%s%s: ### TYPE IS UNICODE
+", "%s%s: ### TYPE IS UTF-8 no bom
+", "%s%s: ### TYPE IS UTF-8 with BOM
+", "%s%s: ### codetype: %d
+", "%s%s: [type:%d, ret:%d] open ebook failed!
+
+", "%s%s: ebook path[%d]: %s
+
+", "%s%s: fs_opendir_cluster failed, ret:%d, cluster: %d, offset: %d
+
+", "%s%s: fs_readdir failed, ret:%d)
+
+", "%s%s: open ebook ok, size: %d!
+
+", "%s%s: ret: %d, type data: 0x%x
+
+", "%s/%s", "SYS_LANGUAGE_ID", "ebook_file_init", ram:0x18019c1c (+2 more)
+
+## _get_page_offset  0x1004b4ec  (75 insns)
+   called by: _read_file_line, ebook_read_page_data
+   calls    : display_composer_post+0x3554, display_composer_post+0x63c6, fs_open_cluster+0x194, fs_open_cluster+0xf0
+   refs     : "%s%s: page[%d] > page_total[%d]
+", "_get_page_offset", ram:0x18019c1c, ram:0x1801a030, ram:0x1801a098, ram:0x1801a0ac, ram:0x1806517b
+
+## _read_file_line  0x1004b5c4  (91 insns)
+   called by: ebook_decode_get_line
+   calls    : _get_page_offset, display_composer_post+0x3584, display_composer_post+0x63c6, display_composer_post+0x9c16, display_composer_post+0x9c86, fs_open_cluster+0x194, fs_open_cluster+0xf0
+   refs     : "%s%s: ### %d
+", "%s%s: ### %d, offset: %d
+", "_read_file_line", ram:0x1801a098
+
+## ebook_read_page_data  0x1004b7c4  (44 insns)
+   called by: ebook_reading
+   calls    : _get_page_offset, display_composer_post+0x63c6, fs_open_cluster+0x194, fs_open_cluster+0xf0
+   refs     : "%s%s: ### %d
+", "%s%s: ### %d, offset: %d
+", "ebook_read_page_data"
+
+## _check_chapter  0x1004b8d8  (309 insns)
+   called by: ebook_decode_page
+   calls    : display_composer_post+0x31f4, display_composer_post+0x3554, display_composer_post+0x63c6, display_composer_post+0x9c4e, display_composer_post+0x9c7e, display_composer_post+0x9c86, ebook_read_page_data+0x7c, fs_open_cluster+0x128, fs_open_cluster+0x194, fs_open_cluster+0xf0
+   refs     : "%s%s: cha_line_num %d,cha_tmp_offset %d,%s
+
+", "----file_size----%d-%d-
+", "_check_chapter", ram:0x1801a040, ram:0x1801a044, ram:0x1801a0ac
+
+## ebook_decode_page  0x1004bbbc  (153 insns)
+   called by: ebook_calculate_pages
+   calls    : _check_chapter, _res_file_close+0x2be4, display_composer_post+0x35be, display_composer_post+0x63c6, display_composer_post+0x8fdc
+   refs     : "%s%s: ### NOT FULL PAGE, line count: %d
+", "ebook_decode_page", ram:0x1801a030, ram:0x1801a034, ram:0x1801a098, ram:0x1806517b
+
+## ebook_calculate_pages  0x1004bd6c  (76 insns)
+   called by: ebook_reading
+   calls    : _read_file_line+0xf0, display_composer_post+0x63c6, ebook_decode_page, fs_open_cluster+0x128, fs_open_cluster+0x194
+   refs     : "%s%s: write: size=%d, total line=%d, last page offset=%d
+", "ebook_calculate_pages", ram:0x18019c1c, ram:0x18019e24, ram:0x1801a030, ram:0x1801a034, ram:0x1801a084, ram:0x1801a090, ram:0x1801a0ac, ram:0x1806517b
+
+## ebook_decode_get_line  0x1004be64  (28 insns)
+   calls    : display_composer_post+0x63c6, display_composer_post+0x9c86
+   tails to : _read_file_line
+   refs     : "%s%s: error: line num %d (>%d) is overflow.
+", "ebook_decode_get_line", ram:0x1801a084, ram:0x1806517b
+
+## _cur_chapter_find  0x1004bec0  (65 insns)
+   calls    : display_composer_post+0x63c6, fs_open_cluster+0x194, fs_open_cluster+0xf0
+   refs     : "%s%s: page_num = %d
+
+", "%s%s: reading_line:%d
+
+", "_cur_chapter_find", ram:0x18019c1c, ram:0x1801a030, ram:0x1801a034, ram:0x1801a098, ram:0x1801a0ac
+
+## ebook_reading  0x1004bf98  (227 insns)
+   called by: _ebook_event_handle
+   calls    : _cur_chapter_find+0xc0, _res_file_close+0x2be4, _res_file_close+0x2d78, _res_file_close+0x53a8, bt_msg_handle, display_composer_post+0x16da8, display_composer_post+0x16dbe, display_composer_post+0x356a, display_composer_post+0x3618, display_composer_post+0x63c6, display_composer_post+0x8fdc, display_composer_post+0x9c7e, display_composer_post+0x9c86, ebook_bmk_update, ebook_calculate_pages, ebook_file_init, ebook_read_page_data
+   refs     : "%s%s: ### recv msg: type %d, cmd %d.
+
+", "%s%s: exit result %d --
+", "%s%s: set page %d invalid
+", "APP_EBOOK_TILE_INFO", "ebook_reading", ram:0x180187d0, ram:0x18019c1c, ram:0x1801a034, ram:0x1801a080, ram:0x1801a084, ram:0x1801a098, ram:0x1801a0a8, ram:0x1801a0ac, ram:0x1806517b (+2 more)
+
+## ebook_bmk_add  0x1004c488  (101 insns)
+   calls    : display_composer_post+0x361a, display_composer_post+0x63c6, display_composer_post+0x9c7e, fs_open_cluster+0x128, fs_open_cluster+0x194
+   refs     : "%s%s: ### total: %d
+", "%s%s: bmk node already exist.
+", "%s%s: bmk[0] line: %d
+", "%s%s: bmk[1] line: %d
+", "%s%s: line: 0x%x, txt: %s
+", "%s%s: write bmk, total: %d
+", "ebook_bmk_add", ram:0x1801a0ac, ram:0x1801a0c0, ram:0x1806517e, ram:0x18065322
+
+## ebook_bmk_del  0x1004c5b0  (56 insns)
+   calls    : display_composer_post+0x63c6, display_composer_post+0x9c7e, display_composer_post+0x9c86, fs_open_cluster+0x128, fs_open_cluster+0x194
+   refs     : "%s%s: del bmk index %d, total: %d
+", "%s%s: write bmk, total: %d
+", "ebook_bmk_del", ram:0x1801a0ac, ram:0x1801a0c0, ram:0x1806517e
+
+## ebook_bmk_update  0x1004c658  (96 insns)
+   called by: ebook_reading
+   calls    : _read_file_line+0xf0, display_composer_post+0x63c6, fs_open_cluster+0x128, fs_open_cluster+0x194, fs_open_cluster+0xf0
+   refs     : "%s%s: read file failed!
+", "%s%s: write: size=%d, total line=%d, last page offset=%d
+", "ebook_bmk_update", ram:0x18019c1c, ram:0x1801a030, ram:0x1801a034, ram:0x1801a080, ram:0x1806517b, ram:0x1806517e
+
+## ebook_bmk_init  0x1004c784  (246 insns)
+   called by: ebook_file_init
+   calls    : display_composer_post+0x16dba, display_composer_post+0x3554, display_composer_post+0x361a, display_composer_post+0x63c6, display_composer_post+0x9c7e, display_composer_post+0x9c86, ebook_reading+0x45c, fs_get_mnt_point+0xac, fs_open_cluster+0x128, fs_open_cluster+0x194, fs_open_cluster+0x1cc, fs_open_cluster+0xf0, fs_opendir_cluster+0x3ac
+   refs     : "%s%s: bmk name: %s, size: %d
+", "%s%s: bookmark_total: %d
+", "%s%s: error: current line[%d] is illegal! reset
+", "%s%s: file size: %d, current line: %d
+", "%s%s: memset 0xff to bmk head.
+", "%s%s: open file failed!
+", "%s%s: page_magic: 0x%x, total: %d.
+", "%s%s: read file failed!
+", "%s%s: restart calculate page total.
+", "%s%s: the last page offset: %d.
+", "APP_EBOOK_DATA_INFO", "ebook_bmk_init", ram:0x18019c1c, ram:0x18019e24 (+13 more)
+
+## readResource  0x1004ca9c  (32 insns)
+   calls    : _tts_play+0xb0, config_get_alarm+0x1ec, config_get_alarm+0x214, display_composer_post+0x63c6, display_composer_post+0x9c86, fs_get_mnt_point+0xac
+   refs     : "%s%s: no enough mem for style data
+
+", "%s%s: open  %s file failed!
+
+", "/SD1:C/tts.irf", "readResource"
+
+## tts_file_output  0x1004cb70  (70 insns)
+   calls    : 0x10002444, 0x100024a4, _tts_play+0xb0, display_composer_post+0x3554, display_composer_post+0x63c6, display_composer_post+0x9c36, display_composer_post+0x9c86, fs_get_mnt_point+0xac, fs_open_cluster+0x1cc, fs_open_cluster+0xb4
+   refs     : "%s%s: ======end =%d====
+
+", "%s%s: ======open find=====
+
+", "%s%s: open file failed!
+", "tts_file_output", ram:0x1806537e
+
+## send_msg_to_cur_app  0x1004cc3c  (35 insns)
+   called by: tts_stream_paly_deal
+   calls    : app_manager_init_app+0x178, display_composer_post+0x219e0, display_composer_post+0x63c6, display_composer_post+0x8fc6, display_composer_post+0x9c86, srv_manager_init_service+0x410
+   refs     : "%s%s: sem take failed!
+", "send_msg_to_cur_app", ram:0x1801a0d0
+
+## tts_stream_paly_deal  0x1004cca4  (70 insns)
+   called by: tts_srv_main_loop
+   calls    : _tts_play+0xb0, _tts_play+0xbc, _tts_play+0xcc, audio_track_set_volume+0x80, display_composer_post+0x1756a, display_composer_post+0x17592, display_composer_post+0x63c6, display_composer_post+0x9c86, stream_close, stream_destroy, stream_read, stream_write
+   tails to : display_composer_post+0x63c6, send_msg_to_cur_app
+   refs     : "tts_stream_paly_deal", ram:0x1801a0e8
+
+## _tts_play  0x1004cd6c  (62 insns)
+   calls    : _bt_tramsmit_state_change, _tts_play+0xb0, _tts_play+0xcc, audio_track_create, audio_track_set_volume+0x80, audio_track_write+0x154, display_composer_post+0x63c6, fstream_init+0x5c, stream_destroy, stream_open, sys_pa_auto_switch
+   refs     : "_tts_play"
+
+## tts_srv_init  0x1004ce7c  (43 insns)
+   called by: tts_srv_main_loop
+   calls    : config_get_alarm+0x1ec, display_composer_post+0x16e7a, display_composer_post+0x16e90, display_composer_post+0x63c6, display_composer_post+0x9c86, readResource+0x64
+   refs     : "%s%s: malloc failed!
+
+", "%s%s: tts_init failed!
+
+", "tts_srv_init", ram:0x1801a0e8, ram:0x1801a0ec
+
+## tts_srv_main_loop  0x1004cf54  (62 insns)
+   calls    : _res_file_close+0x53a8, config_get_alarm+0x1f8, display_composer_post+0x16da8, display_composer_post+0x16e90, display_composer_post+0x3688, display_composer_post+0x36a8, display_composer_post+0x63c6, display_composer_post+0x9c86, tts_srv_init, tts_srv_init+0x88, tts_srv_init+0x94, tts_stream_paly_deal
+   refs     : "tts_srv_main_loop", ram:0x1801a0e8, ram:0x1801a0ec
+

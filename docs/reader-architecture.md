@@ -584,3 +584,62 @@ Real bugs that the hunt did turn up, all worth keeping:
   the pointer and takes a flag. Using the pointer variant on the counter
   crashed the device on book open, and calling the copying one every render
   churns the heap.
+
+---
+
+# The ebook module, mapped properly (tools/rdisasm.py)
+
+Black-box probing had run out: every open question -- where turns arrive, what
+bounds the reading line, how page contexts relate to the `.bmk` -- is about
+vendor control flow. So the module is now mapped by reading it.
+
+## Why a new disassembler was needed
+
+A linear sweep is unusable on this image. ARM literal pools sit inside the code
+and decode as plausible nonsense (`_reading_unload_resource`'s constants once
+appeared as `ldrh r5, [r6, #0x30]`), and everything after the first pool
+desyncs -- which silently produced an EMPTY call graph.
+
+`tools/rdisasm.py` walks control flow instead: from each entry it follows
+branches, queues targets, stops at returns, and records every `ldr rX, [pc,#imm]`
+target as DATA so pool bytes are never decoded. Output is a function inventory
+with callers, callees, tail calls, RAM statics and string literals.
+`docs/ebook-module-map.txt` is the current dump: 52 named entries over
+0x10047000-0x1004d000, 5056 instructions reached.
+
+## The symbol map is less reliable than assumed
+
+**20 functions inside the module have no symbol of their own** and currently
+read as `neighbour+0xNN`. The extractor names a function from its own logging
+call, so any function that never logs inherits the previous name:
+
+```
+0x1004977c  reads as _reading_scroll_event_cb+0xf8   (a widget builder,
+                                                      called by scene enter)
+0x10049990  reads as _reading_scroll_event_cb+0x30c
+0x1004b6b4  reads as _read_file_line+0xf0            (the .bmk index writer)
+0x1004c3f4  reads as ebook_reading+0x45c
+```
+
+**This casts doubt on an earlier conclusion.** The scroll detour was placed at
+`0x10049684` because the symbol said `_reading_scroll_event_cb`, and it never
+fired. If the real event callback is a different function inside that span,
+that experiment proved only that the wrong address was hooked -- not that
+turns bypass the scroll callback. Re-check before trusting "input does not
+arrive by scroll".
+
+## Incidental finds
+
+- The reading view's fonts are files: `/SD1:C/fang16.font`, `fang18`,
+  `sans16`, `sans18`, `you16`, `you18`, opened via `lvgl_bitmap_font_open`.
+  A replacement UI would load one of these the same way.
+- `ebook_decode_get_line` (`0x1004be64`) exists and was not previously noticed.
+- `_ebook_view_layout` is the scene dispatcher and holds the font table.
+
+## Still open
+
+No instruction in the module stores to `[rX, #0x194]`, and nothing adds 8 to a
+value and stores it, so the reading line is written through an interior pointer
+whose base we have not identified. That, and the clamp that pins it at ~1%,
+are the two questions the next pass should answer -- now that the call graph
+and data references are trustworthy.

@@ -23,6 +23,10 @@
 #define LINE_PX  168        /* label width, measured on hardware  */
 #define BACKSTACK 48
 #define INJ_MAGIC 0x52444252u
+/* Our own bookmark record, written into the .bmk at 0x200 -- the start of the
+   vendor's page index, which is dead space once its pagination is off. */
+#define INJ_BMK_MAGIC 0x53504452u
+#define INJ_BMK_OFF   0x200
 /* The vendor paginates 8 of its own lines to a page (its reading_line at
    +0x194 advances by 8 per turn; +0x19c holds its total page count). */
 #define VENDOR_LINES_PER_PAGE 8
@@ -56,6 +60,7 @@ struct inj_state {
     int32_t  jump_line;               /* absolute seek requested, or -1    */
     uint32_t book_sig;                /* identity of the open book         */
     int32_t  size;                    /* file size, found once per book    */
+    int32_t  saved_off;               /* position last written to the .bmk  */
     int32_t  last_sy;                 /* container scroll offset, observed */
     int32_t  last_pm;                 /* last shown progress, in tenths    */
     uint8_t  want_prev;               /* back with no history: find it      */
@@ -427,8 +432,53 @@ void prepare_body(void)
     /* Services only what the display thread asked for; never creates state. */
     if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st) return;
     struct inj_state *S = ANCHOR->st;
+    /* Switch the vendor's background pagination OFF, every cycle.
+     *
+     * We do not need it: progress is a percentage of the file, and page turns
+     * are byte offsets. It costs continuous CPU and SD I/O, it rewrites the
+     * .bmk, it grows total_lines under us, and it clamps its reading line at
+     * whatever it has indexed so far -- which is what bounced the reader
+     * between 0.9% and 1.0%. The call is guarded by this byte, tested with
+     * `cbz` at 0x1004c0b0, so clearing it skips the call with no code patch. */
+    /* NOT disabling the scan (`*FW_REPAGINATE = 0`) after all.
+     *
+     * With it off the vendor's reading line stops advancing entirely -- and
+     * that line is our ONLY signal that a page turn happened, so next and
+     * previous both went dead while the back button (a different callback)
+     * still worked. Its pagination and its line are the same machinery.
+     * Disabling the scan therefore has to wait until we own input outright.
+     *
+     * Supply the line total ourselves, EVERY cycle.
+     *
+     * With the scan off nothing else ever grows it, so it sat at 40 -- four
+     * pages -- and the vendor clamped its reading line there, which is the
+     * 1.0% loop. Setting it only on a book change was not enough: the state
+     * block survives, so the signature matched and that branch never ran.
+     * Raise-only, so nothing here can walk it backwards. */
+    {
+        uint32_t sz = *FW_BOOK_SIZE;
+        if (sz > 0 && sz < 0x400000u) {
+            uint32_t est = sz / 25;          /* 25.2 bytes per line, measured */
+            if (*FW_TOTAL_LINES < est) *FW_TOTAL_LINES = est;
+        }
+    }
+
     if (!S->need_prep) return;
     S->need_prep = 0;
+
+    /* Persist OUR position -- a byte offset, in our own record, in the page
+       index region the vendor no longer uses. No translation into its line
+       units, so nothing depends on a scan that no longer runs. */
+    if (S->cur.start != S->saved_off && S->cur.start >= 0) {
+        uint32_t rec[3];
+        rec[0] = INJ_BMK_MAGIC;
+        rec[1] = (uint32_t)S->cur.start;
+        rec[2] = *FW_BOOK_SIZE;
+        if (fs_seek(FW_BMK_FILE, INJ_BMK_OFF, FS_SEEK_SET) >= 0 &&
+            fs_write(FW_BMK_FILE, rec, sizeof rec) == (int)sizeof rec) {
+            S->saved_off = S->cur.start;
+        }
+    }
 
     /* Tell the vendor how many lines a page actually holds.
      *
@@ -472,10 +522,27 @@ void prepare_body(void)
                 S->sp = 0;
                 S->nxt_valid = 0;
                 S->last_line = vline;
-                S->jump_line = vline;
+                S->saved_off = -1;
+
+                /* Resume from OUR record if this book has one. Exact, and it
+                   does not go through the vendor's line units at all. */
+                uint32_t rec[3];
+                int have = 0;
+                if (fs_seek(FW_BMK_FILE, INJ_BMK_OFF, FS_SEEK_SET) >= 0 &&
+                    fs_read(FW_BMK_FILE, rec, sizeof rec) == (int)sizeof rec &&
+                    rec[0] == INJ_BMK_MAGIC && rec[2] == *FW_BOOK_SIZE &&
+                    rec[1] < rec[2]) {
+                    have = 1;
+                    S->jump_line = -1;
+                    S->saved_off = (int32_t)rec[1];
+                    fill_page(S, &S->nxt, (int32_t)rec[1]);
+                    S->nxt_valid = 1;
+                    S->want = (int32_t)rec[1];
+                }
+                if (!have) S->jump_line = vline;
                 {
-                    static const char b[] = "%s%s: BOOK line=%d\n";
-                    fw_log(b, "", "inj", vline);
+                    static const char b[] = "%s%s: BOOK resume=%d\n";
+                    fw_log(b, "", "inj", have ? S->want : vline);
                 }
             }
         }
