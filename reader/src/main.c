@@ -49,6 +49,8 @@ struct inj_state {
     uint32_t book_sig;                /* identity of the open book         */
     int32_t  size;                    /* file size, found once per book    */
     int32_t  last_sy;                 /* container scroll offset, observed */
+    int32_t  last_pm;                 /* last shown progress, in tenths    */
+    uint8_t  want_prev;               /* back with no history: find it      */
     struct page cur;                  /* on screen                         */
     struct page nxt;                  /* pre-rendered, ready to swap in    */
     int32_t  back[BACKSTACK];
@@ -286,15 +288,7 @@ static void fill_page(struct page *p, int32_t off)
         pos += take;
         p->nlines++;
         blank = (why == WHY_PARA);
-        {
-            /* one int per log call -- fw_log takes exactly one.
-               px can exceed 99, so it gets its own decade: the first packing
-               let px*100 carry into the why field and corrupted the reason. */
-            static const char rl[] = "%s%s: L why*100000+px*100+chars=%d\n";
-            int n = 0;
-            while (p->text[i][n]) n++;
-            fw_log(rl, "", "inj", why * 100000 + px * 100 + n);
-        }
+        (void)px; (void)why;
     }
     p->end = off + pos;
 }
@@ -378,7 +372,6 @@ void prepare_body(void)
      * that defeated the old constant-patching route. Setting it to our line
      * count makes the vendor's page numbers, its select-page menu, its totals
      * and its .bmk index describe the pages we actually draw. */
-    if (*FW_LINES_PER_PG != INJ_LINES) *FW_LINES_PER_PG = INJ_LINES;
 
     /* Detect a different book and resync to ITS saved position.
      *
@@ -415,6 +408,37 @@ void prepare_body(void)
                 }
             }
         }
+    }
+
+    /* Previous page with no history (we arrived by a jump).
+     *
+     * Interpolating the vendor's line was what made this wander, because
+     * total_lines is still growing. Instead paginate FORWARD from a point
+     * safely before the current page and keep the last page that ends at or
+     * after it -- that is the previous page, exactly, using only our own
+     * layout. S->nxt is the scratch buffer, so nothing large goes on the
+     * ebook thread's stack. */
+    if (S->want_prev) {
+        S->want_prev = 0;
+        int32_t target = S->cur.start;
+        if (target > 0) {
+            int32_t off = target - (INJ_LINES * 48);
+            if (off < 0) off = 0;
+            int32_t start = off;
+            for (int i = 0; i < 40; i++) {
+                fill_page(&S->nxt, off);
+                if (S->nxt.end >= target || S->nxt.end <= off) break;
+                start = off;
+                off = S->nxt.end;
+            }
+            if (off < target) start = off;
+            fill_page(&S->nxt, start);
+            S->nxt_valid = 1;
+            S->want = start;
+            static const char pv[] = "%s%s: PREV off=%d\n";
+            fw_log(pv, "", "inj", start);
+        }
+        return;
     }
 
     if (S->jump_line >= 0) {
@@ -458,6 +482,40 @@ void prepare_msg(void *msg)
     if (!msg) return;
     unsigned t = *(volatile unsigned char *)((uint32_t)msg + 1);
     unsigned c = *(volatile unsigned char *)((uint32_t)msg + 2);
+
+    /* Give the vendor our real page size, at the source.
+     *
+     * cmd 1 carries a 16-byte layout block. Its handler copies it to
+     * 0x1801a098 and immediately computes pages = (total - 1 + n) / n by
+     * hardware divide, where n is the block's FIRST BYTE. Writing 0x1801a098
+     * directly lost the race -- this message arrives about 120 times a second
+     * and simply overwrote our value, which is why lines_per_page stayed 8 and
+     * the select-page menu totalled the book in 8-line pages.
+     *
+     * The payload pointer is at msg+4: the loop does `add r0, sp, #0x18` for
+     * the message and the handler reads the payload from [sp+0x1c]. */
+    /* A page selection arrives as cmd 4 with a 4-byte payload -- the handler
+       stores it to 0x1801a080. That is an explicit user action, unlike a line
+       delta, which also moves when the background pagination recalculates. */
+    if (t == 8 && c == 4 && ANCHOR->magic == INJ_MAGIC && ANCHOR->st) {
+        uint32_t pl = *(volatile uint32_t *)((uint32_t)msg + 4);
+        if (pl >= 0x01000000 && pl < 0x18200000) {
+            int32_t sel = *(volatile int32_t *)pl;
+            if (sel > 0) {
+                struct inj_state *S = ANCHOR->st;
+                S->jump_line = sel;
+                S->sp = 0;
+                S->need_prep = 1;
+            }
+        }
+    }
+
+    if (t == 8 && c == 1) {
+        uint32_t pl = *(volatile uint32_t *)((uint32_t)msg + 4);
+        if (pl >= 0x01000000 && pl < 0x18200000)
+            *(volatile unsigned char *)pl = INJ_LINES;
+    }
+
     /* cmd 1 and 8 are periodic housekeeping -- 10946 and 806 of them in one
        short session -- and drown the timeline. Only user-facing traffic. */
     if (t == 8 && (c == 1 || c == 8)) return;
@@ -479,6 +537,139 @@ __attribute__((naked)) void prepare_hook(void)
         "bl    prepare_body\n"
         "mov   r0, r5\n"
         "pop   {r4, r5, pc}\n");
+}
+
+/* Show progress as a PERCENTAGE instead of a page number.
+ *
+ * Page numbers here are worth little: the vendor derives them from a
+ * background pagination that is still running (total_lines was measured
+ * climbing 224 -> 3416 over ninety idle seconds), they change whenever the
+ * line count changes, and they describe this device's layout only. A byte
+ * offset over the file size is exact from the first page, costs nothing, and
+ * means the same thing anywhere.
+ *
+ * The counter is in the status bar, which is the screen child spanning the top
+ * 25 px. Labels are identified by CLASS -- read from one of our own text lines,
+ * which is certainly a label -- so this cannot write text into a widget that is
+ * not one, whatever the resource layout puts there.
+ */
+static void show_percent(void *cont, struct inj_state *S)
+{
+    uint32_t scr = *(volatile uint32_t *)((uint32_t)cont + 4);
+    if (scr < 0x01000000) return;
+    /* Size from the vendor's own field -- S->size is only filled during a
+       jump, so relying on it meant this bailed out on a normal read. */
+    int32_t size = (int32_t)*FW_BOOK_SIZE;
+    if (size <= 0) size = S->size;
+    if (size <= 0) return;
+
+    /* Tenths, not whole percent. Scaling by 128 and multiplying by only 100
+       left the whole book as ~100 steps, so an early page sat right on the 0/1
+       boundary and each turn flipped it. A page is ~267 bytes of a ~500 KB
+       book -- about 0.05% -- so tenths actually move. /64 keeps the multiply
+       inside int32 for books up to 8 MB. */
+    int pm = (int)((S->cur.start / 64) * 1000 / (size / 64 + 1));
+    if (pm < 0) pm = 0;
+    if (pm > 1000) pm = 1000;
+
+    char buf[10];
+    int n = 0;
+    int whole = pm / 10, frac = pm % 10;
+    if (whole >= 100) { buf[n++] = '1'; buf[n++] = '0'; buf[n++] = '0'; }
+    else {
+        if (whole >= 10) buf[n++] = (char)('0' + whole / 10);
+        buf[n++] = (char)('0' + whole % 10);
+        buf[n++] = '.';
+        buf[n++] = (char)('0' + frac);
+    }
+    buf[n++] = '%';
+    buf[n] = 0;
+
+    if (pm != S->last_pm) {
+        S->last_pm = pm;
+        static const char pf[] = "%s%s: PCT tenths=%d\n";
+        fw_log(pf, "", "inj", pm);
+        static const char po[] = "%s%s: PCT off=%d\n";
+        fw_log(po, "", "inj", S->cur.start);
+    }
+
+    uint32_t sn = lv_obj_child_cnt((void *)scr);
+    if (sn > 16) sn = 16;
+    for (uint32_t i = 0; i < sn; i++) {
+        uint32_t bar = (uint32_t)lv_obj_get_child((void *)scr, i);
+        if (bar < 0x01000000) continue;
+        int16_t by1 = *(volatile int16_t *)(bar + 0x16);
+        int16_t by2 = *(volatile int16_t *)(bar + 0x1a);
+        int16_t bx1 = *(volatile int16_t *)(bar + 0x14);
+        int16_t bx2 = *(volatile int16_t *)(bar + 0x18);
+        if (by1 != 0 || by2 > 30 || (bx2 - bx1) < 100) continue;  /* status bar */
+        /* The counter is the WIDE widget in the bar (73 px; the icons are 16-22
+           px). It is not a label -- class 0x1012c828, probably the textarea the
+           scene log mentions -- and it holds one leaf child, class 0x1012c7f0,
+           which is what actually shows the number. Write to that child, chosen
+           by geometry and by being a leaf, never to the container itself. */
+        uint32_t bn = lv_obj_child_cnt((void *)bar);
+        if (bn > 8) bn = 8;
+        for (uint32_t j = 0; j < bn; j++) {
+            uint32_t o = (uint32_t)lv_obj_get_child((void *)bar, j);
+            if (o < 0x01000000) continue;
+            int16_t ox1 = *(volatile int16_t *)(o + 0x14);
+            int16_t ox2 = *(volatile int16_t *)(o + 0x18);
+            if ((ox2 - ox1) < 50) continue;            /* skip the icons */
+            void *k = lv_obj_get_child((void *)o, 0);
+            if (!k || lv_obj_child_cnt(k) != 0) continue;
+            /* Class-checked again, and with the COPYING setter this time. The
+               crash came from using the static-text variant (which stores a
+               pointer and sets a flag) on a widget of a different class. */
+            if (*(volatile uint32_t *)k != LV_CLASS_COUNTER_IN) continue;
+            /* Only when it actually differs. This setter strlens and REALLOCS,
+               and calling it on every render churned the LVGL heap about three
+               times a second -- the same heap our own state is allocated from.
+               The text pointer lives at +0x24. */
+            const char *cur = *(const char *volatile *)((uint32_t)k + 0x24);
+            if (cur) {
+                int i = 0;
+                while (buf[i] && cur[i] == buf[i]) i++;
+                if (buf[i] == 0 && cur[i] == 0) continue;   /* identical */
+            }
+            lv_label_set_text_copy(k, buf);
+        }
+    }
+}
+
+/* Record our position for the vendor's bookmark, ONCE, on the way out.
+ *
+ * ebook_bmk_update saves 0x1801a080 into the .bmk and _reading_create_content
+ * restores it on open. Syncing it on every render fed back: total_lines is
+ * still being computed, so the converted value kept changing, the vendor's line
+ * moved with it, and our own turn detection read that as a page turn -- which
+ * is why advancing past 1.0% snapped back to 0.6%. Written only here, when the
+ * return button is pressed, there is nothing to feed back into.
+ */
+void exit_body(void)
+{
+    if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st) return;
+    struct inj_state *S = ANCHOR->st;
+    int32_t tl = (int32_t)*FW_TOTAL_LINES;
+    int32_t sz = (int32_t)*FW_BOOK_SIZE;
+    if (tl <= 0 || sz <= 0 || S->cur.start <= 0) return;
+    *FW_CUR_LINE = (uint32_t)((S->cur.start / 64) * tl / (sz / 64 + 1));
+    static const char e[] = "%s%s: EXIT line=%d\n";
+    fw_log(e, "", "inj", (int)*FW_CUR_LINE);
+}
+
+/* Detour on _ebook_return_btn_event_cb (0x100494dc); replicates its prologue
+   and re-enters past the four patched bytes. */
+__attribute__((naked)) void exit_hook(void)
+{
+    __asm__ volatile(
+        "push  {r0-r3, lr}\n"
+        "bl    exit_body\n"
+        "pop   {r0-r3, lr}\n"
+        "push.w {r4, r5, r6, r7, r8, lr}\n"   /* the overwritten insn */
+        "movw  r12, #0x94e1\n"                /* 0x100494e0 | thumb  */
+        "movt  r12, #0x1004\n"
+        "bx    r12\n");
 }
 
 /* ---- scroll probe: stage 1 of owning input -------------------------- */
@@ -595,6 +786,7 @@ void after_render(void)
     if (!S) return;
 
     disable_tts_button(cont);
+    show_percent(cont, S);
 
     uint32_t n = lv_obj_child_cnt(cont);
     if (n > INJ_LINES) n = INJ_LINES;
@@ -611,19 +803,41 @@ void after_render(void)
         S->need_prep = 1;
     } else if (S->want < 0 && line != S->last_line) {
         int delta = line - S->last_line;
-        if (delta < 0) delta = -delta;
-        if (delta > (int)*FW_LINES_PER_PG) {
-            /* More than one vendor page in one step: this is "select page",
-               an ABSOLUTE position, not a turn. Treating every change as a
-               +/-1 turn is why picking page 10 walked one page instead.
-               The offset is resolved on the ebook thread, which owns the file. */
-            S->jump_line = line;
-            S->sp = 0;
-        } else if (delta > 0 && line > S->last_line) {
+        int lpp = (int)*FW_LINES_PER_PG;
+        if (lpp <= 0) lpp = 8;
+        /* Leaving the book resets the vendor's line to 0 as the scene tears
+           down (traced: _ebook_return_btn_event_cb RETURN, then our jump to
+           offset 0). Acting on that threw the position away on the way out and
+           the zero then got saved, so the book reopened at the beginning.
+           A line of 0 is only a real destination if we are already there. */
+        {
+            static const char dl[] = "%s%s: DELTA=%d\n";
+            fw_log(dl, "", "inj", delta);
+        }
+        /* A press moves the line by about one page; the background
+           recalculation moves it by far more. Bounding by 2 pages keeps the
+           noise out without assuming the step is exactly lines_per_page --
+           requiring exact equality stopped every turn from registering. */
+        if (delta > 2 * lpp || delta < -2 * lpp) {
+            /* Not a page turn. The background pagination keeps adjusting the
+               line as total_lines grows, and mapping those through
+               size * line / total_lines walked the reader BACKWARDS by a
+               varying amount each time -- the 1.0% -> 0.6/0.7/0.8% hops.
+               Selections now arrive as cmd 4 instead, so this is just noise. */
+            S->last_line = line;
+        } else if (delta > 0) {
             push_back(S, S->cur.start);
             S->want = S->cur.end;
-        } else {
-            S->want = S->sp ? S->back[--S->sp] : 0;
+        } else if (S->sp) {
+            S->want = S->back[--S->sp];
+        } else if (S->cur.start > 0) {
+            S->want_prev = 1;          /* no history: compute it exactly */
+        } else if (0) {
+            /* No history -- we got here by an absolute jump, which clears the
+               stack. Falling back to offset 0 sent "back" to the first page
+               while the vendor's counter kept counting down. Map its new line
+               instead; pagination is aligned, so that IS the previous page. */
+            S->jump_line = line;
         }
         S->last_line = line;
         S->need_prep = 1;

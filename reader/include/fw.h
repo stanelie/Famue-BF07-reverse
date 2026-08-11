@@ -124,3 +124,14 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
 #define FW_LINES_PER_PG ((volatile uint8_t  *)0x1801a098)  /* divisor, not a shift */
 #define FW_BMK_FILE     ((fs_file_t *)0x1801a0ac)          /* the .bmk handle   */
 #define fs_write ((int (*)(fs_file_t *, const void *, uint32_t))0x1007fd75)
+
+/* Real lv_label_set_text(obj, text): strlen + realloc + COPY into obj+0x24.
+   [OBSERVED] the vendor uses this for status widgets (it formats "%d/%d" and
+   calls it). Distinct from 0x100ec577 above, which stores the POINTER and
+   takes a flag -- the static-text variant, fine for our own constant buffers
+   but not for these widgets. */
+#define lv_label_set_text_copy ((void (*)(void *, const char *))0x100fe945)
+
+/* Widget classes, read live from the running scene. */
+#define LV_CLASS_OUR_LINES   0x10129b54u   /* the 18 reading labels        */
+#define LV_CLASS_COUNTER_IN  0x1012c7f0u   /* leaf inside the page counter */

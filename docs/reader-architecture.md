@@ -457,3 +457,65 @@ holding ~16 characters a line, half of them blank -- is resolved.
 
 `MSG`, `SCROLL`, `SY`, `L` and `JUMP`/`TURN`/`BOOK` logging is enabled in the
 flashed build (3922 bytes). Strip it once the input path is settled.
+
+---
+
+# Session state, 2026-08-10 evening (pause point)
+
+## Working
+
+Reflow, pre-render, single-stage repaint, paragraph gaps, TTS button disabled,
+back-after-jump, and **progress shown as a percentage** instead of a page
+number -- the counter reads e.g. `1.4%`, computed from byte offset over file
+size, exact from the first page and portable between devices.
+
+## Open bug: the reader stops advancing at ~1.0%
+
+Not diagnosed. A capture at the stall was set up but not yet run.
+
+What the last capture DID establish:
+
+- **Every real page turn moves the vendor's line by exactly 8** (23 of 23
+  presses). So the lines-per-page payload patch is NOT changing the reading
+  scene's stepping, and the claim that pagination is "aligned" to our 12 lines
+  is wrong -- it may only affect the totals.
+- At the 1.0% point the line moved by **-184** in one step. That is the
+  background pagination recalculating, not a user action; it is now ignored
+  (outside a two-page bound), which fixed the earlier symptom where the reader
+  hopped back to 0.6/0.7/0.8% by a varying amount. The varying size came from
+  mapping that line through `size * line / total_lines` while `total_lines` was
+  still growing.
+
+Next step on resume: run the stall capture and read whether `DELTA`/`TURN`
+still appear after it stops. If they do, detection is fine and the fault is in
+preparing or swapping the page; if they stop, the reading scene itself is
+wedged and our logic is not in the loop.
+
+## The pattern behind most of today's bugs
+
+Every one came from treating the vendor's line counter as intent. It moves for
+reasons that have nothing to do with the user: TTS walks it, scene teardown
+zeroes it (which also got the zero SAVED, so resume started at the beginning),
+and the background pagination recalculates it. Reading it caused phantom turns;
+writing it -- to fix resume -- caused phantom turns in the other direction.
+
+The durable fix is to stop translating position into the vendor's line units at
+all: keep the byte offset in our own bookmark. `fs_write` (`0x1007fd74`) and the
+`.bmk` handle (`0x1801a0ac`) are both known, and the bookmark area of that file
+(`0..0x1e0`) has room. That removes the last shared field and the dependence on
+a background scan that is still running.
+
+## Also worth doing
+
+- Suppress the background pagination entirely by writing a valid `page_magic`
+  (`0x55aaaa55`) and total into the `.bmk` header, so the firmware treats the
+  scan as done. This is the "wasted resources" point, and it also stabilises
+  `total_lines`.
+- `_ebook_return_btn_event_cb` (`0x100494dc`) is an LVGL event callback that
+  receives MANY event codes -- its own first instruction is `cmp r0, #4` to
+  filter. A detour placed before that filter runs on ordinary interaction. Do
+  not hook it without replicating the filter.
+- `lv_label_set_text_copy` (`0x100fe945`) strlens and REALLOCS; never call it
+  per render. The static-text variant already in use for our own lines is
+  `0x100ec577` and takes a flag argument -- using the wrong one crashed the
+  device on book open.
