@@ -141,3 +141,11 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
    `cbz` right before `bl ebook_calculate_pages` (0x1004c0b0 / 0x1004c0b8).
    Clearing it skips that call -- no rebuild, no file writes, no churn. */
 #define FW_REPAGINATE ((volatile uint8_t *)0x1806517b)
+
+/* msg_manager_get_shared_info(name, buf, size) -- how _reading_btn_event_cb
+   and ebook_bmk_init fetch app state. "APP_FILE_PATH_INFO" carries the open
+   book's path; the firmware's own copy of that key is at 0x10160ab4. */
+#define fw_get_shared_info ((int (*)(const char *, void *, uint32_t))0x100ff07f)
+#define FW_KEY_FILE_PATH   ((const char *)0x10160ab4)
+#define fs_open ((int (*)(fs_file_t *, const char *, uint8_t))0x1007fba9)
+#define FS_O_READ 0x01

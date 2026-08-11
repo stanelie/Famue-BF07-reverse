@@ -64,6 +64,7 @@ struct inj_state {
     int32_t  last_sy;                 /* container scroll offset, observed */
     int32_t  last_pm;                 /* last shown progress, in tenths    */
     uint32_t fwd_frame;               /* frame of the last forward turn    */
+    uint32_t probe_calls;             /* throttle for the path lookup       */
     uint8_t  want_prev;               /* back with no history: find it      */
     /* The page read buffer lives HERE, not on the stack. The ebook thread has
        a 2280-byte stack and Zephyr reported only 328 bytes ever unused -- a
@@ -496,6 +497,38 @@ void prepare_body(void)
      * carried over -- which is what made a return visit resume in the wrong
      * place. Identity is a hash of the first bytes plus the vendor's total
      * page count; the vendor's own line index then supplies the position. */
+    /* Open the book OURSELVES, as soon as we lack a handle.
+     *
+     * Sharing the vendor's handle means our seek-before-every-read moves the
+     * file position under its decoder. Its log fills with "file read error
+     * (-5)", its decode fails -- and the render call our hook rides on
+     * (0x100493a8) is CONDITIONAL, skipped when the decode fails. So our hook
+     * stops being called entirely: `calls` frozen at 44 while the vendor's own
+     * page count kept rising and both threads sat healthy. That is the reader
+     * "stopping at 1.0%".
+     *
+     * A memcpy of the handle does not work (the FS layer tracks more than the
+     * struct); a real open does. The path comes from the vendor's own
+     * shared-info block. NOT inside the book-change branch: our state survives
+     * across sessions, so that branch often never runs. */
+    /* STAGED: this build only LOOKS UP the path -- it does not open anything.
+     *
+     * The version that also called fs_open rebooted the device on book open,
+     * and two calls were introduced at once (fw_get_shared_info and fs_open)
+     * plus a 140-byte buffer on a thread whose stack margin is known to be
+     * thin. So: smaller buffer, lookup only, and report what it finds. If this
+     * boots, the getter and the buffer are fine and fs_open is the fault --
+     * most likely opening a file the vendor already holds open. */
+    /* REMOVED: fw_get_shared_info(0x100ff07f).
+     *
+     * Calling it rebooted the device on book open even with nothing else in
+     * the block -- so that address or its convention is wrong, despite
+     * _reading_btn_event_cb appearing to call it as (name, buf, size) at
+     * 0x10048d96. Not worth more boots to guess at: the path can be read
+     * straight out of RAM instead, once its buffer is located with the book
+     * open. Getting our own file handle stays the goal -- sharing the vendor's
+     * is what stalls the reader -- but it needs the path found passively. */
+
     {
         char sig[64];
         uint32_t h = 2166136261u;
@@ -957,6 +990,29 @@ void after_render(void)
     if ((uint32_t)cont < 0x01000000) return;
     struct inj_state *S = state();
     if (!S) return;
+
+    /* Lift the page clamp.
+     *
+     * The page-turn handler (0x100495d8, an event callback registered by the
+     * scene alongside the scroll one) computes the next page from the line and
+     * then clamps it:
+     *     ldr r1,[r5,#0x19c]   ; total pages, as the vendor knows them
+     *     cmp r4, r1 ; it ge ; mov r4, r1
+     *     bl  0x100eb534       ; go to page r4
+     * With its background scan incomplete that total is tiny, so the page is
+     * pinned and the line snaps back -- the 0.9 <-> 1.0% loop. Proven by
+     * writing 4096 into the line and pressing next: it came back as 8, i.e.
+     * recomputed and clamped, not incremented.
+     *
+     * Publishing our own page count from the file size removes the ceiling. */
+    {
+        uint32_t sz = *FW_BOOK_SIZE;
+        if (sz > 0 && sz < 0x400000u) {
+            uint32_t pages = (sz / 25) / 8 + 2;      /* 25.2 bytes per line */
+            volatile uint32_t *tp = (volatile uint32_t *)((uint32_t)rd + 0x19c);
+            if (*tp < pages) *tp = pages;
+        }
+    }
 
     disable_tts_button(cont);
     show_percent(cont, S);

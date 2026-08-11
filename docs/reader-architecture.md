@@ -689,3 +689,64 @@ press moves it +8 and it pulls it back -8, which the reader followed as a page
 back -- the 0.9 <-> 1.0% bounce. A negative delta arriving within ~3 frames of
 a forward turn is now rejected as that rebound. A real back press never lands
 that fast. This restores usable reading; it does not explain the behaviour.
+
+## Why the reader stalls: our hook gets switched off
+
+Traced with a sentinel write and a live state dump, and it explains the whole
+family of symptoms.
+
+**Our code stops being called.** With the reader stuck, `calls` was frozen at 44
+while the vendor's page total kept rising (2023 -> 2036 -> 2049), both threads
+`pending` and healthy, and the display timer alive with the right callback
+(`timer+0x08 = 0x1004937d`, user data the reader object, repeat infinite).
+
+**Because the render call is conditional.** The timer callback calls the render
+function at `0x100493a8` only when the preceding decode succeeds (`cbnz` skips
+it). Our hook rides on that call, so when the vendor's decode fails, our reader
+goes silent while everything around it looks fine.
+
+**And its decode fails because we share its file handle.** We `fs_seek` before
+every read; its decoder reads from the same handle and lands in the wrong place
+-- which is what fills its log with `file seek/read error (-5)`. One chain
+explaining the blank pages, the stall, the EIO storm and the "not responding".
+
+**Likely the deeper reason: cross-thread use of one handle.** Our reads run on
+the EBOOK thread (from the message-loop hook) while the decode runs on the
+DISPLAY thread (from the timer). Two threads seeking one file handle with no
+lock will corrupt each other's position regardless of who is "careful".
+
+## The page-turn handler (found)
+
+`0x100495d8` -- an unnamed function that reads as `_ebook_return_btn_event_cb+0xfc`
+-- is the tap handler, registered by the scene alongside the scroll callback
+(literals at `0x1004a3fc` and `0x1004a400`). It computes the next page from the
+line, clamps it, and jumps:
+
+```
+0x1004966a  ldr.w r1,[r5,#0x198]   ; line
+0x10049674  asrs  r1, r1, #3       ; page = line / 8
+0x10049676  adds  r4, r1, #1       ; next page
+0x10049624  ldr.w r1,[r5,#0x19c]   ; total pages
+0x1004962a  it ge / mov r4, r1     ; CLAMP
+0x10049648  bl 0x100eb534          ; go to page r4
+```
+
+So the line is RECOMPUTED from a page number, never incremented -- proven by
+writing 4096 into it and pressing next, which produced 8. That is why no `+8`
+store exists anywhere and why every offset search failed.
+
+## Dead ends recorded
+
+- `fw_get_shared_info` at `0x100ff07f` **reboots the device** when called as
+  `(name, buf, size)`, even alone, even though `_reading_btn_event_cb` calls
+  `0x100ff07e` exactly that way at `0x10048d96`. Address or precondition wrong.
+- The book path is **not retained in RAM** while the book is open (a sweep of
+  `0x18000000-0x18020000` and `0x01000000-0x01010000` finds `/SD1://EBOOK.LIB`
+  and the font paths, but no book filename), so a second `fs_open` cannot get
+  its path passively.
+
+## Next
+
+Test the cross-thread hypothesis first, since it needs no path: do our file
+reads on the SAME thread as the vendor's decode, or take the FS lock around
+them. If the vendor's decode stops failing, the stall goes with it.
