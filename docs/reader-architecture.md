@@ -805,3 +805,55 @@ NOT retained in RAM, this is the route to our own handle.
 
 Next: locate the topdir/cluster/entry the app holds, then call
 `fs_open_cluster` with them.
+
+# The private file handle, and what the trampoline proved
+
+## The stall was ours, not the vendor's
+
+A pure-observer RAM payload (no calls into our own code) settled months of
+guessing in one run: with our reader out of the loop, **the vendor's reading
+line advances perfectly on every press** -- 0, 8, 16, 24, 32, 40, 48, 56. Its
+input path and its pagination are healthy. The stall exists only when our code
+runs.
+
+The mechanism: we shared the vendor's file handles. Our `fs_seek` moves the
+position under its decoder; its decode then fails; and the render call we hooked
+is CONDITIONAL (`cbnz r0` at 0x100493a4 skips it when the fourth decode returns
+non-zero), so our reader was silently switched off. Traced directly: `calls`
+frozen while the ebook thread spun, both threads healthy, timer alive.
+
+Two fixes followed:
+
+- **Hook the timer TAIL** (`0x100493b2`, the `b.w` to the timer-resume helper)
+  instead of the conditional render call. It is reached on every tick whatever
+  the decode does, and still runs after the vendor has drawn.
+- **Share nothing.** No reads, no writes, no seeks on the vendor's book handle
+  or its `.bmk` handle -- not even as a fallback. Position persistence is
+  disabled until it has its own handle.
+
+## Opening our own handle: the bug that cost hours
+
+`fs_open` worked from the first attempt. The acceptance test did not:
+
+```
+entry 0: rc=-2      entry 1: rc=-2
+entry 8: rc=0       <-- the open book, opened fine
+         size=0     <-- and REJECTED on this
+```
+
+`fs_file_t+0x0c` holds the file size only on the vendor's long-lived handle; on
+a freshly opened one it reads 0. So the correct file was opened, judged a
+mismatch, closed -- sixteen times per attempt -- leaving nothing to read and a
+blank page. It looked exactly like a filesystem failure.
+
+The file is now identified by **probing its length**: the byte at `size-1` must
+read, and one byte at `size` must not. That needs no field the FS may not fill.
+
+## Still open
+
+- Page turns take ~2 s with a healthy handle (`file_ready=1`, `io_fail=0`), so
+  the cost is elsewhere -- the per-prepare signature read at offset 0 is a
+  candidate.
+- It still loops around 1%: `cur.start` sits at 4845 with `last_line=8`, which
+  is turn detection, not I/O.
+- Per-book resume is off until the bookmark gets its own handle.

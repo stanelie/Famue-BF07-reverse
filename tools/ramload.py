@@ -75,6 +75,17 @@ class Shell:
             for i, w in enumerate(m.group(2).split()):
                 out[base + i * 4] = int(w, 16)
         if not out:
+            # the firmware's own charge/idle logging can swamp a reply, so
+            # retry rather than treating one silent read as a dead device
+            for _ in range(3):
+                time.sleep(0.3)
+                txt = self.cmd(f"dbg mdw 0x{addr:08x} {words:x}", 0.6 + words * 0.002)
+                for m in re.finditer(r"^([0-9a-f]{8}): ((?:[0-9a-f]{8} ?){1,4})", txt, re.M):
+                    base = int(m.group(1), 16)
+                    for i, w in enumerate(m.group(2).split()):
+                        out[base + i * 4] = int(w, 16)
+                if out:
+                    return out
             raise RuntimeError("no reply from the device")
         return out
 
@@ -147,19 +158,27 @@ def main():
             sh.wr(buf + i, word)
             if (i // 4) % 128 == 0:
                 print(f"   {i}/{len(blob)}", flush=True)
-        # verify
-        bad = 0
-        for i in range(0, len(blob), 4 * 4):
-            got = sh.rd(buf + i, 4)
-            for j in range(4):
-                if i + j * 4 >= len(blob):
-                    break
-                want = int.from_bytes(blob[i + j * 4:i + j * 4 + 4], "little")
-                if got.get(buf + i + j * 4) != want:
-                    bad += 1
-        print(f"uploaded in {time.time()-t0:.0f}s, {bad} mismatched words")
+        # Verify and REPAIR. The shell drops the occasional write when driven
+        # hard, so a first pass typically leaves a handful of words wrong.
+        for attempt in range(4):
+            bad = []
+            for i in range(0, len(blob), 4 * 4):
+                got = sh.rd(buf + i, 4)
+                for j in range(4):
+                    off = i + j * 4
+                    if off >= len(blob):
+                        break
+                    want = int.from_bytes(blob[off:off + 4], "little")
+                    if got.get(buf + off) != want:
+                        bad.append((off, want))
+            print(f"   pass {attempt}: {len(bad)} words wrong")
+            if not bad:
+                break
+            for off, want in bad:
+                sh.wr(buf + off, want, wait=0.05)   # slower rewrite
+        print(f"uploaded in {time.time()-t0:.0f}s")
         if bad:
-            raise SystemExit("verify failed -- not activating")
+            raise SystemExit("verify still failing -- not activating")
         sh.wr(moff, CODE_MAGIC)
         print("activated")
         return

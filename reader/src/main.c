@@ -220,10 +220,18 @@ static int book_read(struct inj_state *S, int32_t off, char *buf, uint32_t len)
         }
         return -1;                    /* never fall through to the shared one */
     }
-    /* Report seek and read separately. A blank page means this returned
-       nothing, and the three candidate causes need different fixes:
-       the handle went invalid (the vendor logs fopen/fclose pairs, so it may
-       close the book under us), the seek failed, or the read came up short. */
+    /* Never touch the vendor's handle -- not even as a fallback.
+     *
+     * Proven with a pure-observer payload: with our reader out of the loop the
+     * vendor's line advances perfectly on every press (0,8,16,...,56), so its
+     * input and pagination are healthy. The stall exists only when our code
+     * runs, and the mechanism is our fs_seek moving the position under its
+     * decoder. Until our own handle is open we simply have no data. */
+    return -1;
+}
+
+static int book_read_vendor_UNUSED(int32_t off, char *buf, uint32_t len)
+{
     int sk = fs_seek(FW_BOOK_FILE, off, FS_SEEK_SET);
     if (sk < 0) {
         static const char f1[] = "%s%s: IOERR seek rc=%d\n";
@@ -512,7 +520,17 @@ void prepare_body(void)
     /* Persist OUR position -- a byte offset, in our own record, in the page
        index region the vendor no longer uses. No translation into its line
        units, so nothing depends on a scan that no longer runs. */
-    if (S->cur.start != S->saved_off && S->cur.start >= 0) {
+    /* DISABLED: writing our bookmark through the vendor's .bmk handle.
+     *
+     * It is the last place we still share a file handle with the vendor, and
+     * sharing is what breaks it: our fs_seek moves the position under the code
+     * that writes its page index into that same file. Measured with a pure
+     * observer payload -- with our reader out of the loop the vendor's line
+     * advances perfectly (0,8,16,...56 on successive presses), so input and its
+     * pagination are fine; the stall only appears when our code runs.
+     *
+     * Position persistence needs its own handle before this comes back. */
+    if (0 && S->cur.start != S->saved_off && S->cur.start >= 0) {
         uint32_t rec[3];
         rec[0] = INJ_BMK_MAGIC;
         rec[1] = (uint32_t)S->cur.start;
@@ -587,8 +605,19 @@ void prepare_body(void)
             path[k] = 0;
             fw_memset(&S->my_file, 0, sizeof(fs_file_t));
             if (fs_open(&S->my_file, path, FS_O_READ) >= 0) {
-                uint32_t sz = *(volatile uint32_t *)((uint32_t)&S->my_file + 0x0c);
-                if (sz == want) {
+                /* Identify the file by PROBING its length, not by reading
+                   fs_file_t+0x0c: that field is only populated on the vendor's
+                   long-lived handle and reads 0 on a fresh open, so the correct
+                   file was opened, judged a mismatch and closed -- every time.
+                   Proven from RAM: entry 8 opens, last byte reads, one past the
+                   end does not. */
+                char probe;
+                int at_end = 0, past_end = 1;
+                if (fs_seek(&S->my_file, (int32_t)want - 1, FS_SEEK_SET) >= 0)
+                    at_end = (fs_read(&S->my_file, &probe, 1) == 1);
+                if (fs_seek(&S->my_file, (int32_t)want, FS_SEEK_SET) >= 0)
+                    past_end = (fs_read(&S->my_file, &probe, 1) == 1);
+                if (at_end && !past_end) {
                     S->file_ready = 1;
                     static const char ok[] = "%s%s: OWNFILE opened entry %d\n";
                     fw_log(ok, "", "inj", i);
@@ -647,7 +676,10 @@ void prepare_body(void)
                    does not go through the vendor's line units at all. */
                 uint32_t rec[3];
                 int have = 0;
-                if (fs_seek(FW_BMK_FILE, INJ_BMK_OFF, FS_SEEK_SET) >= 0 &&
+                /* The .bmk read is disabled with the write: seeking the
+                   vendor's bookmark handle corrupts the file it writes its
+                   page index into, exactly as with the book handle. */
+                if (0 && fs_seek(FW_BMK_FILE, INJ_BMK_OFF, FS_SEEK_SET) >= 0 &&
                     fs_read(FW_BMK_FILE, rec, sizeof rec) == (int)sizeof rec &&
                     rec[0] == INJ_BMK_MAGIC && rec[2] == *FW_BOOK_SIZE &&
                     rec[1] < rec[2]) {
@@ -1229,6 +1261,30 @@ void after_render(void)
         if (!c) continue;
         lv_label_set_text(c, (i < S->cur.nlines) ? S->cur.text[i] : "", 0);
     }
+}
+
+/* Hook the TIMER TAIL, not the render call.
+ *
+ * The timer callback skips the render call when its fourth decode returns
+ * non-zero (`cbnz r0` at 0x100493a4), so a failing vendor decode cut our reader
+ * out completely: traced at the stall, after_render was never entered while the
+ * ebook thread spun, and `calls` sat frozen. The tail at 0x100493b2 -- the
+ * `b.w` to the timer-resume helper -- is reached on EVERY tick regardless, and
+ * it runs after the vendor has drawn, which is where we want to be so our text
+ * is not overwritten.
+ *
+ * The original is a tail call: r4/lr are already popped and r0 holds the timer
+ * argument, so both are preserved across our call and we jump on to the helper.
+ */
+__attribute__((naked)) void tail_hook(void)
+{
+    __asm__ volatile(
+        "push  {r0, r1, r2, r3, lr}\n"
+        "bl    after_render\n"
+        "pop   {r0, r1, r2, r3, lr}\n"
+        "movw  r12, #0xd8c3\n"        /* 0x100fd8c2 | thumb */
+        "movt  r12, #0x100f\n"
+        "bx    r12\n");
 }
 
 __attribute__((naked)) void render_hook(void)
