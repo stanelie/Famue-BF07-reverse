@@ -27,6 +27,14 @@
    vendor's page index, which is dead space once its pagination is off. */
 #define INJ_BMK_MAGIC 0x53504452u
 #define INJ_BMK_OFF   0x200
+/* Trampoline: host writes code into S->code_buf, then sets S->code_magic.
+   The entry takes (what, state): 0 = after_render, 1 = prepare_body. */
+#define INJ_CODE_MAGIC 0x434f4445u
+/* 1.5 KB, not 8 KB: an 8 KB grab made the reading scene fail to build and the
+   device rebooted on book open -- the LVGL heap has to fit the scene's widgets
+   too, and our state block already takes ~2 KB of it. A focused replacement
+   function fits easily; the flashed code stays as the fallback for the rest. */
+#define INJ_CODE_SIZE  1536
 /* The vendor paginates 8 of its own lines to a page (its reading_line at
    +0x194 advances by 8 per turn; +0x19c holds its total page count). */
 #define VENDOR_LINES_PER_PAGE 8
@@ -85,6 +93,20 @@ struct inj_state {
     fs_file_t my_file;
     uint8_t  file_ready;
     uint8_t  io_fail;                 /* consecutive read failures          */
+    /* RAM trampoline: iterate without flashing.
+     *
+     * Every flash ends with the device in ADFU needing a physical button --
+     * no soft reboot exists (SYSRESETREQ re-enters ADFU, the reboot-type
+     * register is consumed by the boot ROM, and opcode 0x22 reaches only a
+     * shell-less USB mode). So a test costs a human round trip, which is what
+     * made guessing expensive all evening.
+     *
+     * Instead: allocate a code buffer once, let the host write new code into
+     * it over UART with `dbg mww`, and call into it from the hooks. Null or
+     * unset magic means the built-in code runs, so a bad upload degrades to
+     * current behaviour rather than breaking the reader. */
+    uint32_t code_magic;
+    void    *code_buf;
     struct page cur;                  /* on screen                         */
     struct page nxt;                  /* pre-rendered, ready to swap in    */
     int32_t  back[BACKSTACK];
@@ -438,11 +460,21 @@ static int32_t offset_of_line(struct inj_state *S, int32_t target,
     return off;
 }
 
+/* Hand control to RAM code when the host has installed some. */
+static int trampoline(struct inj_state *S, int what)
+{
+    if (!S || S->code_magic != INJ_CODE_MAGIC || !S->code_buf) return 0;
+    ((void (*)(int, struct inj_state *))(((uint32_t)S->code_buf) | 1))(what, S);
+    return 1;
+}
+
 void prepare_body(void)
 {
     /* Services only what the display thread asked for; never creates state. */
     if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st) return;
     struct inj_state *S = ANCHOR->st;
+
+    if (trampoline(S, 1)) return;
     /* Switch the vendor's background pagination OFF, every cycle.
      *
      * We do not need it: progress is a percentage of the file, and page turns
@@ -1043,6 +1075,13 @@ void after_render(void)
     if ((uint32_t)cont < 0x01000000) return;
     struct inj_state *S = state();
     if (!S) return;
+    /* Allocate the upload buffer HERE, on the display thread.
+       lv_mem_alloc is LVGL's allocator and LVGL is not thread-safe; calling it
+       from the ebook thread (as prepare_body did) corrupted the heap and
+       rebooted the device on book open. state() has always allocated from this
+       thread, which is why it never showed the problem. */
+    if (!S->code_buf) S->code_buf = lv_mem_alloc(INJ_CODE_SIZE);
+    if (trampoline(S, 0)) return;      /* RAM code owns the render pass */
 
     /* Lift the page clamp.
      *
