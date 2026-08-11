@@ -105,6 +105,7 @@ struct inj_state {
      * it over UART with `dbg mww`, and call into it from the hooks. Null or
      * unset magic means the built-in code runs, so a bad upload degrades to
      * current behaviour rather than breaking the reader. */
+    volatile uint8_t tapped;          /* the user actually pressed something */
     uint32_t code_magic;
     void    *code_buf;
     struct page cur;                  /* on screen                         */
@@ -1154,7 +1155,8 @@ void after_render(void)
         S->last_line = line;
         S->jump_line = line;
         S->need_prep = 1;
-    } else if (S->want < 0 && line != S->last_line) {
+    } else if (S->want < 0 && line != S->last_line && S->tapped) {
+        S->tapped = 0;
         int delta = line - S->last_line;
         int lpp = (int)*FW_LINES_PER_PG;
         if (lpp <= 0) lpp = 8;
@@ -1261,6 +1263,41 @@ void after_render(void)
         if (!c) continue;
         lv_label_set_text(c, (i < S->cur.nlines) ? S->cur.text[i] : "", 0);
     }
+}
+
+/* The USER-INPUT signal.
+ *
+ * 0x100495d8 is the tap handler (registered by the scene beside the scroll
+ * callback): it computes page = line/8 + 1, clamps, and jumps. Its entry is the
+ * only authoritative "the user pressed something" event we have.
+ *
+ * Why we need it: the vendor RECOMPUTES its reading line from the list's scroll
+ * position, and our drawing never moves that scroll -- so after a press the
+ * line goes +8 and is then pulled back -8 a second or two later. Our turn
+ * detection read that rebound as a page back, giving the endless 0.9<->1.0%
+ * loop. Timing cannot separate the two (the bounce arrives 1-2.5 s later, and
+ * so does a real back press), but this flag can: only a line change that
+ * follows a genuine tap counts.
+ *
+ * Replicates `push {r4,r5,r6,lr}` and `mov r4,r0`, then re-enters at +4.
+ */
+void tap_body(void)
+{
+    if (ANCHOR->magic == INJ_MAGIC && ANCHOR->st)
+        ANCHOR->st->tapped = 1;
+}
+
+__attribute__((naked)) void tap_hook(void)
+{
+    __asm__ volatile(
+        "push  {r0-r3, lr}\n"
+        "bl    tap_body\n"
+        "pop   {r0-r3, lr}\n"
+        "push  {r4, r5, r6, lr}\n"     /* overwritten insn 1 */
+        "mov   r4, r0\n"               /* overwritten insn 2 */
+        "movw  r12, #0x95dd\n"         /* 0x100495dc | thumb */
+        "movt  r12, #0x1004\n"
+        "bx    r12\n");
 }
 
 /* Hook the TIMER TAIL, not the render call.

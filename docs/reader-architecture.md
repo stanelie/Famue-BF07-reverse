@@ -857,3 +857,75 @@ read, and one byte at `size` must not. That needs no field the FS may not fill.
 - It still loops around 1%: `cur.start` sits at 4845 with `last_line=8`, which
   is turn detection, not I/O.
 - Per-book resume is off until the bookmark gets its own handle.
+
+# Building our own scene: the toolkit is complete
+
+Everything needed to stop borrowing the vendor's view and build our own is now
+identified. This is the answer to "can we bypass the vendor app rather than
+fight it" -- yes, and at the SCENE level it needs no new capability.
+
+## Widget creation (canonical LVGL v8, intact in this build)
+
+```
+lv_img_create(parent)  @ 0x100a3170:
+    mov  r1, r0                     ; parent
+    ldr  r0, =0x1012c7d4            ; the widget CLASS
+    bl   0x10096e20                 ; lv_obj_class_create_obj(class, parent)
+    bl   0x100f7924                 ; lv_obj_class_init_obj(obj)
+```
+
+- **`lv_obj_class_create_obj` = `0x10096e20`** (class, parent) -> obj
+- **`lv_obj_class_init_obj`   = `0x100f7924`** (obj)
+
+Per-widget wrappers mostly do not exist (the UI is resource-driven), but they
+are not needed: any widget can be built from its class.
+
+## Classes
+
+| class | what |
+|---|---|
+| `0x1012bee0` | `lv_obj` -- the base, for containers |
+| `0x1012c7f0` | label (the page counter's inner widget) |
+| `0x1012c7d4` | image |
+| `0x1012c828` | the counter's outer widget (textarea) |
+| `0x10129b54` | the reading list's own text widget |
+
+## Input -- the piece that has blocked everything
+
+```
+0x1004a24e  movs r2, #0x0b          ; filter: LV_EVENT_SCROLL
+0x1004a252  bl   0x100f687c         ; lv_obj_add_event_cb(obj, cb, filter, user_data)
+0x1004a258  movs r2, #4             ; filter: LV_EVENT_SHORT_CLICKED
+0x1004a25e  bl   0x100f687c         ; ...for 0x100495d8, the tap handler
+```
+
+**`lv_obj_add_event_cb` = `0x100f687c`** (obj, cb, filter, user_data).
+
+Four probes failed to find which vendor callback receives a page turn (the
+scroll cb never runs, the button cb only fires at scene setup, no message
+reaches the ebook thread, and the tap cb at `0x100495d8` never set our flag).
+On our own widget that question disappears: we register the callback, so we
+know exactly when the user pressed and on which object.
+
+## Text and fonts
+
+- `lv_label_set_text` (copying) `0x100fe945`; the static-text variant is
+  `0x100ec577` and takes a flag -- using the wrong one crashes on book open.
+- Fonts are files: `/SD1:C/fang16.font`, `fang18`, `sans16`, `sans18`,
+  `you16`, `you18`, opened with `lvgl_bitmap_font_open`.
+
+## Why scene replacement, not a separate app
+
+Launching our own app from the launcher means reversing app registration and
+lifecycle. Replacing the reading SCENE means hooking
+`ebook_scene_reading_enter`, building our own container, labels and event
+callbacks, and never letting the vendor's view exist. Same result for the user,
+far less unknown territory -- and it removes, by construction, every mechanism
+behind tonight's bugs: shared file handles, the vendor's line counter, its
+decode gating our hook, and its scroll recompute.
+
+## First step
+
+A single label of our own on the reading screen, with our own font, drawn from
+our code -- no vendor widget involved. Everything above is address-resolved;
+the SDK provides the matching API semantics.
