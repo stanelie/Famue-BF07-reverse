@@ -519,3 +519,49 @@ a background scan that is still running.
   per render. The static-text variant already in use for our own lines is
   `0x100ec577` and takes a flag argument -- using the wrong one crashed the
   device on book open.
+
+---
+
+# The blank-page bug was the SD CARD, not the reader
+
+Hours went into chasing blank pages and a stall partway through a book. A
+control test settled it: **stock firmware, all five sectors reverted, no hooks,
+no injected code** -- and the fault reproduced exactly, blank pages after ~10
+turns, with 73 filesystem errors:
+
+```
+<E> file seek error (-5)      x many        (-5 = EIO)
+<E> file read error (-5)
+<I> sdcard is plugged
+<I> SD card storage initialized!
+<E> SD card is not detected                 <-- the card drops out
+sdfs cannot found device sd
+```
+
+Our own reads never failed once: every `fill rc=512`, no `IOERR` logged. The
+reader was healthy; the card underneath it was not. Reads succeed while data is
+cached and fail the moment one really has to reach the card, and a failed read
+draws a page with no lines.
+
+**The lesson, and it is expensive: when the vendor's OWN log reports errors,
+run the stock control before attributing anything to your code.** Those EIO
+lines were present in the first full capture and were read past for an hour
+while fixes were flashed for a fault that reproduces perfectly without us.
+
+Real bugs that the hunt did turn up, all worth keeping:
+
+- A 768-byte page buffer as a LOCAL on the ebook thread, whose stack is 2280
+  bytes with 328 ever unused (`kernel threads` reports the watermark). Now a
+  field in the heap-allocated state, sized 512 -- a reflowed page consumes
+  200-280 bytes.
+- `recover()` matched state blocks by magic alone, and the LVGL heap survives a
+  reset, so after any struct change the old block was adopted and every field
+  past the change was read at the wrong offset. The block now carries its own
+  `sizeof`, checked on recovery. This one masked several experiments: results
+  came from a device running a corrupt state, which is why unrelated changes
+  all produced "no change".
+- `lv_label_set_text` has two variants here: `0x100fe944` copies (strlen +
+  realloc) and is what the vendor uses for status widgets; `0x100ec576` stores
+  the pointer and takes a flag. Using the pointer variant on the counter
+  crashed the device on book open, and calling the copying one every render
+  churns the heap.

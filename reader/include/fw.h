@@ -135,3 +135,9 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
 /* Widget classes, read live from the running scene. */
 #define LV_CLASS_OUR_LINES   0x10129b54u   /* the 18 reading labels        */
 #define LV_CLASS_COUNTER_IN  0x1012c7f0u   /* leaf inside the page counter */
+
+/* Guard byte for the background pagination. ebook_bmk_init sets it when it
+   decides the .bmk index must be rebuilt; the reading loop tests it with
+   `cbz` right before `bl ebook_calculate_pages` (0x1004c0b0 / 0x1004c0b8).
+   Clearing it skips that call -- no rebuild, no file writes, no churn. */
+#define FW_REPAGINATE ((volatile uint8_t *)0x1806517b)

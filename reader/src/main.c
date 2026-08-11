@@ -38,6 +38,14 @@ struct page {
 
 struct inj_state {
     uint32_t magic;
+    /* Size of THIS struct, checked on recovery.
+     *
+     * recover() finds blocks by magic, and the LVGL heap survives a reset --
+     * so after a rebuild that changes the layout, the old block still matched
+     * and every field past the change was read at the wrong offset. That drew
+     * blank pages, and it persisted across several flashes because each new
+     * build kept adopting the same stale block. */
+    uint32_t layout;
     uint32_t gen;                     /* generation: newest block wins     */
     uint32_t calls;
     int32_t  last_line;               /* vendor position: a SIGNAL only    */
@@ -51,6 +59,24 @@ struct inj_state {
     int32_t  last_sy;                 /* container scroll offset, observed */
     int32_t  last_pm;                 /* last shown progress, in tenths    */
     uint8_t  want_prev;               /* back with no history: find it      */
+    /* The page read buffer lives HERE, not on the stack. The ebook thread has
+       a 2280-byte stack and Zephyr reported only 328 bytes ever unused -- a
+       768-byte local was most of the margin, and the deeper paths (a page fill
+       inside the previous-page scan) overflowed it. 512 is ample: a reflowed
+       page consumes 200-280 bytes of source. Keeping it at 768 pushed the
+       struct past what lv_mem_alloc would give us, and a failed allocation
+       meant no state, no text drawn, and blank pages. */
+    char     raw[512];
+    /* Our OWN copy of the book's file handle.
+     *
+     * Sharing the vendor's handle meant our seek-before-every-read moved the
+     * file position under code that assumes it owns it. The firmware's own log
+     * fills with "file seek error (-5)" / "file write error (-5)" (EIO), its
+     * pagination misbehaves, and our reads eventually return nothing, which is
+     * what draws blank pages. A copy of the 20-byte handle gives us an
+     * independent position over the same open file -- we only ever read. */
+    fs_file_t my_file;
+    uint8_t  file_ready;
     struct page cur;                  /* on screen                         */
     struct page nxt;                  /* pre-rendered, ready to swap in    */
     int32_t  back[BACKSTACK];
@@ -83,6 +109,7 @@ static struct inj_state *recover(void)
     for (uint32_t a = HEAP_LO; a < HEAP_HI - sizeof(struct inj_state); a += 4) {
         struct inj_state *c = (struct inj_state *)a;
         if (c->magic != INJ_MAGIC) continue;
+        if (c->layout != (uint32_t)sizeof(struct inj_state)) continue;
         /* cheap plausibility check so heap junk can't impersonate a state */
         if (c->cur.nlines > INJ_LINES || c->nxt.nlines > INJ_LINES) continue;
         if (c->cur.start < 0 || c->sp > BACKSTACK) continue;
@@ -105,10 +132,15 @@ static struct inj_state *state(void)
         n->need_prep = 1;
     } else {
         void *p = lv_mem_alloc(sizeof(struct inj_state));
-        if (!p) return 0;
+        if (!p) {
+            static const char af[] = "%s%s: ALLOC FAILED size=%d\n";
+            fw_log(af, "", "inj", (int)sizeof(struct inj_state));
+            return 0;
+        }
         fw_memset(p, 0, sizeof(struct inj_state));
         n = (struct inj_state *)p;
         n->magic = INJ_MAGIC;
+        n->layout = (uint32_t)sizeof(struct inj_state);
         n->gen = 1;
         n->last_line = -1;
         n->want = 0;
@@ -132,11 +164,44 @@ static void *reader_obj(void)
 
 /* Reuses the vendor's OPEN handle (ebook_file_init -> 0x1801a084). Opening the
    book a second time corrupted the FS layer's mutex bookkeeping. */
-static int book_read(int32_t off, char *buf, uint32_t len)
+static int book_read(struct inj_state *S, int32_t off, char *buf, uint32_t len)
 {
-    int rc = fs_seek(FW_BOOK_FILE, off, FS_SEEK_SET);
-    if (rc < 0) return rc;
-    return fs_read(FW_BOOK_FILE, buf, len);
+    if (S && S->file_ready) {
+        int rc = fs_seek(&S->my_file, off, FS_SEEK_SET);
+        if (rc >= 0) {
+            rc = fs_read(&S->my_file, buf, len);
+            if (rc > 0) return rc;
+        }
+        /* Reopening the same book leaves our copy stale. Refresh it from the
+           vendor's live handle and try once more before giving up. */
+        fw_memcpy(&S->my_file, FW_BOOK_FILE, sizeof(fs_file_t));
+        rc = fs_seek(&S->my_file, off, FS_SEEK_SET);
+        if (rc >= 0) {
+            rc = fs_read(&S->my_file, buf, len);
+            if (rc > 0) return rc;
+        }
+        S->file_ready = 0;            /* fall back to the shared handle */
+    }
+    /* Report seek and read separately. A blank page means this returned
+       nothing, and the three candidate causes need different fixes:
+       the handle went invalid (the vendor logs fopen/fclose pairs, so it may
+       close the book under us), the seek failed, or the read came up short. */
+    int sk = fs_seek(FW_BOOK_FILE, off, FS_SEEK_SET);
+    if (sk < 0) {
+        static const char f1[] = "%s%s: IOERR seek rc=%d\n";
+        fw_log(f1, "", "inj", sk);
+        static const char f2[] = "%s%s: IOERR seek off=%d\n";
+        fw_log(f2, "", "inj", off);
+        return sk;
+    }
+    int rd = fs_read(FW_BOOK_FILE, buf, len);
+    if (rd <= 0) {
+        static const char f3[] = "%s%s: IOERR read rc=%d\n";
+        fw_log(f3, "", "inj", rd);
+        static const char f4[] = "%s%s: IOERR read off=%d\n";
+        fw_log(f4, "", "inj", off);
+    }
+    return rd;
 }
 
 /* Proportional width estimate in 1/8 px. The firmware's own measurer
@@ -250,13 +315,13 @@ static int wrap_one(const char *p, int avail, char *out, int indent,
 
 /* ---- page preparation (EBOOK thread only) --------------------------- */
 
-static void fill_page(struct page *p, int32_t off)
+static void fill_page(struct inj_state *S, struct page *p, int32_t off)
 {
-    /* reflow packs ~50% more text per page, so the read window grew with it */
-    char raw[768];
+    char *raw = S->raw;
+    const int RAWSZ = (int)sizeof S->raw;
     p->start = off;
     p->nlines = 0;
-    int rc = book_read(off, raw, sizeof raw);
+    int rc = book_read(S, off, raw, (uint32_t)RAWSZ);
     {
         static const char r1[] = "%s%s: fill off=%d\n";
         static const char r2[] = "%s%s: fill rc=%d\n";
@@ -284,7 +349,7 @@ static void fill_page(struct page *p, int32_t off)
         if (take <= 0) break;
         /* Ran off the end of the read window with more file behind it: the
            line would break mid-word, so drop it rather than show a fragment. */
-        if (why == WHY_EOB && rc == (int)sizeof raw) { p->text[i][0] = 0; break; }
+        if (why == WHY_EOB && rc == RAWSZ) { p->text[i][0] = 0; break; }
         pos += take;
         p->nlines++;
         blank = (why == WHY_PARA);
@@ -309,7 +374,7 @@ static int32_t book_size(struct inj_state *S)
     }
     while (lo < hi) {
         int32_t mid = lo + (hi - lo + 1) / 2;
-        if (book_read(mid - 1, &b, 1) > 0) lo = mid;
+        if (book_read(S, mid - 1, &b, 1) > 0) lo = mid;
         else hi = mid - 1;
     }
     S->size = lo;
@@ -350,7 +415,7 @@ static int32_t offset_of_line(struct inj_state *S, int32_t target,
     r = size % total_lines;                    /* r < total_lines, so r*target */
     off = q * target + (r * target) / total_lines;   /* cannot overflow int32 */
 
-    int rc = book_read(off, buf, sizeof buf);
+    int rc = book_read(S, off, buf, sizeof buf);
     for (int i = 0; i < rc; i++) {
         if (buf[i] == '\n') { off += i + 1; break; }
     }
@@ -383,7 +448,7 @@ void prepare_body(void)
     {
         char sig[64];
         uint32_t h = 2166136261u;
-        int rc = book_read(0, sig, sizeof sig);
+        int rc = book_read(S, 0, sig, sizeof sig);
         if (rc > 0) {
             for (int i = 0; i < rc; i++)
                 h = (h ^ (unsigned char)sig[i]) * 16777619u;
@@ -397,6 +462,12 @@ void prepare_body(void)
             if (rd) vline = *(volatile int32_t *)((uint32_t)rd + RD_OFF_LINE);
             if (h != S->book_sig) {
                 S->book_sig = h;
+                /* Copying the handle does NOT yield a usable independent one:
+                   reads through the copy fail and the page comes back blank.
+                   The FS layer evidently tracks more than the struct contents.
+                   Back to the vendor's handle; decoupling the file position
+                   needs a real second open, not a memcpy. */
+                S->file_ready = 0;
                 S->size = 0;              /* re-probe: different file */
                 S->sp = 0;
                 S->nxt_valid = 0;
@@ -426,13 +497,13 @@ void prepare_body(void)
             if (off < 0) off = 0;
             int32_t start = off;
             for (int i = 0; i < 40; i++) {
-                fill_page(&S->nxt, off);
+                fill_page(S, &S->nxt, off);
                 if (S->nxt.end >= target || S->nxt.end <= off) break;
                 start = off;
                 off = S->nxt.end;
             }
             if (off < target) start = off;
-            fill_page(&S->nxt, start);
+            fill_page(S, &S->nxt, start);
             S->nxt_valid = 1;
             S->want = start;
             static const char pv[] = "%s%s: PREV off=%d\n";
@@ -446,7 +517,7 @@ void prepare_body(void)
            deriving it from a page count times an assumed page size */
         int32_t off = offset_of_line(S, S->jump_line, (int32_t)*FW_TOTAL_LINES);
         S->jump_line = -1;
-        fill_page(&S->nxt, off);
+        fill_page(S, &S->nxt, off);
         S->nxt_valid = 1;
         S->want = off;                     /* after_render swaps it in */
         {
@@ -458,11 +529,11 @@ void prepare_body(void)
 
     if (S->want >= 0) {
         if (!S->nxt_valid || S->nxt.start != S->want) {
-            fill_page(&S->nxt, S->want);
+            fill_page(S, &S->nxt, S->want);
             S->nxt_valid = 1;
         }
     } else if (!S->nxt_valid) {
-        fill_page(&S->nxt, S->cur.end);     /* PRE-RENDER while the user reads */
+        fill_page(S, &S->nxt, S->cur.end);     /* PRE-RENDER while the user reads */
         S->nxt_valid = 1;
     }
 }
@@ -814,11 +885,11 @@ void after_render(void)
             static const char dl[] = "%s%s: DELTA=%d\n";
             fw_log(dl, "", "inj", delta);
         }
-        /* A press moves the line by about one page; the background
-           recalculation moves it by far more. Bounding by 2 pages keeps the
-           noise out without assuming the step is exactly lines_per_page --
-           requiring exact equality stopped every turn from registering. */
-        if (delta > 2 * lpp || delta < -2 * lpp) {
+        /* BASELINE RULE (the one that demonstrably paged correctly): any
+           change is a turn, direction by sign. The bounded and exact-delta
+           variants were both flashed but never confirmed working, so they are
+           not part of the baseline. */
+        if (line <= 0 && S->cur.start > 0) {
             /* Not a page turn. The background pagination keeps adjusting the
                line as total_lines grows, and mapping those through
                size * line / total_lines walked the reader BACKWARDS by a
