@@ -1422,3 +1422,24 @@ room for a real line-breaking / hyphenation implementation.
 function must already have saved it — here it pushes `lr` at `0x10049ec0`, and
 another `bl` sits 18 bytes earlier), and that the replaced instruction is not
 inside an `IT` block (here `it lt` covered only the following `addlt`).
+
+## Leaving ADFU without the button (attempted)
+
+Every flash currently ends with the device in ADFU and needs a physical press,
+which makes each test cost a human round trip. Three routes tried:
+
+| attempt | result |
+|---|---|
+| exec stub writing `SYSRESETREQ` (AIRCR `0xE000ED0C` = `0x05FA0004`) | re-enters ADFU: the boot ROM still sees the ADFU reboot type |
+| exec stub clearing `RTC_REMAIN3` to magic\|NORMAL then `WD_CTL=0x5f` | stays in ADFU -- consistent with dead-ends.md, the boot ROM consumes the reboot reason itself |
+| ADFU opcode `0xcb` (ATJ "reboot") | CSW status 2, unsupported |
+| ADFU opcode `0xb0` (ATJ "reset") | no CSW, device unchanged |
+| **ADFU opcode `0x22`** | **powers the device OFF** (leaves ADFU, no shell, stays dark until the power button) |
+
+**Warning for exec stubs:** end them with `bx lr`, not `b .`. A stub that spins
+leaves the device hung with neither shell nor ADFU when the reset does not take,
+costing a power cycle. The first attempt did exactly that.
+
+No working soft reboot found. Since each blind opcode probe costs a physical
+press, the better path is to stop needing ADFU for iteration -- see the RAM
+trampoline plan in reader-architecture.md.

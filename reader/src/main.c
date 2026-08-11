@@ -84,6 +84,7 @@ struct inj_state {
      * independent position over the same open file -- we only ever read. */
     fs_file_t my_file;
     uint8_t  file_ready;
+    uint8_t  io_fail;                 /* consecutive read failures          */
     struct page cur;                  /* on screen                         */
     struct page nxt;                  /* pre-rendered, ready to swap in    */
     int32_t  back[BACKSTACK];
@@ -177,17 +178,25 @@ static int book_read(struct inj_state *S, int32_t off, char *buf, uint32_t len)
         int rc = fs_seek(&S->my_file, off, FS_SEEK_SET);
         if (rc >= 0) {
             rc = fs_read(&S->my_file, buf, len);
-            if (rc > 0) return rc;
+            if (rc > 0) { S->io_fail = 0; return rc; }
         }
-        /* Reopening the same book leaves our copy stale. Refresh it from the
-           vendor's live handle and try once more before giving up. */
-        fw_memcpy(&S->my_file, FW_BOOK_FILE, sizeof(fs_file_t));
-        rc = fs_seek(&S->my_file, off, FS_SEEK_SET);
-        if (rc >= 0) {
-            rc = fs_read(&S->my_file, buf, len);
-            if (rc > 0) return rc;
+        /* A failure must NOT silently drop us back to the vendor's handle.
+         *
+         * The previous version cleared file_ready on the first failure without
+         * closing anything, so the next cycle re-ran the whole open loop -- up
+         * to 16 fs_open calls per page, leaking a handle each time. That is the
+         * 30-second page turns, and the eventual full stop is the FS running
+         * out of handles. Tolerate a couple of failures, and if the handle is
+         * really dead, CLOSE it before allowing a reopen. */
+        if (++S->io_fail >= 3) {
+            fs_close(&S->my_file);
+            fw_memset(&S->my_file, 0, sizeof(fs_file_t));
+            S->file_ready = 0;
+            S->io_fail = 0;
+            static const char rr[] = "%s%s: OWNFILE closed after failures\n";
+            fw_log(rr, "", "inj", 0);
         }
-        S->file_ready = 0;            /* fall back to the shared handle */
+        return -1;                    /* never fall through to the shared one */
     }
     /* Report seek and read separately. A blank page means this returned
        nothing, and the three candidate causes need different fixes:
@@ -519,6 +528,50 @@ void prepare_body(void)
      * thin. So: smaller buffer, lookup only, and report what it finds. If this
      * boots, the getter and the buffer are fine and fs_open is the fault --
      * most likely opening a file the vendor already holds open. */
+    /* Open the book on OUR OWN handle, by reconstructing its path.
+     *
+     * Why this is the fix: fs_read/fs_seek take no lock (verified -- they are
+     * thin vtable dispatchers), so our reads on the EBOOK thread and the
+     * vendor's decode on the DISPLAY thread corrupt each other's file position
+     * when they share one handle. Its decode then fails, and the render call
+     * we hook is skipped when it does -- which switches our reader off.
+     *
+     * The path is not retained anywhere we can query (the shared-info getter
+     * reboots the device), but the picker's file list IS in RAM: 0x100-byte
+     * entries at 0x18007800, filename at +3. The right entry is the one whose
+     * size matches the vendor's open file (fs_file_t+0x0c holds the size).
+     */
+    if (!S->file_ready && S->calls != S->probe_calls) {
+        S->probe_calls = S->calls;
+        uint32_t want = *FW_BOOK_SIZE;
+        for (int i = 0; i < 16 && !S->file_ready && want; i++) {
+            const char *nm = (const char *)(0x18007800u + i * 0x100u + 3);
+            if (nm[0] < 0x20 || nm[0] > 0x7e) continue;
+            char path[96];
+            int k = 0;
+            const char *pre = "/SD1://";
+            while (pre[k]) { path[k] = pre[k]; k++; }
+            for (int j = 0; nm[j] && j < 80 && k < 95; j++) path[k++] = nm[j];
+            path[k] = 0;
+            fw_memset(&S->my_file, 0, sizeof(fs_file_t));
+            if (fs_open(&S->my_file, path, FS_O_READ) >= 0) {
+                uint32_t sz = *(volatile uint32_t *)((uint32_t)&S->my_file + 0x0c);
+                if (sz == want) {
+                    S->file_ready = 1;
+                    static const char ok[] = "%s%s: OWNFILE opened entry %d\n";
+                    fw_log(ok, "", "inj", i);
+                } else {
+                    fs_close(&S->my_file);
+                    fw_memset(&S->my_file, 0, sizeof(fs_file_t));
+                }
+            }
+        }
+        if (!S->file_ready) {
+            static const char no[] = "%s%s: OWNFILE none matched size=%d\n";
+            fw_log(no, "", "inj", (int)want);
+        }
+    }
+
     /* REMOVED: fw_get_shared_info(0x100ff07f).
      *
      * Calling it rebooted the device on book open even with nothing else in
