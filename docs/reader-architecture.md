@@ -929,3 +929,29 @@ decode gating our hook, and its scroll recompute.
 A single label of our own on the reading screen, with our own font, drawn from
 our code -- no vendor widget involved. Everything above is address-resolved;
 the SDK provides the matching API semantics.
+
+## First scene-replacement attempt: crashed, and what it established
+
+A RAM payload created a label of our own (`lv_obj_class_create_obj(label_class,
+container)`, then `lv_obj_class_init_obj`, then set text) from the render tail.
+**Entering a book crashed the device.**
+
+Confirmed by reading the function afterwards -- the call itself was right:
+
+```
+lv_obj_class_create_obj(class in r0, parent in r1) @ 0x10096e20:
+   instance size = ubfx([class+0x18], 4, 16)      ; label class -> 0x4c bytes
+   lv_mem_alloc(size)  (0x100a0644)
+   memset
+   obj->class_p = class ; obj->parent = parent
+```
+
+So the remaining suspects are `lv_obj_class_init_obj` (`0x100f7924`) and, more
+likely, **where we called it from**: our tail hook runs inside the vendor's
+timer callback, after its render -- creating objects while LVGL is mid-draw is
+not safe. Scene construction belongs in the scene-enter path, not the render
+pass.
+
+Next attempt should build the widgets from a hook on `ebook_scene_reading_enter`
+(or the line-height hook, which already runs during layout), not from
+`after_render`.
