@@ -522,12 +522,17 @@ a background scan that is still running.
 
 ---
 
-# The blank-page bug was the SD CARD, not the reader
+# The blank-page bug was a corrupt .bmk (NOT the SD card)
 
-Hours went into chasing blank pages and a stall partway through a book. A
-control test settled it: **stock firmware, all five sectors reverted, no hooks,
-no injected code** -- and the fault reproduced exactly, blank pages after ~10
-turns, with 73 filesystem errors:
+Hours went into chasing blank pages and a stall partway through a book.
+**Deleting the books' `.bmk` files fixed it.**
+
+A control test on stock firmware -- all five sectors reverted, no hooks, no
+injected code -- reproduced the fault exactly, with 73 filesystem errors. That
+proved the fault did not need our running CODE, but the corrupt `.bmk` files
+were still on the card during the control, so it did NOT prove the card was at
+fault. That conclusion was drawn too fast; `SD card is not detected` is most
+likely a boot-time probe message, not the cause.
 
 ```
 <E> file seek error (-5)      x many        (-5 = EIO)
@@ -543,10 +548,24 @@ reader was healthy; the card underneath it was not. Reads succeed while data is
 cached and fail the moment one really has to reach the card, and a failed read
 draws a page with no lines.
 
-**The lesson, and it is expensive: when the vendor's OWN log reports errors,
-run the stock control before attributing anything to your code.** Those EIO
-lines were present in the first full capture and were read past for an hour
-while fixes were flashed for a fault that reproduces perfectly without us.
+**Probable cause, and it leads back to us:** we forced the vendor's
+lines-per-page from 8 to 12 by patching the cmd 1 payload. `ebook_calculate_pages`
+builds its page index INSIDE the `.bmk` using that divisor, so the file was
+written under one geometry and read back under another -- seeks past the end,
+the EIO storm, blank pages. That patch is now removed; it never worked anyway,
+since measured turns still moved the line by 8.
+
+**Two lessons, both expensive:**
+
+1. When the vendor's own log reports errors, run the stock control BEFORE
+   attributing anything to your code. Those EIO lines were in the first full
+   capture and were read past for an hour.
+2. A control test only clears what it actually removes. Reverting the firmware
+   left the corrupt state ON DISK, so "stock reproduces it" meant "not our
+   running code", not "not our fault". **A corrupt `.bmk` survives reflashing**,
+   which is why unrelated builds all produced "no change". Delete the `.bmk`
+   as a first-line recovery step, and always alongside any change to the
+   vendor's page geometry.
 
 Real bugs that the hunt did turn up, all worth keeping:
 
