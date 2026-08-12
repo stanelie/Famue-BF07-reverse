@@ -1050,3 +1050,55 @@ succeed while our page holds more lines than its context.
 Every "log for N seconds" measurement in this project was therefore blind, and
 several conclusions drawn from silence were worthless. Capture into state and
 read it over `dbg mdw` instead -- that is what found the touch layout.
+
+## Working reader: what actually drives it now
+
+Confirmed on hardware: the book opens, pages advance and go back, the position
+resumes after leaving and re-entering the book, and progress moves past 1%.
+
+Nothing in that path depends on the vendor's reader:
+
+| concern | owner |
+|---|---|
+| file handle | ours (`book_open_own`, opened by length probe) |
+| wrapping / pagination | ours (`wrap_one`, byte extents per page) |
+| page turns | ours (touch driver hook, left/right thirds) |
+| progress display | ours (tenths of a percent, from byte offset) |
+| drawing | ours (12 labels, written every render pass) |
+
+The vendor is told a page holds **8** lines while we draw **12**. Those no
+longer have to agree: its line counter is not a signal we consume, it only has
+to stay a value it can service so its decode does not overflow its 8-record page
+context and its paginator terminates.
+
+### The press latch -- the real "stall at 1%"
+
+For days the reader advanced a little and then stopped, at a different offset
+each session. The cause was in our own touch handler, one line early:
+
+```c
+if ((w0 | w1 | w2) == 0) return;   /* idle sample -- returned HERE */
+...
+was = S->touch_down;               /* never reached on release */
+S->touch_down = down;
+if (!down || was) return;          /* so `was` was always 1 */
+```
+
+Finger-up arrives as an all-zero sample, so the release returned **before**
+clearing `touch_down`. It latched at 1 and every later press looked like a
+continuing hold. The first tap after boot worked; the rest were swallowed --
+except when a release happened to carry coordinates, which is why the reader
+advanced sporadically and looked like a slow percentage rather than a bug.
+
+Measured while stalled: **18 taps recorded, `cur` frozen at `[2585..2783]`,
+`sp` stuck at 12, `want` never set.** Counting the taps separately from acting
+on them is what made this visible.
+
+### Debounce
+
+One physical tap could register twice when contact bounce split it into two
+press edges around a brief idle sample. Turns are gated on `S->calls` (the
+render pass, ~4/s) advancing by 2 -- about 500 ms, shorter than the e-ink
+refresh each turn triggers. The DWT cycle counter would be a truer clock, but
+`CYCCNT` is stopped on this device and starting it means writing core debug
+registers at runtime.

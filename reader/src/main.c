@@ -17,11 +17,17 @@
 #include "fw.h"
 
 #define PITCH     19        /* +1 base in the caller = 20px pitch */
-/* Must match what the vendor is told (VENDOR_LINES_PER_PAGE): our page extents
-   and its line counter have to describe the same amount of text, or a turn
-   advances by a different span than we drew. More lines than its context holds
-   requires our OWN labels -- the next step, not this one. */
-#define INJ_LINES 8
+/* We draw 12; the vendor is still TOLD 8 (VENDOR_LINES_PER_PAGE).
+ *
+ * These no longer have to agree. Page turns now come from the touch driver and
+ * our page extents are our own, so the vendor's line counter is not a signal we
+ * consume -- it only has to stay a value it can service, so that its decode
+ * does not overflow its 8-record page context and its paginator terminates.
+ *
+ * The container holds 12 labels (our geometry patch makes it 240px at 20px
+ * pitch). Writing only 8 left the bottom four showing the vendor's stale text:
+ * the reported "8 lines, then the bottom 4 redraw". */
+#define INJ_LINES 12
 #define MAXW      44        /* buffer per displayed line          */
 #define CPL       25        /* fallback characters per line       */
 #define LINE_PX  168        /* label width, measured on hardware  */
@@ -84,6 +90,7 @@ struct inj_state {
        (0x100e07b4) is the driver feeding the whole system, so every press must
        pass through it: r0+0x00 is the point, r0+0x08 the press state. */
     uint8_t  touch_down;              /* edge detect: a hold repeats samples */
+    uint32_t last_turn;               /* S->calls at the last accepted turn  */
     uint32_t touch_n;                 /* every call, including idle polls   */
     uint32_t touch_nz;                /* calls carrying non-zero data       */
     uint32_t touch[12];               /* last 4 non-idle samples, RAW w0/w1/w2 */
@@ -1030,7 +1037,12 @@ void pointer_body(void *pt)
     uint32_t w1 = *(volatile uint32_t *)((uint32_t)pt + 4);
     uint32_t w2 = *(volatile uint32_t *)((uint32_t)pt + 8);
     S->touch_n++;
-    if ((w0 | w1 | w2) == 0) return;          /* idle sample */
+    /* An all-zero sample means "nothing is touching" -- which is also how the
+       RELEASE arrives. Returning here without clearing touch_down latched it at
+       1 forever, so every press after the first looked like a continuing hold
+       and was swallowed by the edge test below. Measured: 18 taps recorded,
+       cur frozen at [2585..2783], sp stuck at 12. */
+    if ((w0 | w1 | w2) == 0) { S->touch_down = 0; return; }
     uint32_t i = (S->touch_nz & 3) * 3;
     S->touch[i + 0] = w0;
     S->touch[i + 1] = w1;
@@ -1057,6 +1069,16 @@ void pointer_body(void *pt)
     S->touch_down = down;
     if (!down || was) return;                 /* only the press edge */
     if (ty < 30 || ty > 250) return;          /* header / footer: vendor's */
+
+    /* Debounce: one physical tap sometimes registered twice, when contact
+       bounce split it into two press edges around a brief all-zero sample.
+       S->calls is the render pass, ~4/s, so this is a ~500ms lockout -- shorter
+       than the e-ink refresh a turn triggers anyway, so it costs nothing that
+       can be felt. The DWT cycle counter would be a truer clock, but it is
+       stopped on this device and starting it means writing core debug
+       registers at runtime. */
+    if (S->calls - S->last_turn < 2) return;
+    S->last_turn = S->calls;
 
     if (tx >= 118) {                          /* right third: forward  */
         push_back(S, S->cur.start);
