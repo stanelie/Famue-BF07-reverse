@@ -104,9 +104,11 @@ struct inj_state {
     uint32_t last_top;                /* diag: sibling count at the press     */
     uint32_t last_node;               /* diag: our branch of the screen       */
     uint32_t kid_min;                 /* fewest siblings ever seen while drawing */
+    uint8_t  typing;                  /* the select-page keypad is up and used */
+    int32_t  typed;                   /* percent being typed, 0..100           */
     uint32_t touch_n;                 /* every call, including idle polls   */
     uint32_t touch_nz;                /* calls carrying non-zero data       */
-    uint32_t touch[12];               /* last 4 non-idle samples, RAW w0/w1/w2 */
+    uint32_t touch[16];               /* last 16 presses: x<<16 | y          */
     fs_file_t my_file;
     uint8_t  file_ready;
     uint8_t  io_fail;
@@ -481,22 +483,11 @@ void prepare_body(void)
     if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st) return;
     struct inj_state *S = ANCHOR->st;
 
-    /* The paginator is left ALONE now.
-     *
-     * It was disabled because it scanned forever -- 11,449 bytes per 20 s with
-     * no end. That was our own bug: we were telling the vendor a page holds 12
-     * lines, and ebook_calculate_pages loops on exact equality against a
-     * divisor of 8, so it could never terminate. Told the truth, it finishes
-     * and stops by itself: one bounded scan per book open, which is what the
-     * stock firmware always did.
-     *
-     * Killing it also broke its "select page" dialog, which is built from its
-     * page count -- the dialog opened with a range of one page, so the keypad
-     * digits had nothing to select. Our own totals could not stand in for that
-     * (tried: the dialog still read pages=1).
-     *
-     * We keep our own byte-offset pagination for the page we draw; this is only
-     * for the vendor's own menu to remain usable. */
+    /* Paginator off. A percent seek needs no page count: our pages are byte
+       extents, so any offset is a legal destination. It only ever mattered
+       because the vendor's select-page dialog is built from its count -- and we
+       are about to stop needing that dialog's logic, only its keypad surface. */
+    *FW_REPAGINATE = 0;
     /* Try the open a few times, not once per render pass forever. With the
        wrong list address this retried 16 fs_open calls on every tick -- 1117
        sweeps by the time it was measured -- which is what made page turns take
@@ -743,7 +734,10 @@ static void show_percent(void *cont, struct inj_state *S)
        boundary and each turn flipped it. A page is ~267 bytes of a ~500 KB
        book -- about 0.05% -- so tenths actually move. /64 keeps the multiply
        inside int32 for books up to 8 MB. */
-    int pm = (int)((S->cur.start / 64) * 1000 / (size / 64 + 1));
+    /* While the keypad is in use, the top line shows the TARGET being typed --
+       that is the number the user is setting, not where they currently are. */
+    int pm = S->typing ? (int)(S->typed * 10)
+                       : (int)((S->cur.start / 64) * 1000 / (size / 64 + 1));
     if (pm < 0) pm = 0;
     if (pm > 1000) pm = 1000;
 
@@ -976,6 +970,30 @@ void after_render(void)
      * Our progress display and page extents are byte offsets and owe nothing to
      * these fields. */
 
+    /* The keypad closed with a number typed: seek there. Committing on close
+       rather than on a particular key means we do not have to know which key
+       is "enter" -- and it works however the dialog is dismissed. */
+    if (S->typing) {
+        uint32_t par = *(volatile uint32_t *)((uint32_t)cont + 4);
+        uint32_t sp4 = (par >= HEAP_LO && par < HEAP_HI)
+                     ? *(volatile uint32_t *)(par + 8) : 0;
+        uint32_t kn2 = (sp4 >= HEAP_LO && sp4 < HEAP_HI)
+                     ? *(volatile uint32_t *)(sp4 + 4) : 0;
+        if (kn2 && S->kid_min != 0xffffffffu && kn2 <= S->kid_min) {
+            int32_t size = (int32_t)*FW_BOOK_SIZE;
+            int32_t pct = S->typed;
+            S->typing = 0;
+            S->typed = 0;
+            if (size > 0 && pct >= 0 && pct <= 100) {
+                S->sp = 0;                        /* same as the enter key */
+                S->want = (size / 100) * pct;     /* no overflow, ~1% grain */
+                if (S->want >= size) S->want = size - 1;
+                S->want_snap = 1;
+                S->need_prep = 1;
+            }
+        }
+    }
+
     /* Remember what we drew into, and how many siblings the page had.
      *
      * A popup is added as an extra child of the page's PARENT (the reading
@@ -1087,10 +1105,7 @@ void pointer_body(void *pt)
        and was swallowed by the edge test below. Measured: 18 taps recorded,
        cur frozen at [2585..2783], sp stuck at 12. */
     if ((w0 | w1 | w2) == 0) { S->touch_down = 0; return; }
-    uint32_t i = (S->touch_nz & 3) * 3;
-    S->touch[i + 0] = w0;
-    S->touch[i + 1] = w1;
-    S->touch[i + 2] = w2;
+    S->touch[S->touch_nz & 15] = w0;   /* w0 is already x<<16 | y */
     S->touch_nz++;
 
     /* OUR OWN PAGE TURN.
@@ -1112,7 +1127,6 @@ void pointer_body(void *pt)
     uint8_t was = S->touch_down;
     S->touch_down = down;
     if (!down || was) return;                 /* only the press edge */
-    if (ty < 30 || ty > 250) return;          /* header / footer: vendor's */
 
     /* Only act when the READING VIEW is on screen.
      *
@@ -1171,8 +1185,58 @@ void pointer_body(void *pt)
         uint32_t kids = *(volatile uint32_t *)(sp2 + 4);
         S->last_top = kids;
         S->last_node = S->kid_min;
-        if (S->kid_min != 0xffffffffu && kids > S->kid_min) return;
+
+        /* Popup open: this is the "select page" keypad. Read it OURSELVES.
+         *
+         * Its own logic is built on the vendor's page count, which needs a
+         * five-minute scan we do not want and do not need -- a percent seek is
+         * just an offset, because our pages are byte extents. So we take the
+         * keypad as a surface: the taps already arrive here with coordinates.
+         *
+         * Grid measured by tapping 1-9 then 0 (consecutive duplicates are the
+         * press and release of one tap):
+         *     (34,155) (89,157) (147,156)      1 2 3
+         *     (29,190) (89,189) (151,188)      4 5 6
+         *     (29,221) (86,221) (148,220)      7 8 9
+         *              (74,259)                  0
+         * Columns at x ~31/88/149, rows at y ~156/189/221, 0 centred at 259.
+         * The outer keys of the bottom row are the dialog's own (enter/erase)
+         * and are left to it. */
+        if (S->kid_min != 0xffffffffu && kids > S->kid_min) {
+            int col = (tx < 60) ? 0 : (tx < 120 ? 1 : 2);
+            int row = (ty < 172) ? 0 : (ty < 205 ? 1 : (ty < 240 ? 2 : 3));
+            int dig = -1;
+            if (ty >= 140 && row <= 2) dig = row * 3 + col + 1;
+            else if (row == 3 && col == 1) dig = 0;
+            if (dig >= 0) {
+                if (!S->typing) { S->typing = 1; S->typed = 0; }
+                S->typed = S->typed * 10 + dig;
+                if (S->typed > 100) S->typed = dig;   /* rolled over: restart */
+            } else if (row == 3 && col == 0) {        /* backspace, left of 0 */
+                if (S->typing) S->typed /= 10;
+            } else if (row == 3 && col == 2) {        /* enter, right of 0    */
+                int32_t size = (int32_t)*FW_BOOK_SIZE;
+                int32_t pct = S->typed;
+                if (S->typing && size > 0 && pct >= 0 && pct <= 100) {
+                    /* Clear the history rather than pushing the old spot.
+                       Pushing it made the first back tap teleport to where the
+                       jump came FROM; after a deliberate jump, back should mean
+                       "the page before this one". An empty stack takes the
+                       want_prev path, which computes that exactly. */
+                    S->sp = 0;
+                    S->want = (size / 100) * pct;
+                    if (S->want >= size) S->want = size - 1;
+                    S->want_snap = 1;
+                    S->need_prep = 1;
+                }
+                S->typing = 0;
+                S->typed = 0;
+            }
+            return;                                   /* never turn a page */
+        }
     }
+
+    if (ty < 30 || ty > 250) return;          /* header / footer: vendor's */
 
     /* No debounce. The doubling was never contact bounce: it was a second turn
        source -- the vendor's own page-turn path, revived once we stopped lying

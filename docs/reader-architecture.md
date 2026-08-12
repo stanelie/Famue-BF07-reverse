@@ -1143,3 +1143,39 @@ What works: **the popup is added as an extra child of the page's PARENT.**
 Compare the sibling count against the fewest ever seen while actually drawing
 the page (the minimum, so a popup open during a render cannot raise the bar).
 Measured: 6 siblings while reading, 7 with the keypad up.
+
+## Percent seek: the vendor's keypad, our logic
+
+The vendor's "select page" dialog is built from its paginator's page count, which
+costs a ~5 minute scan per book. A percent seek needs none of that: our pages are
+byte extents, so a destination is just an offset.
+
+So the dialog is treated as a **surface**, not as logic. Its taps already arrive
+at our touch hook with coordinates; we read the keypad ourselves.
+
+Grid, measured by tapping 1-9 then 0 (consecutive duplicate samples are the press
+and release of one tap):
+
+```
+ (34,155) (89,157) (147,156)      1 2 3
+ (29,190) (89,189) (151,188)      4 5 6
+ (29,221) (86,221) (148,220)      7 8 9
+  [bksp]  (74,259)  [enter]         0
+```
+
+Columns at x ~31/88/149; rows at y ~156/189/221; 0 centred at y 259, with
+backspace to its left and enter to its right.
+
+- digits type into a percent, shown live in the top line (`show_percent`
+  displays the target being typed instead of the current position);
+- backspace divides it by ten, so our number tracks what is on screen;
+- enter seeks to `(size / 100) * percent` and snaps forward to a word break;
+- closing the dialog with a number typed commits the same seek, so the feature
+  does not depend on identifying the enter key.
+
+**A jump clears the back stack.** Pushing the pre-jump position made the first
+back tap teleport to where the jump came from; after a deliberate jump, back
+should mean "the page before this one", which the `want_prev` path computes
+exactly from the current offset.
+
+The paginator stays disabled: nothing here consults a page count.
