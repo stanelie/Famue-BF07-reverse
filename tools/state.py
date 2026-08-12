@@ -10,7 +10,11 @@ them. The offsets come from DWARF in the build under test, so they cannot drift.
 """
 import glob, re, subprocess, sys, time, serial
 
-ELF = "/Users/selie/Documents/bf07-research/reader/reader.elf"
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+# Override with BF07_ELF if the build lives elsewhere.
+ELF = _os.environ.get("BF07_ELF",
+                      _os.path.join(_HERE, _os.pardir, "reader", "reader.elf"))
 STATE_PTR = 0x18018E9C
 
 def offsets():

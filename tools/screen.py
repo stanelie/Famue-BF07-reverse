@@ -7,7 +7,11 @@ first word of the NEXT line would have fitted in that space. That is exactly the
 used rather than by eye.
 """
 import glob,re,subprocess,time,serial
-ELF="/Users/selie/Documents/bf07-research/reader/reader.elf"
+import os as _os
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+# Override with BF07_ELF if the build lives elsewhere.
+ELF = _os.environ.get("BF07_ELF",
+                      _os.path.join(_HERE, _os.pardir, "reader", "reader.elf"))
 d=subprocess.run(["arm-none-eabi-objdump","--dwarf=info",ELF],capture_output=True,text=True).stdout
 i=d.index("inj_state"); off={}; nm=None
 for ln in d[i:].splitlines()[1:]:

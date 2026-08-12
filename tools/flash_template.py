@@ -8,15 +8,20 @@ import struct
 import sys
 import time
 
-sys.path.insert(0, '/Users/selie/Documents/bf07-research/tools')
+import os
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.environ.get("BF07_TOOLS", _HERE))
 import serial
 import usb.core
 import usb.util
 from lark_cd import Adfu, OP_EXEC1, OP_WRITE
 
-SPD = "/private/tmp/claude-502/-Users-selie/33b7c9f0-6022-4f5a-b0d8-5644431c8e99/scratchpad/"
+# Where mkflash.py wrote the sector images (BF07_WORK, else alongside this file).
+SPD = os.environ.get("BF07_WORK", _HERE) + "/"
 OUT = SPD + "outbase/"
-dump = open("/Users/selie/Documents/bf07-backups/bf07_flash_full_2026-08-05.bin", "rb").read()
+# The ENCRYPTED backup of your own device, used to verify every written block.
+# Never redistributed -- see docs/flashing.md.
+dump = open(os.environ["BF07_BACKUP"], "rb").read()
 
 JOBS = [
     (0x5D000, OUT + "sector_05d000.bin", [0x3a0], True),
