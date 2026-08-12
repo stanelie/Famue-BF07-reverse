@@ -149,3 +149,17 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
 #define FW_KEY_FILE_PATH   ((const char *)0x10160ab4)
 #define fs_open ((int (*)(fs_file_t *, const char *, uint8_t))0x1007fba9)
 #define FS_O_READ 0x01
+
+/* --- building our own widgets (scene replacement) ---------------------
+   Canonical LVGL v8, recovered from lv_img_create at 0x100a3170:
+       obj = lv_obj_class_create_obj(class, parent);   // sizes from class+0x18
+       lv_obj_class_init_obj(obj);
+   [OBSERVED] both verified by disassembly; the create call allocates with
+   lv_mem_alloc and sets obj->class_p / obj->parent. */
+#define lv_obj_class_create_obj ((void *(*)(uint32_t, void *))0x10096e21)
+#define lv_obj_class_init_obj   ((void (*)(void *))0x100f7925)
+#define lv_obj_add_event_cb     ((void (*)(void *, void *, uint32_t, void *))0x100f687d)
+#define LV_CLASS_OBJ   0x1012bee0u
+#define LV_CLASS_LABEL 0x1012c7f0u
+#define LV_EVENT_SHORT_CLICKED 4
+#define LV_EVENT_SCROLL        0x0b

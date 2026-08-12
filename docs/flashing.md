@@ -148,3 +148,35 @@ Existing pieces: `tools/adfu_enter_usb.py`, `tools/lark_cd.py`, `tools/lark_adfu
 The one thing a distributable tool must **not** bundle is `adfus_u_go.bin` and the
 stock firmware. The payload derives from Actions' own SDK (which is public — see
 [sdk.md](sdk.md)); firmware belongs to the device owner.
+
+## Two-sector writes can truncate -- always read the verifier
+
+A 6830-byte build wrote only **39 of 86 blocks** into its SECOND code sector
+(`0x1e8000`), twice in succession, while a 6488-byte build wrote all of both
+sectors cleanly. The verify step reported `MISMATCH` and the run ended
+`RESULT: PROBLEM` -- exactly what it is for.
+
+The device was left with a partially written reader, which would have looked
+like a code bug rather than a flashing failure. Restoring the previous build
+came back `7 OK / FLASHED`.
+
+**Rules that follow:**
+
+- Never treat a flash as done without reading the final line. `RESULT: PROBLEM`
+  means the device is in an unknown state.
+- After a truncated write, reflash a known-good build before testing anything.
+- Suspect size: the truncation appeared between 6488 and 6830 bytes, i.e. as the
+  second sector filled past ~1.2 KB. Not yet diagnosed.
+
+## Scratchpad files are ephemeral
+
+`flash_full.py` (the flasher template) and `stock/sector_*.bin` both vanished
+mid-session when the scratchpad was garbage-collected. The template now lives in
+`tools/flash_template.py`; the stock sectors regenerate from the backup image:
+
+```python
+FW0 = 0x14000
+img = open("<backups>/fw_code_full.bin", "rb").read()
+for s in (0x5f000, 0xff000):
+    open(f"stock/sector_{s:06x}.bin", "wb").write(img[s-FW0 : s-FW0+0x1000])
+```

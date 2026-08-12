@@ -1342,6 +1342,35 @@ void hook_body(void)
 {
     static const char fmt[] = "%s%s: INJECTED C ALIVE, pitch=%d\n";
     fw_log(fmt, "", "hook", PITCH);
+
+    /* SCENE REPLACEMENT, step 1: build a widget of our own.
+     *
+     * This hook runs inside _reading_create_content -- scene CONSTRUCTION, once
+     * per open. A previous attempt built the widget from the render tail and
+     * crashed the device: that runs inside the vendor's timer callback right
+     * after its draw, and creating objects while LVGL is mid-render is not
+     * safe. Construction belongs here.
+     *
+     * Parented to the vendor's label container so it inherits the reading font
+     * -- a label with no resolved font crashes when drawn. */
+    {
+        void *rd = reader_obj();
+        if (!rd) return;
+        void *cont = *(void **)((uint32_t)rd + RD_OFF_LIST);
+        if ((uint32_t)cont < 0x01000000) return;
+
+        void *obj = lv_obj_class_create_obj(LV_CLASS_LABEL, cont);
+        static const char c1[] = "%s%s: SCENE obj=0x%x\n";
+        fw_log(c1, "", "inj", (int)(uint32_t)obj);
+        if (!obj) return;
+
+        lv_obj_class_init_obj(obj);
+        lv_obj_set_pos(obj, 4, 44);
+        lv_obj_set_size(obj, 168, 20);
+        lv_label_set_text_copy(obj, "OUR OWN WIDGET");
+        static const char c2[] = "%s%s: SCENE built\n";
+        fw_log(c2, "", "inj", 0);
+    }
 }
 
 __attribute__((naked)) void hook(void)
