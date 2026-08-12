@@ -1102,3 +1102,44 @@ render pass, ~4/s) advancing by 2 -- about 500 ms, shorter than the e-ink
 refresh each turn triggers. The DWT cycle counter would be a truer clock, but
 `CYCCNT` is stopped on this device and starting it means writing core debug
 registers at runtime.
+
+## Do not write the vendor's counters
+
+A build published our own totals into `total_lines` (0x1801a030), `total_pages`
+(rd+0x19c) and `reading_line` (rd+0x194) every render pass, to give the "select
+page" dialog a range after we had disabled the paginator.
+
+That corrupted the count the paginator was building. Measured while it scanned,
+`total_lines` oscillated **8664 -> 8672 -> 8736 -> 8808 -> 8880** as our writes
+fought its increments, and its page count collapsed to **1** -- so the keypad
+dialog had a range of one page and every digit was a no-op. With the writes
+removed it climbs monotonically (72 -> 1312 at ~27 lines/s).
+
+**The vendor's bookkeeping is its own.** Our progress display and page extents
+are byte offsets and need none of it.
+
+### The paginator was never the problem
+
+It was disabled because it scanned forever. That was our bug: we told the vendor
+a page holds 12 lines, and `ebook_calculate_pages` loops on exact equality
+against a divisor of 8, so it could never terminate. Told the truth (8), it
+finishes and stops -- one bounded scan per book open, as stock always did.
+On a 255 KB book that is ~5 minutes at ~27 lines/s, and `total_pages` stays 0
+until it completes.
+
+## Popup detection
+
+The reading menu is a popup INSIDE the reading scene, so taps kept falling
+through to the book underneath. Four gates were tried and failed:
+
+| gate | why it failed |
+|---|---|
+| scene pointer (`app_global+0x3c`) | unchanged while the popup is up |
+| container identity vs what we drew | circular: our render reads the same field the popup repoints, so it follows the popup and agrees |
+| tap inside the page rectangle | the page rect is (4,24)-(179,263) -- the whole screen, keypad drawn inside it |
+| page is topmost child of the screen | a sibling (0x01004314) sits above our branch even while reading, so this blocked every tap |
+
+What works: **the popup is added as an extra child of the page's PARENT.**
+Compare the sibling count against the fewest ever seen while actually drawing
+the page (the minimum, so a popup open during a render cannot raise the bar).
+Measured: 6 siblings while reading, 7 with the keypad up.

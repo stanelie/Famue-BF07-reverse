@@ -120,6 +120,15 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
    inside the buffer the vendor reuses for book text once reading begins. */
 #define FW_FILE_LIST 0x18007000u
 
+/* Background paginator guard. ebook_calculate_pages (0x1004bd6c) is called from
+   the ebook thread's message loop only when this byte is non-zero:
+       1004c0ac  ldr  r3, [pc, #388]   -> this address
+       1004c0b0  cbz  r3, 0x1004c0c8   ; skip the call
+       1004c0b8  bl   0x1004bd6c       ; ebook_calculate_pages
+   Clearing it at runtime stopped the scan dead -- 11,449 bytes per 20 s to
+   exactly 0 -- with the reader still working. */
+#define FW_REPAGINATE ((volatile unsigned char *)0x1806517b)
+
 /* Ebook context in static RAM (so, unlike the heap reader object, code that
    touches it is findable by literal search).
    [OBSERVED] confirmed live and from both sides of ebook_bmk_init /

@@ -91,6 +91,19 @@ struct inj_state {
        pass through it: r0+0x00 is the point, r0+0x08 the press state. */
     uint8_t  touch_down;              /* edge detect: a hold repeats samples */
     uint32_t last_turn;               /* S->calls at the last accepted turn  */
+    uint8_t  want_snap;               /* jump landed mid-word: skip to a break */
+    /* Scene identity captured at the last press, to find a gate that also holds
+       when the menu is a popup INSIDE the reading scene: taps still turned
+       pages under an open menu, so app_global+0x3c alone is not enough. */
+    uint32_t last_rd;
+    uint32_t last_cont;
+    uint32_t last_scr;
+    uint32_t draw_cont;               /* container our last render drew into */
+    int32_t  last_rect;               /* diag: page rect at the last press    */
+    int32_t  last_rect2;
+    uint32_t last_top;                /* diag: sibling count at the press     */
+    uint32_t last_node;               /* diag: our branch of the screen       */
+    uint32_t kid_min;                 /* fewest siblings ever seen while drawing */
     uint32_t touch_n;                 /* every call, including idle polls   */
     uint32_t touch_nz;                /* calls carrying non-zero data       */
     uint32_t touch[12];               /* last 4 non-idle samples, RAW w0/w1/w2 */
@@ -160,6 +173,7 @@ static struct inj_state *state(void)
         n->last_line = -1;
         n->want = 0;
         n->jump_line = -1;
+        n->kid_min = 0xffffffffu;
     }
     ANCHOR->st = n;
     ANCHOR->magic = INJ_MAGIC;
@@ -466,6 +480,23 @@ void prepare_body(void)
     /* Services only what the display thread asked for; never creates state. */
     if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st) return;
     struct inj_state *S = ANCHOR->st;
+
+    /* The paginator is left ALONE now.
+     *
+     * It was disabled because it scanned forever -- 11,449 bytes per 20 s with
+     * no end. That was our own bug: we were telling the vendor a page holds 12
+     * lines, and ebook_calculate_pages loops on exact equality against a
+     * divisor of 8, so it could never terminate. Told the truth, it finishes
+     * and stops by itself: one bounded scan per book open, which is what the
+     * stock firmware always did.
+     *
+     * Killing it also broke its "select page" dialog, which is built from its
+     * page count -- the dialog opened with a range of one page, so the keypad
+     * digits had nothing to select. Our own totals could not stand in for that
+     * (tried: the dialog still read pages=1).
+     *
+     * We keep our own byte-offset pagination for the page we draw; this is only
+     * for the vendor's own menu to remain usable. */
     /* Try the open a few times, not once per render pass forever. With the
        wrong list address this retried 16 fs_open calls on every tick -- 1117
        sweeps by the time it was measured -- which is what made page turns take
@@ -568,6 +599,21 @@ void prepare_body(void)
             fw_log(j, "", "inj", off);
         }
         return;
+    }
+
+    /* A percentage jump lands on an arbitrary byte, usually mid-word. Nudge it
+       forward to just past the next space or newline so the page starts on a
+       word. Done here, on the ebook thread: the touch handler that requests the
+       jump runs on the input thread and must not touch the filesystem. */
+    if (S->want >= 0 && S->want_snap) {
+        S->want_snap = 0;
+        char b[64];
+        int rc = book_read(S, S->want, b, sizeof b);
+        if (rc > 0) {
+            int k = 0;
+            while (k < rc && b[k] != '\n' && b[k] != ' ') k++;
+            if (k < rc) S->want += k + 1;
+        }
     }
 
     if (S->want >= 0) {
@@ -917,6 +963,38 @@ void after_render(void)
     disable_tts_button(cont);
     show_percent(cont, S);
 
+    /* We publish NOTHING into the vendor's counters.
+     *
+     * A previous build wrote total_lines / total_pages / reading_line every
+     * render pass, to give the "select page" dialog a range after we disabled
+     * the paginator. With the paginator running again those writes corrupt the
+     * count it is building: total_lines was measured oscillating
+     * 8664 -> 8672 -> 8736 -> 8808 while it scanned, and its page count
+     * collapsed to 1 -- which is exactly why the keypad digits had nothing to
+     * select. Its bookkeeping is its own.
+     *
+     * Our progress display and page extents are byte offsets and owe nothing to
+     * these fields. */
+
+    /* Remember what we drew into, and how many siblings the page had.
+     *
+     * A popup is added as an extra child of the page's PARENT (the reading
+     * scene's container): measured 6 siblings while reading, 7 with the
+     * "select page" keypad up. The minimum ever seen is the popup-free
+     * baseline -- taking the minimum rather than the latest keeps a popup that
+     * is open while we draw from raising the bar and disarming the test. */
+    S->draw_cont = (uint32_t)cont;
+    {
+        uint32_t par = *(volatile uint32_t *)((uint32_t)cont + 4);
+        if (par >= HEAP_LO && par < HEAP_HI) {
+            uint32_t sp2 = *(volatile uint32_t *)(par + 8);
+            if (sp2 >= HEAP_LO && sp2 < HEAP_HI) {
+                uint32_t k = *(volatile uint32_t *)(sp2 + 4);
+                if (k && k < 64 && k < S->kid_min) S->kid_min = k;
+            }
+        }
+    }
+
     uint32_t n = lv_obj_child_cnt(cont);
     if (n > INJ_LINES) n = INJ_LINES;
 
@@ -930,50 +1008,16 @@ void after_render(void)
         S->last_line = line;
         S->jump_line = line;
         S->need_prep = 1;
-    } else if (S->want < 0 && line != S->last_line) {
-        int delta = line - S->last_line;
-        int lpp = (int)*FW_LINES_PER_PG;
-        if (lpp <= 0) lpp = 8;
-        /* Leaving the book resets the vendor's line to 0 as the scene tears
-           down (traced: _ebook_return_btn_event_cb RETURN, then our jump to
-           offset 0). Acting on that threw the position away on the way out and
-           the zero then got saved, so the book reopened at the beginning.
-           A line of 0 is only a real destination if we are already there. */
-        {
-            static const char dl[] = "%s%s: DELTA=%d\n";
-            fw_log(dl, "", "inj", delta);
-        }
-        /* A press moves the line by about one page; the background
-           recalculation moves it by far more. Bounding by 2 pages keeps the
-           noise out without assuming the step is exactly lines_per_page --
-           requiring exact equality stopped every turn from registering. */
-        if (delta > 2 * lpp || delta < -2 * lpp) {
-            /* Not a page turn. The background pagination keeps adjusting the
-               line as total_lines grows, and mapping those through
-               size * line / total_lines walked the reader BACKWARDS by a
-               varying amount each time -- the 1.0% -> 0.6/0.7/0.8% hops.
-               Selections now arrive as cmd 4 instead, so this is just noise. */
-            S->last_line = line;
-        } else if (delta > 0) {
-            push_back(S, S->cur.start);
-            S->want = S->cur.end;
-        } else if (S->sp) {
-            S->want = S->back[--S->sp];
-        } else if (S->cur.start > 0) {
-            S->want_prev = 1;          /* no history: compute it exactly */
-        } else if (0) {
-            /* No history -- we got here by an absolute jump, which clears the
-               stack. Falling back to offset 0 sent "back" to the first page
-               while the vendor's counter kept counting down. Map its new line
-               instead; pagination is aligned, so that IS the previous page. */
-            S->jump_line = line;
-        }
+    } else if (line != S->last_line) {
+        /* TRACK the vendor's line, never ACT on it.
+         *
+         * This used to detect page turns from its reading_line, because that
+         * was the only signal we could see. It is now a second, competing turn
+         * source: telling the vendor the truth about its page size revived its
+         * own turn path, so one tap advanced the page twice -- ours plus its.
+         * Input comes from the touch driver now, so this is only kept so a
+         * resume still knows where the vendor thinks we are. */
         S->last_line = line;
-        S->need_prep = 1;
-        {
-            static const char t[] = "%s%s: TURN want=%d\n";
-            fw_log(t, "", "inj", S->want);
-        }
     }
 
     /* Promote only a COMPLETE page. Drawing a half-prepared one is what made
@@ -1070,21 +1114,82 @@ void pointer_body(void *pt)
     if (!down || was) return;                 /* only the press edge */
     if (ty < 30 || ty > 250) return;          /* header / footer: vendor's */
 
-    /* Debounce: one physical tap sometimes registered twice, when contact
-       bounce split it into two press edges around a brief all-zero sample.
-       S->calls is the render pass, ~4/s, so this is a ~500ms lockout -- shorter
-       than the e-ink refresh a turn triggers anyway, so it costs nothing that
-       can be felt. The DWT cycle counter would be a truer clock, but it is
-       stopped on this device and starting it means writing core debug
-       registers at runtime. */
-    if (S->calls - S->last_turn < 2) return;
-    S->last_turn = S->calls;
+    /* Only act when the READING VIEW is on screen.
+     *
+     * The touch driver is global: it fires in the menu, the file picker and
+     * every other scene. Without this, taps on menu entries also turned pages
+     * underneath, which is why the menu button looked dead. Measured with the
+     * menu open: app_global+0x3c moves to another scene object and the field
+     * that is the label container while reading reads 0x18007d80 -- vendor RAM,
+     * not the LVGL heap. That difference is the test. */
+    {
+        void *rd = reader_obj();
+        S->last_rd = (uint32_t)rd;
+        S->last_cont = 0;
+        S->last_scr = 0;
+        if (!rd) return;
+        uint32_t cont = *(volatile uint32_t *)((uint32_t)rd + RD_OFF_LIST);
+        S->last_cont = cont;
+        if (cont >= HEAP_LO && cont < HEAP_HI)
+            S->last_scr = *(volatile uint32_t *)(cont + 4);   /* parent/screen */
+        if (cont < HEAP_LO || cont >= HEAP_HI) return;
 
-    if (tx >= 118) {                          /* right third: forward  */
+        /* The menu is a POPUP INSIDE the reading scene, so neither the scene
+           pointer nor the container identity can gate this: our render reads
+           the same field the popup repoints, so it follows the popup and then
+           agrees with it. Comparing against draw_cont was circular.
+           
+           Geometry is independent of all that. LVGL keeps absolute screen
+           coords at obj+0x14 (x1,y1,x2,y2 as int16), and the touch point is in
+           the same space. A tap only turns a page if it lands INSIDE the page
+           we drew -- so the keypad, which sits below the shrunken book area,
+           cannot reach the reader. */
+        int32_t x1 = *(volatile short *)(cont + 0x14);
+        int32_t y1 = *(volatile short *)(cont + 0x16);
+        int32_t x2 = *(volatile short *)(cont + 0x18);
+        int32_t y2 = *(volatile short *)(cont + 0x1a);
+        S->last_rect  = (x1 << 16) | (y1 & 0xffff);
+        S->last_rect2 = (x2 << 16) | (y2 & 0xffff);
+
+        /* Is a popup open over the page?
+         *
+         * Not answerable by geometry: at a keypad press the page rect was
+         * (4,24)-(179,263) -- the whole screen, keypad drawn inside it. Not by
+         * container identity: our render reads the same field the popup
+         * repoints, so it follows the popup and agrees with it. And not by
+         * "is the page the topmost child of the screen": a sibling
+         * (0x01004314) sits above our branch even while reading, so that test
+         * blocked every tap.
+         *
+         * What does change is the number of children of the page's parent: the
+         * popup is added there. Compare against the fewest ever seen while
+         * actually drawing the page. */
+        uint32_t par = *(volatile uint32_t *)(cont + 4);
+        if (par < HEAP_LO || par >= HEAP_HI) return;
+        uint32_t sp2 = *(volatile uint32_t *)(par + 8);
+        if (sp2 < HEAP_LO || sp2 >= HEAP_HI) return;
+        uint32_t kids = *(volatile uint32_t *)(sp2 + 4);
+        S->last_top = kids;
+        S->last_node = S->kid_min;
+        if (S->kid_min != 0xffffffffu && kids > S->kid_min) return;
+    }
+
+    /* No debounce. The doubling was never contact bounce: it was a second turn
+       source -- the vendor's own page-turn path, revived once we stopped lying
+       about its page size -- and removing that fixed it. A press-edge test plus
+       a real release is enough, and dropping the lockout keeps taps snappy. */
+
+    /* Left half back, right half forward. Nothing else.
+     *
+     * A middle column that jumped by height was tried and removed: an accidental
+     * brush in the middle of the text threw the position across the book, which
+     * is not a trade a reader should ever make. Jumping belongs in the menu's
+     * "select page", where it is deliberate. */
+    if (tx >= 88) {
         push_back(S, S->cur.start);
         S->want = S->cur.end;
         S->need_prep = 1;
-    } else if (tx <= 58) {                    /* left third: back      */
+    } else {
         if (S->sp) S->want = S->back[--S->sp];
         else if (S->cur.start > 0) S->want_prev = 1;
         S->need_prep = 1;
