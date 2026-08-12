@@ -1005,3 +1005,48 @@ a field cannot silently move out from under a measurement:
 +0x041 file_ready (1B) =  0
 +0x044 open_try   (4B) =  1117
 ```
+
+## Input: the vendor dispatches above LVGL, not through it
+
+For days no probe could find where a page-turn press went. Measured, with the
+book open and the paginator quiet:
+
+- pressing next changed **zero words** in the reading scene object, its label
+  container, or the ebook statics;
+- the vendor's `reading_line` never moved (its decode aborts, and the same
+  `cbnz` skips the turn completion and our render call together);
+- no LVGL object callback fired; `_reading_scroll_event_cb` never fires;
+- meanwhile **exit worked**, so input plainly reached the firmware.
+
+The firmware has a gesture/view layer above LVGL (`gesture_scroll_begin`,
+`"gesture %d, start (%d %d), view %d, last_view %d, pre_view %d"`). Its
+dispatcher at `0x100d92e8` takes the gesture context as its **first argument**,
+so it must be hooked, not polled. Hooking it captured **nothing**: that layer
+serves the swipeable multi-view UI, not the reader.
+
+The touch driver one level down is the real source. **`_lvgl_pointer_put`
+(`0x100e07b4`)** is called with a point struct:
+
+| offset | field |
+|---|---|
+| `+0x00` | x (int16) |
+| `+0x02` | y (int16) |
+| `+0x08` | press state (1 = down) |
+
+Captured on hardware (176x264 screen): taps on the right came in at
+**(140,133)** and **(139,134)**, a middle tap at **(84,145)**. It is also called
+on idle polls at ~1.3/s with all-zero words -- which is why a first attempt that
+decoded assumed offsets saw only zeros and proved nothing.
+
+The reader now turns its own pages from this: right third forward, left third
+back, edge-triggered (a hold repeats samples), with the top and bottom strips
+left to the vendor's own icons. **The vendor's reading_line is no longer used as
+the turn signal**, which removes the last dependency on a decode that cannot
+succeed while our page holds more lines than its context.
+
+### Why our logging is invisible
+
+`fw_log` output does not reach the UART, though the vendor's own logging does.
+Every "log for N seconds" measurement in this project was therefore blind, and
+several conclusions drawn from silence were worthless. Capture into state and
+read it over `dbg mdw` instead -- that is what found the touch layout.

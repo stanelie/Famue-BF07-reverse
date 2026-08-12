@@ -17,7 +17,11 @@
 #include "fw.h"
 
 #define PITCH     19        /* +1 base in the caller = 20px pitch */
-#define INJ_LINES 12
+/* Must match what the vendor is told (VENDOR_LINES_PER_PAGE): our page extents
+   and its line counter have to describe the same amount of text, or a turn
+   advances by a different span than we drew. More lines than its context holds
+   requires our OWN labels -- the next step, not this one. */
+#define INJ_LINES 8
 #define MAXW      44        /* buffer per displayed line          */
 #define CPL       25        /* fallback characters per line       */
 #define LINE_PX  168        /* label width, measured on hardware  */
@@ -66,6 +70,23 @@ struct inj_state {
      * Identified by PROBING the length, never by fs_file_t+0x0c: that field is
      * only filled on the vendor's long-lived handle and reads 0 on a fresh
      * open, so a size comparison rejects the correct file every time. */
+    /* Gesture capture ring. The vendor dispatches input through a gesture/view
+       layer ABOVE LVGL (gesture_scroll_begin / "gesture %d, start (%d %d),
+       view %d..."), which is why no LVGL object callback ever fired and why a
+       press changed no word in the reading scene. Its handler at 0x100d92e8
+       takes the gesture context as its FIRST ARGUMENT, so it must be hooked,
+       not polled. Recorded here rather than logged: our fw_log output does not
+       reach the UART, though the vendor's own logging does. */
+    uint32_t gest_n;                  /* total gestures seen               */
+    uint32_t gest[8];                 /* id<<24 | (x&0xfff)<<12 | (y&0xfff) */
+    /* Touch driver capture. 0x100d92e8 recorded nothing -- that dispatcher
+       serves the swipeable multi-view UI, not the reader. _lvgl_pointer_put
+       (0x100e07b4) is the driver feeding the whole system, so every press must
+       pass through it: r0+0x00 is the point, r0+0x08 the press state. */
+    uint8_t  touch_down;              /* edge detect: a hold repeats samples */
+    uint32_t touch_n;                 /* every call, including idle polls   */
+    uint32_t touch_nz;                /* calls carrying non-zero data       */
+    uint32_t touch[12];               /* last 4 non-idle samples, RAW w0/w1/w2 */
     fs_file_t my_file;
     uint8_t  file_ready;
     uint8_t  io_fail;
@@ -596,10 +617,25 @@ void prepare_msg(void *msg)
         }
     }
 
+    /* Tell the vendor the TRUTH about its own page size.
+     *
+     * This used to write INJ_LINES (12), and that one byte was the stall.
+     * Its page context holds 8 line records, so a 12-line page overflows the
+     * decode -- and the decode failure aborts the page-turn path at the cbnz
+     * before 0x100493a8, which is the same path our render call sits on. So a
+     * press did nothing at all: measured, zero words changed anywhere in the
+     * reading scene, while exit still worked.
+     *
+     * It also made ebook_calculate_pages never terminate: it loops on exact
+     * equality against a divisor of 8, so the background paginator ground on
+     * forever (11,449 bytes per 20 s, and still going after 231 KB).
+     *
+     * We keep our own wrapping and pagination; the vendor's line count is used
+     * only as the page-turn SIGNAL, so it must stay something it can service. */
     if (t == 8 && c == 1) {
         uint32_t pl = *(volatile uint32_t *)((uint32_t)msg + 4);
         if (pl >= 0x01000000 && pl < 0x18200000)
-            *(volatile unsigned char *)pl = INJ_LINES;
+            *(volatile unsigned char *)pl = VENDOR_LINES_PER_PAGE;
     }
 
     /* cmd 1 and 8 are periodic housekeeping -- 10946 and 806 of them in one
@@ -982,6 +1018,102 @@ void after_render(void)
  * is not overwritten. r0 holds the timer argument and lr is already restored,
  * so both survive our call.
  */
+void pointer_body(void *pt)
+{
+    if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st || !pt) return;
+    struct inj_state *S = ANCHOR->st;
+    /* Record the struct RAW. The first attempt decoded x/y/state from assumed
+       offsets and got zeros from all 142 samples -- but this function is also
+       called on idle polls (~1.3/s with nothing touched), so zeros prove
+       nothing about the layout. Store the words and let the host decode. */
+    uint32_t w0 = *(volatile uint32_t *)((uint32_t)pt + 0);
+    uint32_t w1 = *(volatile uint32_t *)((uint32_t)pt + 4);
+    uint32_t w2 = *(volatile uint32_t *)((uint32_t)pt + 8);
+    S->touch_n++;
+    if ((w0 | w1 | w2) == 0) return;          /* idle sample */
+    uint32_t i = (S->touch_nz & 3) * 3;
+    S->touch[i + 0] = w0;
+    S->touch[i + 1] = w1;
+    S->touch[i + 2] = w2;
+    S->touch_nz++;
+
+    /* OUR OWN PAGE TURN.
+     *
+     * Measured layout: +0x00 x, +0x02 y (int16), +0x08 press state. A tap at
+     * the right of a 176px screen came in at x=140/139, the middle at x=84.
+     *
+     * This is the point of the whole exercise: the vendor's reading_line was
+     * our only turn signal, and it dies whenever its decode aborts -- which is
+     * every page, since its page context holds 8 lines. Input read here owes
+     * nothing to its reader, its scene, or the LVGL object tree (none of which
+     * ever saw a press: measured, zero words changed).
+     *
+     * Edge-triggered: a hold repeats samples at ~1.3/s and would turn on each.
+     * The top strip is left alone so the vendor's back/speaker icons work. */
+    int32_t tx = (int32_t)(short)(w0 & 0xffff);
+    int32_t ty = (int32_t)(short)((w0 >> 16) & 0xffff);
+    uint8_t down = (w2 & 0xff) ? 1 : 0;
+    uint8_t was = S->touch_down;
+    S->touch_down = down;
+    if (!down || was) return;                 /* only the press edge */
+    if (ty < 30 || ty > 250) return;          /* header / footer: vendor's */
+
+    if (tx >= 118) {                          /* right third: forward  */
+        push_back(S, S->cur.start);
+        S->want = S->cur.end;
+        S->need_prep = 1;
+    } else if (tx <= 58) {                    /* left third: back      */
+        if (S->sp) S->want = S->back[--S->sp];
+        else if (S->cur.start > 0) S->want_prev = 1;
+        S->need_prep = 1;
+    }
+}
+
+/* Replaces `push {lr}` + `ldr r3,[r1,#0]`, replays both, rejoins at 0x100e07b8. */
+__attribute__((naked)) void pointer_hook(void)
+{
+    __asm__ volatile(
+        "push  {lr}\n"
+        "ldr   r3, [r1, #0]\n"
+        "push  {r0-r3, r12, lr}\n"
+        "bl    pointer_body\n"
+        "pop   {r0-r3, r12, lr}\n"
+        "movw  r12, #0x07b9\n"
+        "movt  r12, #0x100e\n"
+        "bx    r12\n");
+}
+
+/* Record one gesture. Pure observation: nothing is acted on yet, because we do
+   not know the id vocabulary. Read it back with tools/gestures.py, then wire the
+   ids that mean next/previous to our own page turn. */
+void gesture_body(void *ctx)
+{
+    if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st || !ctx) return;
+    struct inj_state *S = ANCHOR->st;
+    int32_t id = *(volatile signed char *)((uint32_t)ctx + 0x21);
+    int32_t x  = *(volatile short *)((uint32_t)ctx + 0x2c);
+    int32_t y  = *(volatile short *)((uint32_t)ctx + 0x2e);
+    S->gest[S->gest_n & 7] = ((uint32_t)(id & 0xff) << 24)
+                           | ((uint32_t)(x & 0xfff) << 12)
+                           | ((uint32_t)(y & 0xfff));
+    S->gest_n++;
+}
+
+/* Entry hook: replaces `push {r4-r7,lr}` + `sub sp,#36`, replays both, then
+   rejoins the original function at 0x100d92ec (`mov r4, r0`). */
+__attribute__((naked)) void gesture_hook(void)
+{
+    __asm__ volatile(
+        "push  {r4, r5, r6, r7, lr}\n"
+        "sub   sp, #36\n"
+        "push  {r0-r3, r12, lr}\n"
+        "bl    gesture_body\n"
+        "pop   {r0-r3, r12, lr}\n"
+        "movw  r12, #0x92ed\n"
+        "movt  r12, #0x100d\n"
+        "bx    r12\n");
+}
+
 __attribute__((naked)) void tail_hook(void)
 {
     __asm__ volatile(

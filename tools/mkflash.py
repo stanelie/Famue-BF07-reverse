@@ -46,6 +46,8 @@ EVER_PATCHED = {
     0x5c000,   # 0x10048d64  button probe
     0x5d000,   # 0x100493a8 render, 0x100493b2 tail, 0x100495d8 tap, 0x10049684 scroll
     0x5e000,   # 0x1004a288 line height, container geometry
+    0xed000,   # 0x100d92e8 gesture handler entry (input capture)
+    0xf4000,   # 0x100e07b4 _lvgl_pointer_put (touch driver capture)
     0x60000,   # 0x1004c002 message loop
     0xff000,   # 0x100eb534 page setter
 }
