@@ -26,16 +26,27 @@ Written to be honest rather than encouraging. If you're picking this up, read th
 | **Symbol recovery (1267 functions)** | ✅ from the firmware's own log calls |
 | **Running our own code on the device** | ✅ at XIP `0x101d3000` |
 | **A replacement ebook reader** | ✅ reflow, pagination, pre-render, back-paging |
+| **Input owned by us** | ✅ touch driver hook (`_lvgl_pointer_put`), left/right halves |
+| **Exact glyph metrics** | ✅ measured with the renderer's own font, not estimated |
+| **Hyphenation at existing hyphens** | ✅ compounds split instead of stranding a line |
+| **Percent seek from the vendor's keypad** | ✅ no page count, no scan — a byte offset |
+| **Position resume across exits and books** | ✅ |
+| **Background paginator disabled** | ✅ nothing we display needs a page count |
+| **Vendor's own drawing disabled** | ✅ 3x faster render loop (304 ms -> 100 ms/tick) |
 
 The write path and its rules are documented in [flashing.md](flashing.md).
 
 ## Still open
 
+- Non-ASCII beyond the measured set (curly quotes, dashes, ellipsis, nbsp) still falls
+  back to a fixed 8 px. Accented Latin and anything else will wrap slightly loose.
+  The fix is to measure on demand, which the font callback supports.
+- The `base_line = 0` correction is applied to the **shared** font, so it lifts text in
+  the menus and file picker too, not only in the reader.
+- Our own bookmark file: position still rides on the vendor's `.bmk` and its restored
+  line index at book open.
 - Writing the whole `fw0_sys` partition at once (only individual sectors so far).
 - Any recovery from firmware that fails **before** the shell starts. Keep serial wired.
-- Exact glyph metrics: the reader estimates character widths rather than calling
-  `bitmap_font_get_glyph_dsc` (`0x100decbc`), so a line can occasionally overshoot by
-  one character.
 
 ## Historical: the blocker as it stood on 2026-08-05
 

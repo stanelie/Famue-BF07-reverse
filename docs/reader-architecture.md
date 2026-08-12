@@ -1233,3 +1233,57 @@ reloaded when the user changes it.
 Tools: `tools/screen.py` dumps the rendered page with per-line widths and says
 whether the next line's first word would have fitted -- which is how each of
 these was proved rather than guessed.
+
+## Who owns the labels, and why the page used to flicker back
+
+The vendor **refills all 12 labels on every render**. Proved by reading their text
+pointers at `label+0x24`: they pointed at its own line buffers (`0x180190cc`,
+`0x18019140`, `0x180191b4`, spaced 0x74 apart), not at our page.
+
+For a long time our render simply rewrote every label on every tick, which hid
+this at a heavy price: LVGL was invalidating twelve labels ~3 times a second and
+the panel never stopped redrawing. Measured: **3.3 render passes/s, 304 ms per
+tick** — and since a tap can only appear on the next pass, that idle churn set
+the floor on responsiveness.
+
+Gating the repaint on "did the page actually change" exposed the underlying
+conflict immediately: a turned page appeared instantly, then ~0.3 s later the
+vendor repainted **the page the book was opened on** over it (its reading line
+never moves, because we stopped consuming it as a signal).
+
+The fix is to stop it drawing at all. It is told a page holds **12** lines —
+deliberately more than its 8-record page context — so its decode fails and the
+`cbnz r0` at `0x100493a4` skips the render call at `0x100493a8`. It never draws,
+and its decode and layout work disappear from every tick.
+
+That same lie was catastrophic earlier in the project and made the paginator spin
+forever. Neither applies now:
+
+| old failure | why it no longer applies |
+|---|---|
+| our render hook rode on the skipped call | we hook the timer TAIL (`0x100493b2`), reached unconditionally |
+| `ebook_calculate_pages` never terminated | the paginator is disabled |
+| its `reading_line` froze | we do not consume it; input comes from the touch driver |
+
+**Result: 10.0 render passes/s, 100 ms per tick — 3x faster**, with the vendor's
+decode, layout and drawing all gone.
+
+### The labels self-heal
+
+Before skipping a repaint we check that each label's text pointer at `+0x24` is
+still ours (`lv_label_set_text` is the *static* setter, so it stores our pointer
+rather than copying). Twelve word reads per tick, against a full repaint per
+tick. If anything ever takes the labels again, the next pass notices and
+repaints — the bug above cannot come back silently behind an assumption.
+
+## Page turn latency, end to end
+
+| stage | cost |
+|---|---|
+| tap -> `want` set (touch driver hook) | immediate |
+| page content | **already built** — `nxt` is pre-rendered right after each swap, so `nxt.start == cur.end` |
+| swap into `cur` | a `memcpy`, on the next render pass (<= 100 ms) |
+| e-ink refresh | the hardware's own, ~0.5-1 s |
+
+Page turns never waited on file I/O. What made them feel slow was the redraw
+cycle above, not preparation.

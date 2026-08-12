@@ -8,9 +8,12 @@ Everything here was derived from a live device over its debug UART plus static a
 of publicly available files. No proprietary source was used, and no vendor firmware is
 redistributed here — the tools read firmware from the user's own device.
 
-> **Status: a replacement ebook reader is running on the device.**
-> Read/write/verify/restore over ADFU all work. The injected reader draws 12 reflowed
-> lines per page with a pre-rendered next page, and reverting to stock is byte-exact.
+> **Status: a replacement ebook reader is running on the device, and it is the reader.**
+> It owns the file handle, the wrapping, the pagination, the input, the drawing and the
+> progress display; the vendor's reader no longer decodes, draws or paginates. Twelve
+> reflowed lines per page, glyph widths measured with the renderer's own font, page
+> turns and a percent seek driven by touch input we read ourselves. Read/write/verify/
+> restore over ADFU all work, and reverting to stock is byte-exact.
 > See [docs/status.md](docs/status.md) for what is and isn't done, and
 > [docs/dead-ends.md](docs/dead-ends.md) for what was ruled out.
 
@@ -56,12 +59,27 @@ redistributed here — the tools read firmware from the user's own device.
 | [tools/extract_symbols.py](tools/extract_symbols.py) | Recovers 1267 function names from the firmware's own log calls |
 | [tools/mkflash.py](tools/mkflash.py) | Builds a verifying sector flasher from a patch table |
 | [tools/lark_cd.py](tools/lark_cd.py) | LARK ADFU host implementation (CBW framing, `cd` opcodes) |
+| [tools/verify_repair.py](tools/verify_repair.py) | Audit every sector against the backup and rewrite what differs |
+| [tools/xipdiff.py](tools/xipdiff.py) | Diff the **live** device against stock in plaintext, no ADFU needed |
+| [tools/state.py](tools/state.py) | Dump the reader's state by name, offsets read from DWARF |
+| [tools/screen.py](tools/screen.py) | Read the rendered page and check every line's fit |
+| [tools/gestures.py](tools/gestures.py) | Read captured touch/gesture input from the device |
 | [reader/](reader/) | The replacement ebook reader — C, built for XIP `0x101d3000` |
 
 ## Key results
 
 - **A replacement ebook reader running on the device** — own wrapping, reflow,
   pagination and pre-render, injected into 53 KB of free space in the XIP partition.
+- **Input taken from the touch driver**, not from the vendor's reader. The firmware
+  dispatches input *above* LVGL, which is why probing the object tree found nothing for
+  days; `_lvgl_pointer_put` (`0x100e07b4`) gives raw coordinates, and page turns, the
+  keypad and the percent seek are all built on it.
+- **Typography measured, not estimated** — glyph advances come from the renderer's own
+  font (captured by hooking its glyph callback), so lines fill to the exact 168 px the
+  labels are wide. Hyphenated compounds split at their hyphens.
+- **The vendor's reader switched off in place** — its decode, layout, drawing and
+  background paginator are all disabled, which made the render loop **3x faster**
+  (304 ms -> 100 ms per tick) and removed a multi-minute scan per book open.
 - **1267 firmware functions recovered by name**, because every function passes its own
   name to the logger. This turned static analysis from guesswork into map-reading.
 - **Full read/write/verify/restore of flash over ADFU**, byte-exact in both directions.

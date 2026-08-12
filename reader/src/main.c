@@ -111,6 +111,9 @@ struct inj_state {
     uint8_t  wtab_ok;
     uint16_t wtab[95];
     uint16_t wpunct[8];               /* curly quotes, dashes, ellipsis       */
+    int32_t  drawn_start;             /* page offset currently in the labels  */
+    uint16_t drawn_lines;
+    int32_t  drawn_pm;                /* percent currently in the top bar     */
     uint8_t  typing;                  /* the select-page keypad is up and used */
     int32_t  typed;                   /* percent being typed, 0..100           */
     uint32_t touch_n;                 /* every call, including idle polls   */
@@ -188,6 +191,8 @@ static struct inj_state *state(void)
     ANCHOR->magic = INJ_MAGIC;
     return n;
 }
+
+static const char inj_empty[] = "";
 
 /* ---- helpers (no libc) ---------------------------------------------- */
 
@@ -766,8 +771,21 @@ void prepare_msg(void *msg)
      * only as the page-turn SIGNAL, so it must stay something it can service. */
     if (t == 8 && c == 1) {
         uint32_t pl = *(volatile uint32_t *)((uint32_t)msg + 4);
+        /* Tell it 12 -- MORE than its page context holds -- on purpose.
+         *
+         * Its decode then fails, and the `cbnz r0` at 0x100493a4 skips the
+         * render call at 0x100493a8, so it never draws. That is what we want:
+         * it was refilling all 12 labels with ITS page on every render (their
+         * text pointers were measured pointing at its buffers, 0x180190cc and
+         * up), which is why a turned page was overwritten ~0.3s later by the
+         * page the book opened on -- its line never moves, because we stopped
+         * consuming it as a signal.
+         *
+         * This was catastrophic when our render hook rode on that same skipped
+         * call, and it made the paginator loop forever. Neither applies now: we
+         * hook the timer tail, and the paginator is disabled. */
         if (pl >= 0x01000000 && pl < 0x18200000)
-            *(volatile unsigned char *)pl = VENDOR_LINES_PER_PAGE;
+            *(volatile unsigned char *)pl = INJ_LINES;
     }
 
     /* cmd 1 and 8 are periodic housekeeping -- 10946 and 806 of them in one
@@ -889,7 +907,12 @@ static void show_percent(void *cont, struct inj_state *S)
                 while (buf[i] && cur[i] == buf[i]) i++;
                 if (buf[i] == 0 && cur[i] == 0) continue;   /* identical */
             }
+            /* Only when it actually changed: this is the copying setter, so it
+           reallocates and invalidates on every call. */
+        if (pm != S->drawn_pm) {
+            S->drawn_pm = pm;
             lv_label_set_text_copy(k, buf);
+        }
         }
     }
 }
@@ -1198,13 +1221,39 @@ void after_render(void)
         }
     }
 
-    /* Always write the labels: the vendor fills them on every render, so
-       skipping would let its text show through. The content only changes when
-       a whole page is swapped in, so repeated draws are identical. */
-    for (uint32_t i = 0; i < n; i++) {
-        void *c = lv_obj_get_child(cont, i);
-        if (!c) continue;
-        lv_label_set_text(c, (i < S->cur.nlines) ? S->cur.text[i] : "", 0);
+    /* Write the labels only when the PAGE changed.
+     *
+     * This ran on every tick, so all 12 labels were marked dirty ~3 times a
+     * second and the display never stopped redrawing -- measured at 3.3
+     * passes/s, i.e. 304ms per tick, which is also the floor on how fast a tap
+     * can show. The content only changes when a page is swapped in.
+     *
+     * cur.text is a stable buffer written in place, so the pointer does not
+     * change when the page does: the offset is what identifies what is drawn. */
+    int need = (S->cur.start != S->drawn_start || S->cur.nlines != S->drawn_lines);
+    if (!need) {
+        /* Cheap check that the labels are still SHOWING OURS. lv_label_set_text
+           is the static setter: it stores our pointer at label+0x24. If anything
+           else has written them, that pointer is not ours and we repaint.
+           Twelve word reads per tick, against a full repaint per tick. */
+        for (uint32_t i = 0; i < n; i++) {
+            void *c = lv_obj_get_child(cont, i);
+            if (!c) continue;
+            const char *mine = (i < S->cur.nlines) ? S->cur.text[i] : inj_empty;
+            if (*(volatile uint32_t *)((uint32_t)c + 0x24) != (uint32_t)mine) {
+                need = 1;
+                break;
+            }
+        }
+    }
+    if (need) {
+        S->drawn_start = S->cur.start;
+        S->drawn_lines = S->cur.nlines;
+        for (uint32_t i = 0; i < n; i++) {
+            void *c = lv_obj_get_child(cont, i);
+            if (!c) continue;
+            lv_label_set_text(c, (i < S->cur.nlines) ? S->cur.text[i] : inj_empty, 0);
+        }
     }
 }
 
