@@ -114,6 +114,11 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
    [OBSERVED] live at 0x1801a090 and mirrored at 0x18019e24. Exact, so the
    binary-search probe is only a fallback now. */
 #define FW_BOOK_SIZE ((volatile uint32_t *)0x1801a090)
+/* File picker's list: 0x100-byte entries, filename at +3, NUL-terminated.
+   Located by dumping 0x18006000-0x18008000 with a book open -- the two book
+   names appear verbatim at +0x003 and +0x103. NOT 0x18007800: that address is
+   inside the buffer the vendor reuses for book text once reading begins. */
+#define FW_FILE_LIST 0x18007000u
 
 /* Ebook context in static RAM (so, unlike the heap reader object, code that
    touches it is findable by literal search).
@@ -135,31 +140,3 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
 /* Widget classes, read live from the running scene. */
 #define LV_CLASS_OUR_LINES   0x10129b54u   /* the 18 reading labels        */
 #define LV_CLASS_COUNTER_IN  0x1012c7f0u   /* leaf inside the page counter */
-
-/* Guard byte for the background pagination. ebook_bmk_init sets it when it
-   decides the .bmk index must be rebuilt; the reading loop tests it with
-   `cbz` right before `bl ebook_calculate_pages` (0x1004c0b0 / 0x1004c0b8).
-   Clearing it skips that call -- no rebuild, no file writes, no churn. */
-#define FW_REPAGINATE ((volatile uint8_t *)0x1806517b)
-
-/* msg_manager_get_shared_info(name, buf, size) -- how _reading_btn_event_cb
-   and ebook_bmk_init fetch app state. "APP_FILE_PATH_INFO" carries the open
-   book's path; the firmware's own copy of that key is at 0x10160ab4. */
-#define fw_get_shared_info ((int (*)(const char *, void *, uint32_t))0x100ff07f)
-#define FW_KEY_FILE_PATH   ((const char *)0x10160ab4)
-#define fs_open ((int (*)(fs_file_t *, const char *, uint8_t))0x1007fba9)
-#define FS_O_READ 0x01
-
-/* --- building our own widgets (scene replacement) ---------------------
-   Canonical LVGL v8, recovered from lv_img_create at 0x100a3170:
-       obj = lv_obj_class_create_obj(class, parent);   // sizes from class+0x18
-       lv_obj_class_init_obj(obj);
-   [OBSERVED] both verified by disassembly; the create call allocates with
-   lv_mem_alloc and sets obj->class_p / obj->parent. */
-#define lv_obj_class_create_obj ((void *(*)(uint32_t, void *))0x10096e21)
-#define lv_obj_class_init_obj   ((void (*)(void *))0x100f7925)
-#define lv_obj_add_event_cb     ((void (*)(void *, void *, uint32_t, void *))0x100f687d)
-#define LV_CLASS_OBJ   0x1012bee0u
-#define LV_CLASS_LABEL 0x1012c7f0u
-#define LV_EVENT_SHORT_CLICKED 4
-#define LV_EVENT_SCROLL        0x0b

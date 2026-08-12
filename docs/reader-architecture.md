@@ -955,3 +955,53 @@ pass.
 Next attempt should build the widgets from a hook on `ebook_scene_reading_enter`
 (or the line-height hook, which already runs during layout), not from
 `after_render`.
+
+## The file list is at 0x18007000 — and only sometimes a file list
+
+`book_open_own` builds its path from the picker's list: 0x100-byte entries,
+filename at +3. The base was **0x18007800 for days, and every open failed.**
+
+0x18007800 is inside the buffer the vendor reuses for **book text** once reading
+begins. Dumping 0x18006000–0x18008000 with a book open showed what we were
+actually reading:
+
+```
+[ 0] 'eed he took, '      <- 0x18007800, mid-sentence
+[ 8] 'uromancer sho'
+```
+
+and the real list 0x800 lower, holding both books verbatim:
+
+```
+0x18007003: 'The Last Town - Blake Crouch.txt'
+0x18007103: 'Neuromancer short.txt'
+```
+
+So the reader was opening `/SD1://uromancer sho` sixteen times per render pass,
+failing all sixteen, and — since the private-handle build never falls back to the
+vendor's handle — reading nothing at all. Two symptoms, one cause:
+
+- **the 1% stall**: `file_ready` never set, so no page could ever be filled;
+- **2 s per page turn**: `open_try` reached 1117 sweeps, i.e. ~18,000 failed
+  `fs_open` calls, on the thread that also serves page turns.
+
+Two lessons, both already paid for:
+
+1. **A RAM address is only valid in a context.** This one is a file list while
+   browsing and a text buffer while reading — the exact window our code runs in.
+   Re-verify addresses under the workload that uses them, not at the menu.
+2. **Retries hide the failure.** Retrying the open every render pass turned a
+   hard error into a slow, silent one. Failures are now capped at 8 attempts.
+
+## Reading state by name, not by offset
+
+Two rounds of diagnosis were wasted on hardcoded struct offsets: adding
+`my_file` shifted every field after it, and the dump printed `file_ready = 101`,
+`nlines = 4998`. `bf07-work/state.py` now reads offsets **and sizes** from DWARF
+in the build under test (`-g` costs nothing — `objcopy -O binary` drops it), so
+a field cannot silently move out from under a measurement:
+
+```
++0x041 file_ready (1B) =  0
++0x044 open_try   (4B) =  1117
+```

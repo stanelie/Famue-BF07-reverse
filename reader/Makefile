@@ -4,7 +4,7 @@ LD      = arm-none-eabi-ld
 OBJCOPY = arm-none-eabi-objcopy
 CFLAGS  = --target=thumbv7em-none-eabi -mthumb -mcpu=cortex-m4 -O2 \
           -ffreestanding -fno-builtin -fomit-frame-pointer \
-          -ffunction-sections -Wall -Iinclude
+          -ffunction-sections -g -Wall -Iinclude
 SRC = $(wildcard src/*.c)
 OBJ = $(SRC:.c=.o)
 

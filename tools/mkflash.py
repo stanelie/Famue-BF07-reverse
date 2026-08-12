@@ -32,9 +32,24 @@ for site,target in hooks.items():
     data[site-XIP:site-XIP+4]=P.bl(site,target)
 for site,target in bwh.items():
     data[site-XIP:site-XIP+4]=P.bw(site,target)
-# Sectors are derived from the patch addresses -- hardcoding them silently
-# dropped the 0x1004c002 hook, which lives in 0x60000.
-touched={0x5d000,0x5e000}
+# EVERY sector this project has ever patched is rewritten on every flash --
+# from stock, plus whatever THIS build patches.
+#
+# Deriving the list from the current build's hooks was the bug that invalidated
+# days of testing: when a hook moved (render -> tail -> tap -> page setter, plus
+# the scroll and button probes), the OLD site kept its branch and pointed into a
+# code region that now held a different build. Several stale branches ran at
+# once, jumping into whatever happened to sit at those addresses -- which is
+# almost certainly behind the phantom stalls, the "no change" results and the
+# reboots. Rewriting the full set makes each flash a clean slate.
+EVER_PATCHED = {
+    0x5c000,   # 0x10048d64  button probe
+    0x5d000,   # 0x100493a8 render, 0x100493b2 tail, 0x100495d8 tap, 0x10049684 scroll
+    0x5e000,   # 0x1004a288 line height, container geometry
+    0x60000,   # 0x1004c002 message loop
+    0xff000,   # 0x100eb534 page setter
+}
+touched = set(EVER_PATCHED)
 for site in list(hooks)+list(bwh):
     touched.add((FW0+(site-XIP)) & ~0xfff)
 jobs=[]
@@ -45,12 +60,21 @@ for s in sorted(touched):
     jobs.append((s,b,True))
 for addr,b in code_jobs:
     jobs.append((addr,b,False))
-src=open('flash_full.py').read().replace('OUT = SPD + "outfull/"',f'OUT = SPD + "{out}/"')
+src=open('flash_full.py').read()
+# Substitute by PATTERN, not by literal. The template is sometimes restored from
+# a previously generated flasher (the scratchpad is ephemeral), and then these
+# literals no longer match -- the substitution silently did nothing and the new
+# flasher wrote the OLD build's sectors. That looked exactly like a truncated
+# two-sector write: 39 blocks landed because the stale build's second sector was
+# 39 blocks long.
+src, n1 = re.subn(r'OUT = SPD \+ "[^"]*/"', f'OUT = SPD + "{out}/"', src)
+assert n1 == 1, f"OUT path substitution failed ({n1} matches)" 
 lines=[f'    (0x{s:X}, OUT + "sector_{s:06x}.bin", [{", ".join(hex(x) for x in b)}], {f}),' for s,b,f in jobs]
 lines.append('    (0x5F000, SPD + "stock/sector_05f000.bin", [], True),')
 lines.append('    (0xFF000, SPD + "stock/sector_0ff000.bin", [], True),')
 src=re.sub(r'JOBS = \[.*?\n\]',"JOBS = [\n"+"\n".join(lines)+"\n]",src,flags=re.S)
-src=src.replace('"FULL 12-LINE BUILD FLASHED"',f'"{out} FLASHED ({len(blob)} bytes of C)"')
+src, n2 = re.subn(r'"[^"]*FLASHED[^"]*"', f'"{out} FLASHED ({len(blob)} bytes of C)"', src)
+assert n2 == 1, f"result-string substitution failed ({n2} matches)" 
 open(f'flash_{out}.py','w').write(src)
 print(f"  {len(blob)} bytes of compiled C across {len(code_jobs)} sector(s): "
       f"{[hex(a) for a,_ in code_jobs]}")

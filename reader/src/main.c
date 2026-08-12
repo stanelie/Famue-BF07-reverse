@@ -23,18 +23,10 @@
 #define LINE_PX  168        /* label width, measured on hardware  */
 #define BACKSTACK 48
 #define INJ_MAGIC 0x52444252u
-/* Our own bookmark record, written into the .bmk at 0x200 -- the start of the
-   vendor's page index, which is dead space once its pagination is off. */
-#define INJ_BMK_MAGIC 0x53504452u
-#define INJ_BMK_OFF   0x200
-/* Trampoline: host writes code into S->code_buf, then sets S->code_magic.
-   The entry takes (what, state): 0 = after_render, 1 = prepare_body. */
-#define INJ_CODE_MAGIC 0x434f4445u
-/* 1.5 KB, not 8 KB: an 8 KB grab made the reading scene fail to build and the
-   device rebooted on book open -- the LVGL heap has to fit the scene's widgets
-   too, and our state block already takes ~2 KB of it. A focused replacement
-   function fits easily; the flashed code stays as the fallback for the rest. */
-#define INJ_CODE_SIZE  1536
+/* Bumped on every build. recover() adopts a heap block only if this
+   matches: sizeof alone let one build inherit another's state, whose
+   fields meant different things -- results that looked like code bugs. */
+#define INJ_BUILD_ID 1786541162u
 /* The vendor paginates 8 of its own lines to a page (its reading_line at
    +0x194 advances by 8 per turn; +0x19c holds its total page count). */
 #define VENDOR_LINES_PER_PAGE 8
@@ -50,14 +42,6 @@ struct page {
 
 struct inj_state {
     uint32_t magic;
-    /* Size of THIS struct, checked on recovery.
-     *
-     * recover() finds blocks by magic, and the LVGL heap survives a reset --
-     * so after a rebuild that changes the layout, the old block still matched
-     * and every field past the change was read at the wrong offset. That drew
-     * blank pages, and it persisted across several flashes because each new
-     * build kept adopting the same stale block. */
-    uint32_t layout;
     uint32_t gen;                     /* generation: newest block wins     */
     uint32_t calls;
     int32_t  last_line;               /* vendor position: a SIGNAL only    */
@@ -68,46 +52,24 @@ struct inj_state {
     int32_t  jump_line;               /* absolute seek requested, or -1    */
     uint32_t book_sig;                /* identity of the open book         */
     int32_t  size;                    /* file size, found once per book    */
-    int32_t  saved_off;               /* position last written to the .bmk  */
     int32_t  last_sy;                 /* container scroll offset, observed */
     int32_t  last_pm;                 /* last shown progress, in tenths    */
-    uint32_t fwd_frame;               /* frame of the last forward turn    */
-    uint32_t probe_calls;             /* throttle for the path lookup       */
     uint8_t  want_prev;               /* back with no history: find it      */
-    /* The page read buffer lives HERE, not on the stack. The ebook thread has
-       a 2280-byte stack and Zephyr reported only 328 bytes ever unused -- a
-       768-byte local was most of the margin, and the deeper paths (a page fill
-       inside the previous-page scan) overflowed it. 512 is ample: a reflowed
-       page consumes 200-280 bytes of source. Keeping it at 768 pushed the
-       struct past what lv_mem_alloc would give us, and a failed allocation
-       meant no state, no text drawn, and blank pages. */
-    char     raw[512];
-    /* Our OWN copy of the book's file handle.
+    /* OUR OWN file handle.
      *
-     * Sharing the vendor's handle meant our seek-before-every-read moved the
-     * file position under code that assumes it owns it. The firmware's own log
-     * fills with "file seek error (-5)" / "file write error (-5)" (EIO), its
-     * pagination misbehaves, and our reads eventually return nothing, which is
-     * what draws blank pages. A copy of the 20-byte handle gives us an
-     * independent position over the same open file -- we only ever read. */
+     * The FS layer takes no lock anywhere (verified by reading fs_read/fs_seek:
+     * thin vtable dispatchers), so our seek-before-every-read moves the file
+     * position under the vendor's decoder, which runs on the display thread.
+     * Its decode then fails -- and the render call our hook rides on is skipped
+     * when it does, which silently switches this reader off. That is the stall.
+     *
+     * Identified by PROBING the length, never by fs_file_t+0x0c: that field is
+     * only filled on the vendor's long-lived handle and reads 0 on a fresh
+     * open, so a size comparison rejects the correct file every time. */
     fs_file_t my_file;
     uint8_t  file_ready;
-    uint8_t  io_fail;                 /* consecutive read failures          */
-    /* RAM trampoline: iterate without flashing.
-     *
-     * Every flash ends with the device in ADFU needing a physical button --
-     * no soft reboot exists (SYSRESETREQ re-enters ADFU, the reboot-type
-     * register is consumed by the boot ROM, and opcode 0x22 reaches only a
-     * shell-less USB mode). So a test costs a human round trip, which is what
-     * made guessing expensive all evening.
-     *
-     * Instead: allocate a code buffer once, let the host write new code into
-     * it over UART with `dbg mww`, and call into it from the hooks. Null or
-     * unset magic means the built-in code runs, so a bad upload degrades to
-     * current behaviour rather than breaking the reader. */
-    volatile uint8_t tapped;          /* the user actually pressed something */
-    uint32_t code_magic;
-    void    *code_buf;
+    uint8_t  io_fail;
+    uint32_t open_try;                /* throttle: one sweep per render pass */
     struct page cur;                  /* on screen                         */
     struct page nxt;                  /* pre-rendered, ready to swap in    */
     int32_t  back[BACKSTACK];
@@ -140,7 +102,6 @@ static struct inj_state *recover(void)
     for (uint32_t a = HEAP_LO; a < HEAP_HI - sizeof(struct inj_state); a += 4) {
         struct inj_state *c = (struct inj_state *)a;
         if (c->magic != INJ_MAGIC) continue;
-        if (c->layout != (uint32_t)sizeof(struct inj_state)) continue;
         /* cheap plausibility check so heap junk can't impersonate a state */
         if (c->cur.nlines > INJ_LINES || c->nxt.nlines > INJ_LINES) continue;
         if (c->cur.start < 0 || c->sp > BACKSTACK) continue;
@@ -163,15 +124,10 @@ static struct inj_state *state(void)
         n->need_prep = 1;
     } else {
         void *p = lv_mem_alloc(sizeof(struct inj_state));
-        if (!p) {
-            static const char af[] = "%s%s: ALLOC FAILED size=%d\n";
-            fw_log(af, "", "inj", (int)sizeof(struct inj_state));
-            return 0;
-        }
+        if (!p) return 0;
         fw_memset(p, 0, sizeof(struct inj_state));
         n = (struct inj_state *)p;
         n->magic = INJ_MAGIC;
-        n->layout = (uint32_t)sizeof(struct inj_state);
         n->gen = 1;
         n->last_line = -1;
         n->want = 0;
@@ -203,52 +159,60 @@ static int book_read(struct inj_state *S, int32_t off, char *buf, uint32_t len)
             rc = fs_read(&S->my_file, buf, len);
             if (rc > 0) { S->io_fail = 0; return rc; }
         }
-        /* A failure must NOT silently drop us back to the vendor's handle.
-         *
-         * The previous version cleared file_ready on the first failure without
-         * closing anything, so the next cycle re-ran the whole open loop -- up
-         * to 16 fs_open calls per page, leaking a handle each time. That is the
-         * 30-second page turns, and the eventual full stop is the FS running
-         * out of handles. Tolerate a couple of failures, and if the handle is
-         * really dead, CLOSE it before allowing a reopen. */
+        /* Do not fall back to the vendor's handle -- sharing it is the bug.
+           Tolerate a couple of failures, then close and allow one reopen. */
         if (++S->io_fail >= 3) {
             fs_close(&S->my_file);
             fw_memset(&S->my_file, 0, sizeof(fs_file_t));
             S->file_ready = 0;
             S->io_fail = 0;
-            static const char rr[] = "%s%s: OWNFILE closed after failures\n";
-            fw_log(rr, "", "inj", 0);
         }
-        return -1;                    /* never fall through to the shared one */
+        return -1;
     }
-    /* Never touch the vendor's handle -- not even as a fallback.
-     *
-     * Proven with a pure-observer payload: with our reader out of the loop the
-     * vendor's line advances perfectly on every press (0,8,16,...,56), so its
-     * input and pagination are healthy. The stall exists only when our code
-     * runs, and the mechanism is our fs_seek moving the position under its
-     * decoder. Until our own handle is open we simply have no data. */
-    return -1;
+    int rc = fs_seek(FW_BOOK_FILE, off, FS_SEEK_SET);
+    if (rc < 0) return rc;
+    return fs_read(FW_BOOK_FILE, buf, len);
 }
 
-static int book_read_vendor_UNUSED(int32_t off, char *buf, uint32_t len)
+/* Open the book ourselves, from the picker's file list in RAM (0x100-byte
+   entries at FW_FILE_LIST, filename at +3). The right entry is the one whose
+   length matches the open book: last byte readable, one past the end not.
+ *
+ * The base was 0x18007800 for days, and every open failed: that address is
+ * inside the buffer the vendor reuses for book TEXT once reading starts, so we
+ * were building paths like "/SD1://uromancer sho". Dumping the region showed
+ * the real list 0x800 lower, holding the two book names verbatim. */
+static void book_open_own(struct inj_state *S)
 {
-    int sk = fs_seek(FW_BOOK_FILE, off, FS_SEEK_SET);
-    if (sk < 0) {
-        static const char f1[] = "%s%s: IOERR seek rc=%d\n";
-        fw_log(f1, "", "inj", sk);
-        static const char f2[] = "%s%s: IOERR seek off=%d\n";
-        fw_log(f2, "", "inj", off);
-        return sk;
+    uint32_t want = *FW_BOOK_SIZE;
+    if (!want || want >= 0x400000u) return;
+    for (int i = 0; i < 16 && !S->file_ready; i++) {
+        const char *nm = (const char *)(FW_FILE_LIST + i * 0x100u + 3);
+        if (nm[0] < 0x20 || nm[0] > 0x7e) continue;
+        char path[96];
+        int k = 0;
+        const char *pre = "/SD1://";
+        while (pre[k]) { path[k] = pre[k]; k++; }
+        for (int j = 0; nm[j] && j < 80 && k < 95; j++) path[k++] = nm[j];
+        path[k] = 0;
+        fw_memset(&S->my_file, 0, sizeof(fs_file_t));
+        if (fs_open(&S->my_file, path, FS_O_READ) < 0) continue;
+        char probe;
+        int at_end = 0, past_end = 1;
+        if (fs_seek(&S->my_file, (int32_t)want - 1, FS_SEEK_SET) >= 0)
+            at_end = (fs_read(&S->my_file, &probe, 1) == 1);
+        if (fs_seek(&S->my_file, (int32_t)want, FS_SEEK_SET) >= 0)
+            past_end = (fs_read(&S->my_file, &probe, 1) == 1);
+        if (at_end && !past_end) {
+            S->file_ready = 1;
+            S->size = want;
+            static const char ok[] = "%s%s: OWNFILE entry=%d\n";
+            fw_log(ok, "", "inj", i);
+            return;
+        }
+        fs_close(&S->my_file);
+        fw_memset(&S->my_file, 0, sizeof(fs_file_t));
     }
-    int rd = fs_read(FW_BOOK_FILE, buf, len);
-    if (rd <= 0) {
-        static const char f3[] = "%s%s: IOERR read rc=%d\n";
-        fw_log(f3, "", "inj", rd);
-        static const char f4[] = "%s%s: IOERR read off=%d\n";
-        fw_log(f4, "", "inj", off);
-    }
-    return rd;
 }
 
 /* Proportional width estimate in 1/8 px. The firmware's own measurer
@@ -364,11 +328,11 @@ static int wrap_one(const char *p, int avail, char *out, int indent,
 
 static void fill_page(struct inj_state *S, struct page *p, int32_t off)
 {
-    char *raw = S->raw;
-    const int RAWSZ = (int)sizeof S->raw;
+    /* reflow packs ~50% more text per page, so the read window grew with it */
+    char raw[768];
     p->start = off;
     p->nlines = 0;
-    int rc = book_read(S, off, raw, (uint32_t)RAWSZ);
+    int rc = book_read(S, off, raw, sizeof raw);
     {
         static const char r1[] = "%s%s: fill off=%d\n";
         static const char r2[] = "%s%s: fill rc=%d\n";
@@ -396,7 +360,7 @@ static void fill_page(struct inj_state *S, struct page *p, int32_t off)
         if (take <= 0) break;
         /* Ran off the end of the read window with more file behind it: the
            line would break mid-word, so drop it rather than show a fragment. */
-        if (why == WHY_EOB && rc == RAWSZ) { p->text[i][0] = 0; break; }
+        if (why == WHY_EOB && rc == (int)sizeof raw) { p->text[i][0] = 0; break; }
         pos += take;
         p->nlines++;
         blank = (why == WHY_PARA);
@@ -469,78 +433,23 @@ static int32_t offset_of_line(struct inj_state *S, int32_t target,
     return off;
 }
 
-/* Hand control to RAM code when the host has installed some. */
-static int trampoline(struct inj_state *S, int what)
-{
-    if (!S || S->code_magic != INJ_CODE_MAGIC || !S->code_buf) return 0;
-    ((void (*)(int, struct inj_state *))(((uint32_t)S->code_buf) | 1))(what, S);
-    return 1;
-}
-
 void prepare_body(void)
 {
     /* Services only what the display thread asked for; never creates state. */
     if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st) return;
     struct inj_state *S = ANCHOR->st;
-
-    if (trampoline(S, 1)) return;
-    /* Switch the vendor's background pagination OFF, every cycle.
-     *
-     * We do not need it: progress is a percentage of the file, and page turns
-     * are byte offsets. It costs continuous CPU and SD I/O, it rewrites the
-     * .bmk, it grows total_lines under us, and it clamps its reading line at
-     * whatever it has indexed so far -- which is what bounced the reader
-     * between 0.9% and 1.0%. The call is guarded by this byte, tested with
-     * `cbz` at 0x1004c0b0, so clearing it skips the call with no code patch. */
-    /* NOT disabling the scan (`*FW_REPAGINATE = 0`) after all.
-     *
-     * With it off the vendor's reading line stops advancing entirely -- and
-     * that line is our ONLY signal that a page turn happened, so next and
-     * previous both went dead while the back button (a different callback)
-     * still worked. Its pagination and its line are the same machinery.
-     * Disabling the scan therefore has to wait until we own input outright.
-     *
-     * Supply the line total ourselves, EVERY cycle.
-     *
-     * With the scan off nothing else ever grows it, so it sat at 40 -- four
-     * pages -- and the vendor clamped its reading line there, which is the
-     * 1.0% loop. Setting it only on a book change was not enough: the state
-     * block survives, so the signature matched and that branch never ran.
-     * Raise-only, so nothing here can walk it backwards. */
-    {
-        uint32_t sz = *FW_BOOK_SIZE;
-        if (sz > 0 && sz < 0x400000u) {
-            uint32_t est = sz / 25;          /* 25.2 bytes per line, measured */
-            if (*FW_TOTAL_LINES < est) *FW_TOTAL_LINES = est;
-        }
+    /* Try the open a few times, not once per render pass forever. With the
+       wrong list address this retried 16 fs_open calls on every tick -- 1117
+       sweeps by the time it was measured -- which is what made page turns take
+       two seconds. Wait for the vendor to publish the size before counting an
+       attempt, so a slow open does not burn the budget. */
+    if (!S->file_ready && *FW_BOOK_SIZE && S->open_try < 8) {
+        S->open_try++;
+        book_open_own(S);
     }
 
     if (!S->need_prep) return;
     S->need_prep = 0;
-
-    /* Persist OUR position -- a byte offset, in our own record, in the page
-       index region the vendor no longer uses. No translation into its line
-       units, so nothing depends on a scan that no longer runs. */
-    /* DISABLED: writing our bookmark through the vendor's .bmk handle.
-     *
-     * It is the last place we still share a file handle with the vendor, and
-     * sharing is what breaks it: our fs_seek moves the position under the code
-     * that writes its page index into that same file. Measured with a pure
-     * observer payload -- with our reader out of the loop the vendor's line
-     * advances perfectly (0,8,16,...56 on successive presses), so input and its
-     * pagination are fine; the stall only appears when our code runs.
-     *
-     * Position persistence needs its own handle before this comes back. */
-    if (0 && S->cur.start != S->saved_off && S->cur.start >= 0) {
-        uint32_t rec[3];
-        rec[0] = INJ_BMK_MAGIC;
-        rec[1] = (uint32_t)S->cur.start;
-        rec[2] = *FW_BOOK_SIZE;
-        if (fs_seek(FW_BMK_FILE, INJ_BMK_OFF, FS_SEEK_SET) >= 0 &&
-            fs_write(FW_BMK_FILE, rec, sizeof rec) == (int)sizeof rec) {
-            S->saved_off = S->cur.start;
-        }
-    }
 
     /* Tell the vendor how many lines a page actually holds.
      *
@@ -557,93 +466,6 @@ void prepare_body(void)
      * carried over -- which is what made a return visit resume in the wrong
      * place. Identity is a hash of the first bytes plus the vendor's total
      * page count; the vendor's own line index then supplies the position. */
-    /* Open the book OURSELVES, as soon as we lack a handle.
-     *
-     * Sharing the vendor's handle means our seek-before-every-read moves the
-     * file position under its decoder. Its log fills with "file read error
-     * (-5)", its decode fails -- and the render call our hook rides on
-     * (0x100493a8) is CONDITIONAL, skipped when the decode fails. So our hook
-     * stops being called entirely: `calls` frozen at 44 while the vendor's own
-     * page count kept rising and both threads sat healthy. That is the reader
-     * "stopping at 1.0%".
-     *
-     * A memcpy of the handle does not work (the FS layer tracks more than the
-     * struct); a real open does. The path comes from the vendor's own
-     * shared-info block. NOT inside the book-change branch: our state survives
-     * across sessions, so that branch often never runs. */
-    /* STAGED: this build only LOOKS UP the path -- it does not open anything.
-     *
-     * The version that also called fs_open rebooted the device on book open,
-     * and two calls were introduced at once (fw_get_shared_info and fs_open)
-     * plus a 140-byte buffer on a thread whose stack margin is known to be
-     * thin. So: smaller buffer, lookup only, and report what it finds. If this
-     * boots, the getter and the buffer are fine and fs_open is the fault --
-     * most likely opening a file the vendor already holds open. */
-    /* Open the book on OUR OWN handle, by reconstructing its path.
-     *
-     * Why this is the fix: fs_read/fs_seek take no lock (verified -- they are
-     * thin vtable dispatchers), so our reads on the EBOOK thread and the
-     * vendor's decode on the DISPLAY thread corrupt each other's file position
-     * when they share one handle. Its decode then fails, and the render call
-     * we hook is skipped when it does -- which switches our reader off.
-     *
-     * The path is not retained anywhere we can query (the shared-info getter
-     * reboots the device), but the picker's file list IS in RAM: 0x100-byte
-     * entries at 0x18007800, filename at +3. The right entry is the one whose
-     * size matches the vendor's open file (fs_file_t+0x0c holds the size).
-     */
-    if (!S->file_ready && S->calls != S->probe_calls) {
-        S->probe_calls = S->calls;
-        uint32_t want = *FW_BOOK_SIZE;
-        for (int i = 0; i < 16 && !S->file_ready && want; i++) {
-            const char *nm = (const char *)(0x18007800u + i * 0x100u + 3);
-            if (nm[0] < 0x20 || nm[0] > 0x7e) continue;
-            char path[96];
-            int k = 0;
-            const char *pre = "/SD1://";
-            while (pre[k]) { path[k] = pre[k]; k++; }
-            for (int j = 0; nm[j] && j < 80 && k < 95; j++) path[k++] = nm[j];
-            path[k] = 0;
-            fw_memset(&S->my_file, 0, sizeof(fs_file_t));
-            if (fs_open(&S->my_file, path, FS_O_READ) >= 0) {
-                /* Identify the file by PROBING its length, not by reading
-                   fs_file_t+0x0c: that field is only populated on the vendor's
-                   long-lived handle and reads 0 on a fresh open, so the correct
-                   file was opened, judged a mismatch and closed -- every time.
-                   Proven from RAM: entry 8 opens, last byte reads, one past the
-                   end does not. */
-                char probe;
-                int at_end = 0, past_end = 1;
-                if (fs_seek(&S->my_file, (int32_t)want - 1, FS_SEEK_SET) >= 0)
-                    at_end = (fs_read(&S->my_file, &probe, 1) == 1);
-                if (fs_seek(&S->my_file, (int32_t)want, FS_SEEK_SET) >= 0)
-                    past_end = (fs_read(&S->my_file, &probe, 1) == 1);
-                if (at_end && !past_end) {
-                    S->file_ready = 1;
-                    static const char ok[] = "%s%s: OWNFILE opened entry %d\n";
-                    fw_log(ok, "", "inj", i);
-                } else {
-                    fs_close(&S->my_file);
-                    fw_memset(&S->my_file, 0, sizeof(fs_file_t));
-                }
-            }
-        }
-        if (!S->file_ready) {
-            static const char no[] = "%s%s: OWNFILE none matched size=%d\n";
-            fw_log(no, "", "inj", (int)want);
-        }
-    }
-
-    /* REMOVED: fw_get_shared_info(0x100ff07f).
-     *
-     * Calling it rebooted the device on book open even with nothing else in
-     * the block -- so that address or its convention is wrong, despite
-     * _reading_btn_event_cb appearing to call it as (name, buf, size) at
-     * 0x10048d96. Not worth more boots to guess at: the path can be read
-     * straight out of RAM instead, once its buffer is located with the book
-     * open. Getting our own file handle stays the goal -- sharing the vendor's
-     * is what stalls the reader -- but it needs the path found passively. */
-
     {
         char sig[64];
         uint32_t h = 2166136261u;
@@ -661,40 +483,14 @@ void prepare_body(void)
             if (rd) vline = *(volatile int32_t *)((uint32_t)rd + RD_OFF_LINE);
             if (h != S->book_sig) {
                 S->book_sig = h;
-                /* Copying the handle does NOT yield a usable independent one:
-                   reads through the copy fail and the page comes back blank.
-                   The FS layer evidently tracks more than the struct contents.
-                   Back to the vendor's handle; decoupling the file position
-                   needs a real second open, not a memcpy. */
-                S->file_ready = 0;
                 S->size = 0;              /* re-probe: different file */
                 S->sp = 0;
                 S->nxt_valid = 0;
                 S->last_line = vline;
-                S->saved_off = -1;
-
-                /* Resume from OUR record if this book has one. Exact, and it
-                   does not go through the vendor's line units at all. */
-                uint32_t rec[3];
-                int have = 0;
-                /* The .bmk read is disabled with the write: seeking the
-                   vendor's bookmark handle corrupts the file it writes its
-                   page index into, exactly as with the book handle. */
-                if (0 && fs_seek(FW_BMK_FILE, INJ_BMK_OFF, FS_SEEK_SET) >= 0 &&
-                    fs_read(FW_BMK_FILE, rec, sizeof rec) == (int)sizeof rec &&
-                    rec[0] == INJ_BMK_MAGIC && rec[2] == *FW_BOOK_SIZE &&
-                    rec[1] < rec[2]) {
-                    have = 1;
-                    S->jump_line = -1;
-                    S->saved_off = (int32_t)rec[1];
-                    fill_page(S, &S->nxt, (int32_t)rec[1]);
-                    S->nxt_valid = 1;
-                    S->want = (int32_t)rec[1];
-                }
-                if (!have) S->jump_line = vline;
+                S->jump_line = vline;
                 {
-                    static const char b[] = "%s%s: BOOK resume=%d\n";
-                    fw_log(b, "", "inj", have ? S->want : vline);
+                    static const char b[] = "%s%s: BOOK line=%d\n";
+                    fw_log(b, "", "inj", vline);
                 }
             }
         }
@@ -977,16 +773,6 @@ __attribute__((naked)) void exit_hook(void)
  */
 void scroll_probe(void *e)
 {
-    /* Minimal: log first, touch nothing. The previous version called
-       lv_event_get_code and reader_obj BEFORE logging, so a bad address there
-       would produce silence -- which is exactly what we saw, and it was read
-       as "this callback never fires". The map since proved this function holds
-       the only runtime writer of the reading line (str.w r1,[r4,#0x194] at
-       0x1004974c), so it must be on the input path. */
-    {
-        static const char m0[] = "%s%s: SCROLLCB\n";
-        fw_log(m0, "", "inj", 0);
-    }
     unsigned code = lv_event_get_code(e);
     void *rd = reader_obj();
     int32_t sy = 0, line = -1;
@@ -1007,30 +793,6 @@ void scroll_probe(void *e)
         static const char o[] = "%s%s: SCROLL line=%d\n";
         fw_log(o, "", "inj", line);
     }
-}
-
-/* Probe on _reading_btn_event_cb (0x10048d64), the reading scene's OTHER event
-   callback. It was dismissed early as "menu and bookmark widgets" on a guess.
-   The scroll callback provably never runs, and no instruction writes the
-   reading line with a #0x194 immediate -- the scene writes it through a
-   pointer chain (`str r3,[r2,#4]`), so a generic component could update it via
-   a small offset. If taps land here, this is the input path. */
-void btn_probe(void)
-{
-    static const char m[] = "%s%s: BTNCB\n";
-    fw_log(m, "", "inj", 0);
-}
-
-__attribute__((naked)) void btn_hook(void)
-{
-    __asm__ volatile(
-        "push  {r0-r3, lr}\n"
-        "bl    btn_probe\n"
-        "pop   {r0-r3, lr}\n"
-        "push.w {r4, r5, r6, r7, r8, lr}\n"   /* the overwritten insn */
-        "movw  r12, #0x8d69\n"                /* 0x10048d68 | thumb  */
-        "movt  r12, #0x1004\n"
-        "bx    r12\n");
 }
 
 /* Replicates the original prologue, then re-enters it past the patched bytes. */
@@ -1108,36 +870,6 @@ void after_render(void)
     if ((uint32_t)cont < 0x01000000) return;
     struct inj_state *S = state();
     if (!S) return;
-    /* Allocate the upload buffer HERE, on the display thread.
-       lv_mem_alloc is LVGL's allocator and LVGL is not thread-safe; calling it
-       from the ebook thread (as prepare_body did) corrupted the heap and
-       rebooted the device on book open. state() has always allocated from this
-       thread, which is why it never showed the problem. */
-    if (!S->code_buf) S->code_buf = lv_mem_alloc(INJ_CODE_SIZE);
-    if (trampoline(S, 0)) return;      /* RAM code owns the render pass */
-
-    /* Lift the page clamp.
-     *
-     * The page-turn handler (0x100495d8, an event callback registered by the
-     * scene alongside the scroll one) computes the next page from the line and
-     * then clamps it:
-     *     ldr r1,[r5,#0x19c]   ; total pages, as the vendor knows them
-     *     cmp r4, r1 ; it ge ; mov r4, r1
-     *     bl  0x100eb534       ; go to page r4
-     * With its background scan incomplete that total is tiny, so the page is
-     * pinned and the line snaps back -- the 0.9 <-> 1.0% loop. Proven by
-     * writing 4096 into the line and pressing next: it came back as 8, i.e.
-     * recomputed and clamped, not incremented.
-     *
-     * Publishing our own page count from the file size removes the ceiling. */
-    {
-        uint32_t sz = *FW_BOOK_SIZE;
-        if (sz > 0 && sz < 0x400000u) {
-            uint32_t pages = (sz / 25) / 8 + 2;      /* 25.2 bytes per line */
-            volatile uint32_t *tp = (volatile uint32_t *)((uint32_t)rd + 0x19c);
-            if (*tp < pages) *tp = pages;
-        }
-    }
 
     disable_tts_button(cont);
     show_percent(cont, S);
@@ -1155,8 +887,7 @@ void after_render(void)
         S->last_line = line;
         S->jump_line = line;
         S->need_prep = 1;
-    } else if (S->want < 0 && line != S->last_line && S->tapped) {
-        S->tapped = 0;
+    } else if (S->want < 0 && line != S->last_line) {
         int delta = line - S->last_line;
         int lpp = (int)*FW_LINES_PER_PG;
         if (lpp <= 0) lpp = 8;
@@ -1166,40 +897,14 @@ void after_render(void)
            the zero then got saved, so the book reopened at the beginning.
            A line of 0 is only a real destination if we are already there. */
         {
-            /* Log WHICH reader object this line came from.
-             *
-             * No instruction in the image writes [rX,#0x194] on the frame path
-             * -- the timer callback has no stores at all, and the only two
-             * writers are the scene enter and a scroll callback that a probe
-             * shows never runs. Yet the value moves by +/-8. The reader pointer
-             * (app_global+0x3c) has been seen alternating between 0x18007a00
-             * and 0x18007c00, so these may be TWO OBJECTS whose lines differ,
-             * not one line changing -- which would be a phantom turn. */
             static const char dl[] = "%s%s: DELTA=%d\n";
             fw_log(dl, "", "inj", delta);
-            static const char do_[] = "%s%s: from obj=0x%x\n";
-            fw_log(do_, "", "inj", (int)(uint32_t)rd);
         }
-        /* BASELINE RULE (the one that demonstrably paged correctly): any
-           change is a turn, direction by sign. The bounded and exact-delta
-           variants were both flashed but never confirmed working, so they are
-           not part of the baseline. */
-        /* Reject the vendor's rebound.
-         *
-         * At the frontier of its own pagination it refuses to let the line
-         * advance: a press moves it +8 and it pulls it straight back -8, which
-         * we followed as a page back -- the 0.9 <-> 1.0% bounce. A real back
-         * press never lands within a frame or two of a forward one, so a
-         * negative delta arriving that soon after a forward turn is the
-         * rebound, not the user. This is a heuristic, not a diagnosis: the
-         * actual writer of the line is still unidentified (no #0x194 store
-         * runs on the frame path; the scene reaches it through a pointer
-         * chain, and both scene callbacks are proven not to fire on turns). */
-        if (delta < 0 && S->calls - S->fwd_frame <= 3) {
-            S->last_line = line;
-            static const char rb[] = "%s%s: REBOUND ignored d=%d\n";
-            fw_log(rb, "", "inj", delta);
-        } else if (line <= 0 && S->cur.start > 0) {
+        /* A press moves the line by about one page; the background
+           recalculation moves it by far more. Bounding by 2 pages keeps the
+           noise out without assuming the step is exactly lines_per_page --
+           requiring exact equality stopped every turn from registering. */
+        if (delta > 2 * lpp || delta < -2 * lpp) {
             /* Not a page turn. The background pagination keeps adjusting the
                line as total_lines grows, and mapping those through
                size * line / total_lines walked the reader BACKWARDS by a
@@ -1209,7 +914,6 @@ void after_render(void)
         } else if (delta > 0) {
             push_back(S, S->cur.start);
             S->want = S->cur.end;
-            S->fwd_frame = S->calls;
         } else if (S->sp) {
             S->want = S->back[--S->sp];
         } else if (S->cur.start > 0) {
@@ -1265,60 +969,25 @@ void after_render(void)
     }
 }
 
-/* The USER-INPUT signal.
+/* Hook the timer TAIL, not the conditional render call.
  *
- * 0x100495d8 is the tap handler (registered by the scene beside the scroll
- * callback): it computes page = line/8 + 1, clamps, and jumps. Its entry is the
- * only authoritative "the user pressed something" event we have.
+ * Measured on a clean device: with the hook at 0x100493a8 our render pass ran
+ * 8 times and stopped. That call is skipped whenever the vendor's fourth
+ * decode returns non-zero (`cbnz r0` at 0x100493a4), and its decode fails
+ * early because our layout asks it for 12 lines while its page context holds
+ * only 8 line records -- the project's oldest finding.
  *
- * Why we need it: the vendor RECOMPUTES its reading line from the list's scroll
- * position, and our drawing never moves that scroll -- so after a press the
- * line goes +8 and is then pulled back -8 a second or two later. Our turn
- * detection read that rebound as a page back, giving the endless 0.9<->1.0%
- * loop. Timing cannot separate the two (the bounce arrives 1-2.5 s later, and
- * so does a real back press), but this flag can: only a line change that
- * follows a genuine tap counts.
- *
- * Replicates `push {r4,r5,r6,lr}` and `mov r4,r0`, then re-enters at +4.
- */
-void tap_body(void)
-{
-    if (ANCHOR->magic == INJ_MAGIC && ANCHOR->st)
-        ANCHOR->st->tapped = 1;
-}
-
-__attribute__((naked)) void tap_hook(void)
-{
-    __asm__ volatile(
-        "push  {r0-r3, lr}\n"
-        "bl    tap_body\n"
-        "pop   {r0-r3, lr}\n"
-        "push  {r4, r5, r6, lr}\n"     /* overwritten insn 1 */
-        "mov   r4, r0\n"               /* overwritten insn 2 */
-        "movw  r12, #0x95dd\n"         /* 0x100495dc | thumb */
-        "movt  r12, #0x1004\n"
-        "bx    r12\n");
-}
-
-/* Hook the TIMER TAIL, not the render call.
- *
- * The timer callback skips the render call when its fourth decode returns
- * non-zero (`cbnz r0` at 0x100493a4), so a failing vendor decode cut our reader
- * out completely: traced at the stall, after_render was never entered while the
- * ebook thread spun, and `calls` sat frozen. The tail at 0x100493b2 -- the
- * `b.w` to the timer-resume helper -- is reached on EVERY tick regardless, and
- * it runs after the vendor has drawn, which is where we want to be so our text
- * is not overwritten.
- *
- * The original is a tail call: r4/lr are already popped and r0 holds the timer
- * argument, so both are preserved across our call and we jump on to the helper.
+ * The tail at 0x100493b2 (the `b.w` to the timer-resume helper) is reached on
+ * every tick regardless, and still runs after the vendor has drawn, so our text
+ * is not overwritten. r0 holds the timer argument and lr is already restored,
+ * so both survive our call.
  */
 __attribute__((naked)) void tail_hook(void)
 {
     __asm__ volatile(
-        "push  {r0, r1, r2, r3, lr}\n"
+        "push  {r0-r3, lr}\n"
         "bl    after_render\n"
-        "pop   {r0, r1, r2, r3, lr}\n"
+        "pop   {r0-r3, lr}\n"
         "movw  r12, #0xd8c3\n"        /* 0x100fd8c2 | thumb */
         "movt  r12, #0x100f\n"
         "bx    r12\n");
@@ -1342,35 +1011,6 @@ void hook_body(void)
 {
     static const char fmt[] = "%s%s: INJECTED C ALIVE, pitch=%d\n";
     fw_log(fmt, "", "hook", PITCH);
-
-    /* SCENE REPLACEMENT, step 1: build a widget of our own.
-     *
-     * This hook runs inside _reading_create_content -- scene CONSTRUCTION, once
-     * per open. A previous attempt built the widget from the render tail and
-     * crashed the device: that runs inside the vendor's timer callback right
-     * after its draw, and creating objects while LVGL is mid-render is not
-     * safe. Construction belongs here.
-     *
-     * Parented to the vendor's label container so it inherits the reading font
-     * -- a label with no resolved font crashes when drawn. */
-    {
-        void *rd = reader_obj();
-        if (!rd) return;
-        void *cont = *(void **)((uint32_t)rd + RD_OFF_LIST);
-        if ((uint32_t)cont < 0x01000000) return;
-
-        void *obj = lv_obj_class_create_obj(LV_CLASS_LABEL, cont);
-        static const char c1[] = "%s%s: SCENE obj=0x%x\n";
-        fw_log(c1, "", "inj", (int)(uint32_t)obj);
-        if (!obj) return;
-
-        lv_obj_class_init_obj(obj);
-        lv_obj_set_pos(obj, 4, 44);
-        lv_obj_set_size(obj, 168, 20);
-        lv_label_set_text_copy(obj, "OUR OWN WIDGET");
-        static const char c2[] = "%s%s: SCENE built\n";
-        fw_log(c2, "", "inj", 0);
-    }
 }
 
 __attribute__((naked)) void hook(void)
