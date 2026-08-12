@@ -104,6 +104,13 @@ struct inj_state {
     uint32_t last_top;                /* diag: sibling count at the press     */
     uint32_t last_node;               /* diag: our branch of the screen       */
     uint32_t kid_min;                 /* fewest siblings ever seen while drawing */
+    /* Real glyph widths, in 1/16 px, for ASCII 32..126.
+       The estimate they replace was systematically wide, so words that would
+       have fitted were pushed to the next line and left a gap. */
+    uint32_t font;                    /* captured from the font callback     */
+    uint8_t  wtab_ok;
+    uint16_t wtab[95];
+    uint16_t wpunct[8];               /* curly quotes, dashes, ellipsis       */
     uint8_t  typing;                  /* the select-page keypad is up and used */
     int32_t  typed;                   /* percent being typed, 0..100           */
     uint32_t touch_n;                 /* every call, including idle polls   */
@@ -265,8 +272,24 @@ static void book_open_own(struct inj_state *S)
    instead of measuring. */
 static int char_w8(unsigned char c)
 {
+    /* Measured width when we have it.
+     *
+     * The value at dsc+0 is in WHOLE PIXELS in this firmware's bitmap font
+     * callback -- not the 8.4 fixed point upstream LVGL documents for adv_w.
+     * Read back from the device: 'i' 4, 'e' 8, 'm' 12, 'W' 14, space 4, which
+     * are sane pixel widths for a 16px font and absurd as sixteenths. Dividing
+     * by two made every glyph ~8x too narrow and ran the text off the edge. */
+    {
+        struct inj_state *S = (ANCHOR->magic == INJ_MAGIC) ? ANCHOR->st : 0;
+        if (S && S->wtab_ok && c >= 32 && c < 127) {
+            unsigned w = S->wtab[c - 32];
+            if (w && w < 64) return (int)w * 8;
+        }
+    }
     if (c == ' ') return 36;
     if (c < 0x20) return 0;
+    /* UTF-8 continuation byte: it is the tail of a glyph already charged. */
+    if ((c & 0xC0) == 0x80) return 0;
     if (c >= 0x80) return 88;
     switch (c) {
     case 'i': case 'j': case 'l': case '.': case ',': case ':': case ';':
@@ -279,6 +302,18 @@ static int char_w8(unsigned char c)
         if (c >= '0' && c <= '9') return 60;
         return 58;
     }
+}
+
+/* Width of one code point, in 1/8 px, for the non-ASCII we measured. */
+static int cp_w8(unsigned cp)
+{
+    struct inj_state *S = (ANCHOR->magic == INJ_MAGIC) ? ANCHOR->st : 0;
+    static const unsigned short cps[8] = {
+        0x2018, 0x2019, 0x201C, 0x201D, 0x2013, 0x2014, 0x2026, 0x00A0 };
+    if (S && S->wtab_ok)
+        for (int i = 0; i < 8; i++)
+            if (cps[i] == cp && S->wpunct[i]) return (int)S->wpunct[i] * 8;
+    return 8 * 8;                      /* unmeasured: a plausible glyph */
 }
 
 /* REFLOW. Measured on a real book: 143 of 178 lines ended at a newline in the
@@ -302,9 +337,17 @@ static int wrap_one(const char *p, int avail, char *out, int indent,
     out[0] = 0;
     if (avail <= 0) return 0;
 
-    const int limit = (LINE_PX - 4) * 8;    /* margin: erring short is invisible */
+    /* The full label width, no cushion.
+     *
+     * The 4px margin was insurance against an ESTIMATED width. Now every glyph
+     * is measured with the renderer's own font, and the labels were read off
+     * the live tree at exactly 168px (x 4..171), so the cushion only threw away
+     * words: "Dedication to" left 81px free while "commerce?" needed 84, and
+     * missed solely because of it. */
+    const int limit = LINE_PX * 8;
     int i = 0, k = 0, w8 = 0;
     int sp_src = -1, sp_out = -1;           /* last space, in both spaces */
+    int hy_src = -1, hy_out = -1;           /* last hyphen we may break AFTER */
 
     for (int n = 0; n < indent && k < MAXW - 1; n++) {
         out[k++] = ' ';
@@ -346,10 +389,48 @@ static int wrap_one(const char *p, int avail, char *out, int indent,
             c = ' ';
         }
 
-        w8 += char_w8(c);
-        if (w8 > limit) { *why_out = WHY_WIDTH; break; }
+        if (c >= 0xC0) {
+            /* Lead byte: decode the code point and charge it ONCE. */
+            unsigned cp = 0;
+            int len = ((c & 0xF0) == 0xE0) ? 3 : 2;
+            cp = (len == 3) ? (c & 0x0Fu) : (c & 0x1Fu);
+            for (int t = 1; t < len && i + t < avail; t++)
+                cp = (cp << 6) | ((unsigned char)p[i + t] & 0x3Fu);
+            w8 += cp_w8(cp);
+        } else {
+            w8 += char_w8(c);
+        }
+        if (w8 > limit) {
+            /* A trailing space is invisible, so it must not evict a word that
+               fitted. Measured: "...shouldered his" was 162px against a 164
+               limit, the following space took it to 166, and the backtrack to
+               the previous space dropped "his" to the next line -- the reported
+               gap. End the line here and swallow the space instead. */
+            if (c == ' ') {
+                out[k] = 0;
+                *px_out = (w8 - char_w8(' ')) / 8;
+                *why_out = WHY_WIDTH;
+                return i + 1;
+            }
+            *why_out = WHY_WIDTH;
+            break;
+        }
 
         if (c == ' ') { sp_src = i; sp_out = k; }
+        /* A hyphen INSIDE a word is a legal break point, and long compounds
+           ("seven-function", "force-feedback") otherwise strand 70-83px of
+           empty line. Only between two letters/digits: that excludes a dash
+           used as punctuation, a leading minus, and the "--" em-dash spelling,
+           none of which should split. */
+        if (c == '-' && k > 0 && i + 1 < avail) {
+            unsigned char prev = (unsigned char)out[k - 1];
+            unsigned char next = (unsigned char)p[i + 1];
+            int prev_ok = (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z')
+                       || (prev >= '0' && prev <= '9');
+            int next_ok = (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z')
+                       || (next >= '0' && next <= '9');
+            if (prev_ok && next_ok) { hy_src = i; hy_out = k; }
+        }
         out[k++] = (char)c;
         i++;
     }
@@ -359,7 +440,14 @@ static int wrap_one(const char *p, int avail, char *out, int indent,
 
     if (i >= avail && *why_out == WHY_EOB) { out[k] = 0; return i; }
 
-    /* break at the last space so words stay whole */
+    /* Break at the LATEST legal point: a hyphen inside a word beats an earlier
+       space, because keeping the first half on this line is what fills it. The
+       hyphen stays on this line (out[hy_out + 1]) and the next line resumes at
+       the character after it. */
+    if (hy_out > sp_out && hy_out > 0) {
+        out[hy_out + 1] = 0;
+        return hy_src + 1;
+    }
     if (sp_out > 0) {
         out[sp_out] = 0;
         return sp_src + 1;
@@ -994,6 +1082,52 @@ void after_render(void)
         }
     }
 
+    /* Lift the text 2px inside its line.
+     *
+     * The font ships with base_line = -2, and LVGL draws each glyph at
+     *     y + (line_height - base_line) - box_h - ofs_y
+     * so a negative base line pushes every glyph DOWN: descenders were clipped
+     * at the bottom of the 20px label while 2px sat unused above. Measured on
+     * device: line_height 17, base_line -2, label height 20. Setting it to 0
+     * moved the text up 2px and fixed the clipping (confirmed by eye).
+     *
+     * Re-applied every pass rather than once: the font is shared and reloaded
+     * when the user changes it from the menu, which would restore the -2. */
+    if (S->font) {
+        volatile short *base_line = (volatile short *)(S->font + 10);
+        if (*base_line != 0) *base_line = 0;
+    }
+
+    /* Measure the alphabet once, with the real font. adv_w lands at dsc+0 in
+       1/16 px (verified in the callback's stores). Done on the display thread,
+       which is where the vendor calls this from; the ebook thread only reads
+       the finished table. */
+    if (S->font && !S->wtab_ok) {
+        unsigned short dsc[6];
+        int ok = 0;
+        for (int c = 32; c < 127; c++) {
+            dsc[0] = 0;
+            if (fw_glyph_dsc((void *)S->font, dsc, (uint32_t)c, 0) && dsc[0]) {
+                S->wtab[c - 32] = dsc[0];
+                ok++;
+            } else {
+                S->wtab[c - 32] = 0;
+            }
+        }
+        /* The non-ASCII that real books are full of: typographic quotes,
+           dashes, ellipsis, nbsp. Charged per BYTE at the ASCII fallback they
+           cost ~33px for a glyph drawn in ~5, which pushed words off lines that
+           had room for them. */
+        static const unsigned short cps[8] = {
+            0x2018, 0x2019, 0x201C, 0x201D, 0x2013, 0x2014, 0x2026, 0x00A0 };
+        for (int j = 0; j < 8; j++) {
+            dsc[0] = 0;
+            S->wpunct[j] = (fw_glyph_dsc((void *)S->font, dsc, cps[j], 0) && dsc[0])
+                         ? dsc[0] : 0;
+        }
+        if (ok > 64) S->wtab_ok = 1;      /* enough of the alphabet to trust */
+    }
+
     /* Remember what we drew into, and how many siblings the page had.
      *
      * A popup is added as an extra child of the page's PARENT (the reading
@@ -1087,6 +1221,33 @@ void after_render(void)
  * is not overwritten. r0 holds the timer argument and lr is already restored,
  * so both survive our call.
  */
+/* The glyph callback's first argument is the font. We cannot look a font up --
+   it is reached through style lookups we have no symbols for -- but the vendor
+   calls this for every glyph it draws, so one capture is enough. */
+void font_body(void *f)
+{
+    if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st) return;
+    struct inj_state *S = ANCHOR->st;
+    if (!S->font && f) S->font = (uint32_t)f;
+}
+
+/* Replaces `push {r4,r5,r6,lr}` + `cmp r2,#13`, replays both and rejoins at
+   0x100e134c. Order matters: the cmp must be the LAST thing before the jump,
+   because the beq at 0x100e134e reads its flags (the sub sp in between does
+   not touch them). */
+__attribute__((naked)) void font_hook(void)
+{
+    __asm__ volatile(
+        "push  {r0-r3, r12, lr}\n"
+        "bl    font_body\n"
+        "pop   {r0-r3, r12, lr}\n"
+        "push  {r4, r5, r6, lr}\n"
+        "cmp   r2, #13\n"
+        "movw  r12, #0x134d\n"
+        "movt  r12, #0x100e\n"
+        "bx    r12\n");
+}
+
 void pointer_body(void *pt)
 {
     if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st || !pt) return;

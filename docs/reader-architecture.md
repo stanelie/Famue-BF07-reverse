@@ -1179,3 +1179,57 @@ should mean "the page before this one", which the `want_prev` path computes
 exactly from the current offset.
 
 The paginator stays disabled: nothing here consults a page count.
+
+## Text layout: measured, not estimated
+
+### Glyph widths come from the font
+
+`bitmap_font_get_glyph_dsc_cb` (`0x100e1348`) is the renderer's own glyph
+lookup: `(font, dsc_out, letter, letter_next)`, writing the advance at `dsc+0`,
+then `box_w +2`, `box_h +4`, `ofs_x +6`, `ofs_y +8`, `bpp +10`.
+
+The font pointer cannot be looked up -- it is reached through style lookups we
+have no symbols for -- so it is **captured** by hooking that callback and
+keeping its first argument. The alphabet is then measured once and cached.
+
+**The advance is in WHOLE PIXELS here**, not the 8.4 fixed point upstream LVGL
+documents for `adv_w`. Read back from the device: `i` 4, `e` 8, `m` 12, `W` 14,
+space 4. Treating it as sixteenths made every glyph ~8x too narrow and ran text
+off the screen edge.
+
+### Three separate causes of ragged lines
+
+All three were found by reading the rendered page out of our own state and
+re-measuring it with the same table the wrap used:
+
+1. **A trailing space evicted a word.** `"...shouldered his"` measured 162px
+   against a 164px limit; adding the *following* space reached 166, broke the
+   line, and the backtrack to the previous space dropped `his`. A trailing space
+   is invisible, so it now ends the line and is swallowed.
+2. **UTF-8 charged per byte.** Every byte >= 0x80 cost the 11px fallback, so a
+   curly quote cost ~33px for a glyph drawn in 3-5px. Continuation bytes now
+   cost nothing and the common punctuation is measured:
+   `' ' = 3, " " = 5, en 7, em 14, ellipsis 14, nbsp 4`.
+3. **A 4px safety cushion.** Justified when widths were estimated; with measured
+   widths it only discarded words -- `"Dedication to"` left 81px free while
+   `"commerce?"` needed 84. The labels were read off the live object tree at
+   exactly **168px** (x 4..171), so the full width is used.
+
+Hyphenated compounds also split now: a hyphen **between two letters or digits**
+is a break candidate, and the wrap breaks at whichever comes later, the hyphen
+or the last space. `seven-function` / `force-feedback` were stranding 70-83px of
+empty line. The letter/digit test excludes dashes used as punctuation, leading
+minus signs, and the `--` em-dash spelling.
+
+### Vertical position
+
+The font ships `base_line = -2` with `line_height = 17` in a 20px label. LVGL
+draws each glyph at `y + (line_height - base_line) - box_h - ofs_y`, so a
+negative base line pushes every glyph **down**: descenders clipped at the bottom
+while 2px went unused above. Setting `base_line = 0` lifts the text 2px and
+fixes it. Re-applied on every render pass, because the font is shared and
+reloaded when the user changes it.
+
+Tools: `tools/screen.py` dumps the rendered page with per-line widths and says
+whether the next line's first word would have fitted -- which is how each of
+these was proved rather than guessed.

@@ -48,6 +48,7 @@ EVER_PATCHED = {
     0x5e000,   # 0x1004a288 line height, container geometry
     0xed000,   # 0x100d92e8 gesture handler entry (input capture)
     0xf4000,   # 0x100e07b4 _lvgl_pointer_put (touch driver capture)
+    0xf5000,   # 0x100e1348 bitmap_font_get_glyph_dsc_cb (font capture)
     0x60000,   # 0x1004c002 message loop
     0xff000,   # 0x100eb534 page setter
 }

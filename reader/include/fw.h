@@ -129,6 +129,14 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
    exactly 0 -- with the reader still working. */
 #define FW_REPAGINATE ((volatile unsigned char *)0x1806517b)
 
+/* bitmap_font_get_glyph_dsc_cb: (font, dsc_out, letter, letter_next) -> bool.
+   Writes the advance at dsc+0, then box_w +2, box_h +4, ofs_x +6, ofs_y +8,
+   bpp +10 -- read straight off its stores.
+
+   The advance is in WHOLE PIXELS here, not the 8.4 fixed point upstream LVGL
+   documents: measured on device 'i' 4, 'e' 8, 'm' 12, 'W' 14, space 4. */
+#define fw_glyph_dsc ((int (*)(void *, void *, uint32_t, uint32_t))0x100e1349)
+
 /* Ebook context in static RAM (so, unlike the heap reader object, code that
    touches it is findable by literal search).
    [OBSERVED] confirmed live and from both sides of ebook_bmk_init /
