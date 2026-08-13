@@ -67,6 +67,10 @@ redistributed here — the tools read firmware from the user's own device.
 | [tools/state.py](tools/state.py) | Dump the reader's state by name, offsets read from DWARF |
 | [tools/screen.py](tools/screen.py) | Read the rendered page and check every line's fit |
 | [tools/gestures.py](tools/gestures.py) | Read captured touch/gesture input from the device |
+| [tools/devflash.sh](tools/devflash.sh) | Developer loop: build the reader, flash it, verify every sector |
+| [tools/regdiff.py](tools/regdiff.py) | Diff SoC registers between a running device and ADFU |
+| [tools/grid.py](tools/grid.py), [keypad.py](tools/keypad.py), [digits.py](tools/digits.py) | Touch/keypad capture used to map the soft keypad |
+| [tools/recover.py](tools/recover.py), [adfu_reset.py](tools/adfu_reset.py), [cap.py](tools/cap.py) | Recovery, ADFU entry and UART capture helpers |
 | [reader/](reader/) | The replacement ebook reader — C, built for XIP `0x101d3000` |
 
 ## Key results
