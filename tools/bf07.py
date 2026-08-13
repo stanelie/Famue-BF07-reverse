@@ -61,43 +61,53 @@ def enter_adfu(timeout=25):
         return True
     dev = find(PID_NORMAL)
     if dev is None:
-        raise SystemExit("No BF07 found. Plug it in over USB and try again.")
+        raise SystemExit("No BF07 found. Connect it over USB and choose disk\n"
+                         "drive mode on the boot menu, then try again.")
+
+    # The claim can fail at set_configuration OR at the first transfer,
+    # depending on the backend, so the whole exchange is guarded.
     try:
-        dev.set_configuration()
+        try:
+            dev.set_configuration()
+        except usb.core.USBError:
+            pass
+        cfg = dev.get_active_configuration()
+        intf = cfg[(0, 0)]
+        out = usb.util.find_descriptor(intf, custom_match=lambda e:
+            usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
+        inp = usb.util.find_descriptor(intf, custom_match=lambda e:
+            usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN)
+
+        def cbw(cdb, dlen, tag):
+            return struct.pack("<IIIBBB16s", 0x43425355, tag, dlen, 0x80, 0,
+                               len(cdb), cdb.ljust(16, b"\0"))
+
+        out.write(cbw(bytes([0xCC]) + b"\0" * 6 + bytes([11]), 11, 1), 3000)
+        ident = bytes(inp.read(11, 3000))
+        try:
+            inp.read(13, 1000)
+        except usb.core.USBError:
+            pass
+        if ident != b"ACTIONSUSBD":
+            raise SystemExit(f"unexpected identity {ident!r} -- is this a BF07?")
+        out.write(cbw(bytes([0xCB, 0x21]) + b"\0" * 5 + bytes([2]), 2, 2), 3000)
+        try:
+            inp.read(2, 2000)
+        except usb.core.USBError:
+            pass
     except usb.core.USBError as e:
-        if "Access denied" in str(e) or "busy" in str(e).lower():
+        if "Access denied" in str(e) or "busy" in str(e).lower() or e.errno == 13:
             raise SystemExit(
-                "The operating system is holding the device's mass-storage\n"
-                "interface, so the ADFU switch cannot be sent.\n"
-                "  Linux : run as root, or detach usb-storage for 10d6:b00b\n"
+                "Cannot reach the device's USB interface: the operating system\n"
+                "is holding it. The BF07 exposes only one interface (mass\n"
+                "storage), so there is nothing else to talk to.\n"
+                "  Linux  : run as root, or detach usb-storage from 10d6:b00b\n"
                 "  Windows: bind that interface to WinUSB (e.g. with Zadig)\n"
-                "  macOS : not possible -- the kernel driver cannot be detached.\n"
-                "          Enter ADFU another way, then re-run this command.")
+                "  macOS  : not possible -- the kernel driver cannot be detached,\n"
+                "           and unmounting does not release it. Put the device in\n"
+                "           ADFU another way (serial `dbg reboot adfu`, or another\n"
+                "           machine); everything after that works here.")
         raise
-    out = usb.util.find_descriptor(dev.get_active_configuration()[(0, 0)],
-                                   custom_match=lambda e: usb.util.endpoint_direction(
-                                       e.bEndpointAddress) == usb.util.ENDPOINT_OUT)
-    inp = usb.util.find_descriptor(dev.get_active_configuration()[(0, 0)],
-                                   custom_match=lambda e: usb.util.endpoint_direction(
-                                       e.bEndpointAddress) == usb.util.ENDPOINT_IN)
-
-    def cbw(cdb, dlen, tag):
-        return struct.pack("<IIIBBB16s", 0x43425355, tag, dlen, 0x80, 0, len(cdb),
-                           cdb.ljust(16, b"\0"))
-
-    out.write(cbw(bytes([0xCC]) + b"\0" * 6 + bytes([11]), 11, 1), 3000)
-    ident = bytes(inp.read(11, 3000))
-    try:
-        inp.read(13, 1000)
-    except usb.core.USBError:
-        pass
-    if ident != b"ACTIONSUSBD":
-        raise SystemExit(f"unexpected identity {ident!r} -- is this a BF07?")
-    out.write(cbw(bytes([0xCB, 0x21]) + b"\0" * 5 + bytes([2]), 2, 2), 3000)
-    try:
-        inp.read(2, 2000)
-    except usb.core.USBError:
-        pass
     usb.util.dispose_resources(dev)
 
     t0 = time.time()
@@ -181,10 +191,17 @@ class Device:
         self._write(addr, data, encrypt=True)
 
     def _write(self, addr, data, encrypt):
+        blank = b"\xff" * 32
         for off in range(0, len(data), 32):          # 32-byte transactions only
+            block = data[off:off + 32]
+            # An erased sector is already 0xFF. Writing 0xFF as PLAINTEXT would
+            # encrypt it into ciphertext garbage -- padding after the reader
+            # showed up as 2 extra changed blocks, which is how this was caught.
+            if block == blank:
+                continue
             a = addr + off
             ack = self.cmd(b"ws", 32, a | (1 << 31) if encrypt else a,
-                           expect=4, data=data[off:off + 32])
+                           expect=4, data=block)
             if not ack or ack[0] != 0xAA:
                 raise SystemExit(f"write failed at 0x{a:06x}")
 

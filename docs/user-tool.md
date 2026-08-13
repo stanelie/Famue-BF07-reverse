@@ -81,6 +81,32 @@ plaintext, even though backup, verify and restore need none.
    unsigned ([ota-format.md](ota-format.md)) — no USB at all — but building that
    image still needs a plaintext base, so it depends on 1 or 2.
 
+## Validated on hardware
+
+The whole user journey was run against a real device, in one ADFU session:
+
+```
+backup   4 MB in 7.5 s, sha256 82f09263...
+verify   8 sectors differ  (the reader's two, plus six one-word hook sites)
+restore  all 8 restored -> "device matches the backup"
+install  8 sectors written, block counts identical to what verify reported
+```
+
+`restore` used **only the encrypted backup** -- no plaintext anywhere -- and the
+device came back byte-exact.
+
+Two bugs the run caught, both fixed:
+
+- **Re-uploading the ADFU payload wedges ADFU.** Every subcommand used to
+  upload it, so `backup` followed by `verify` wedged every time. The payload is
+  now probed first (it answers a raw `is` with 0xAA; the boot ROM does not) and
+  only uploaded when nothing answers. This is the cause of the ADFU wedges seen
+  throughout the project.
+- **Writing 0xFF padding as plaintext encrypts it.** An erased sector is already
+  0xFF, and writing 0xFF with bit 31 set turns it into ciphertext -- the padding
+  after the reader showed up as 2 extra changed blocks. All-0xFF blocks are now
+  skipped.
+
 ## What `install` writes
 
 Eight sectors, from [patchset.py](../tools/patchset.py):
