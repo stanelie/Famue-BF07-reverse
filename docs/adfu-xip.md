@@ -234,3 +234,53 @@ CMU_DEVCLKEN0=0xc10c0631  RMU_MRCR0=0x010c0e31
 Note `map[0]` uses `| 0x01`, not the `| 0x1f` the leopard SDK writes — the
 mapping-size encoding differs, which is why the running values were copied
 rather than computed.
+
+## Where the key actually comes from (SDK-confirmed)
+
+Checked the public SDK end to end:
+
+- `soc_memctrl.c` — the mapping's `enable_crc` is a **CRC** check, not the cipher.
+- `soc_boot.c` — `sign_load_key()` loads a **public key** from the image TLV for
+  **signature verification**. Not the flash key.
+- `soc_atp.h` — the eFuse interface (`libsocatp.a`) exposes only RF/PMU/HOSC
+  **calibration** reads. No flash-key accessor.
+- the spinor ROM vtable (10 entries at `0x5d10`) is pure flash I/O — none of its
+  functions touch the SE crypto block (`0x40020000`) or eFuse.
+
+**Conclusion:** the flash decryption key is loaded by the **boot ROM**, before
+the bootloader runs, and nothing in the SDK exposes it. Confirmed by the
+register evidence: every visible CMU/SPICACHE/memctrl register was matched to a
+running device and the cipher still ran keyless.
+
+To find that routine, the low ROM (`0x1000`-`0x8000`) must be disassembled —
+`tools/dump_brom.py` does it safely (never below `0x1000`; reading the vector
+table faults the CPU and the USB stack together, needing a physical reset).
+
+## A cleaner path that skips the key entirely
+
+Cracking the key gives *general* decrypted reads, but **install does not need
+it**, because the SoC encrypts on write (bit 31 set). Install needs patched
+**plaintext** sectors:
+
+- 2 reader sectors = `reader.bin` (ours);
+- 6 vendor sectors = stock vendor plaintext + a few changed words.
+
+The only device-side unknown is the stock plaintext of those 6 vendor sectors,
+and there are two serial-free ways to get it:
+
+1. **The vendor firmware update file is plaintext** (the SoC encrypts on write,
+   so shipped images are not encrypted — see [actions-formats.md](actions-formats.md)).
+   Obtain and unpack it and every sector's plaintext is known, for any unit, no
+   serial and no redistribution (the user downloads vendor firmware themselves).
+   **Blocker:** the newer LARK `ACTSFWFMT001` container is not yet unpacked.
+2. **If the flash key is global** across BF07 units (not per-device), the
+   plaintext of the 6 vendor sectors is identical on every unit with the same
+   firmware — i.e. exactly what `fw_code_full.bin` already holds. Bundling those
+   patched sectors would work, but 24 KB of mostly-vendor code crosses the
+   project's no-redistribution line. **Untested:** global-vs-per-device needs a
+   second unit to settle.
+
+Path 1 is the clean long-term answer and makes the eFuse-key work unnecessary
+for the install use case. The ROM-key route remains the only way to *read*
+arbitrary decrypted flash over USB, and may yet be blocked if the key registers
+are write-only.
