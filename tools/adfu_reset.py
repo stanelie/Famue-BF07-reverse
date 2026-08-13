@@ -43,12 +43,61 @@ def enter_adfu(port="/dev/cu.usbserial-AV7K776E"):
         if in_adfu(): return True
     return False
 
+def reset_via_payload():
+    """Reset with the RUNNING payload's own write-memory op.
+
+    The stub-upload path below only works on a FRESH ADFU entry: once the
+    payload is running, the boot ROM's CBW protocol is gone and uploading
+    anything wedges ADFU. But the payload exposes `wm`, and the reset is only
+    two register writes -- no code upload needed at all.
+
+        RTC_REMAIN3 (0x4000c03c) = 0x42520000   clear the "boot to ADFU" request
+        WATCHDOG    (0x4000c020) = 0x5f         arm it; the reset follows
+
+    Verified on hardware: device left ADFU and booted normally.
+    """
+    d = usb.core.find(idVendor=0x10D6, idProduct=0x10D6)
+    if d is None:
+        return False
+    try:
+        d.set_configuration()
+    except usb.core.USBError:
+        pass
+    for _ in range(15):
+        try:
+            d.read(0x81, 512, 60)
+        except usb.core.USBError:
+            break
+
+    def wm(addr, val):
+        p = bytearray(16)
+        p[0:2] = b"wm"
+        struct.pack_into("<I", p, 4, 4)
+        struct.pack_into("<I", p, 8, addr)
+        d.write(0x02, bytes(p), 3000)
+        d.write(0x02, struct.pack("<I", val), 3000)
+        try:
+            return bytes(d.read(0x81, 4, 2000))[:1] == b"\xaa"
+        except usb.core.USBError:
+            return False
+
+    if not wm(0x4000c03c, 0x42520000):
+        return False
+    wm(0x4000c020, 0x5f)              # no ack expected: it resets mid-command
+    time.sleep(3)
+    return not in_adfu()
+
+
 if __name__ == "__main__":
     if not in_adfu():
         print("not in ADFU; entering...")
         if not enter_adfu():
             print("RESULT: could not reach ADFU"); sys.exit(1)
-    print("in ADFU -- uploading reset stub")
+    print("in ADFU -- trying the payload's wm first")
+    if reset_via_payload():
+        print("RESULT: rebooted (via payload wm)")
+        sys.exit(0)
+    print("payload route unavailable -- uploading reset stub")
     blob = STUB + b"\x00" * (256 - len(STUB) % 256)
     a = Adfu(timeout=8000)
     print("  write:", a.write(OP_WRITE, STUB_ADDR, blob))
