@@ -140,6 +140,54 @@ correct ciphertext, so the flash and the controller are healthy. What is missing
 is whatever mode the chip must be in for the ROM's Fast Read — and for the XIP
 engine, which fetched live-but-wrong bytes for the same likely reason.
 
+## SOLVED: the fetch path. Remaining: the key.
+
+Bringing the cache up needs **three** clock+reset pairs, not one. With
+`CLOCK_ID_OTFD` (3), `CLOCK_ID_SPI0` (4) and `CLOCK_ID_SPI0CACHE` (8) all
+ungated and out of reset, and the mapping programmed, `rm 0x10000000` returns:
+
+```
+7b55eecf846814875305716add958a4f1607ef45c30d5a0eb008d7f04203c382
+```
+
+**That is byte-exact the ciphertext at flash `0x14000`.** Correct address,
+correct data, no decryption. The address-mapping problem is solved:
+
+```python
+for bit in (3, 4, 8):                       # OTFD, SPI0, SPI0CACHE
+    w32(0x40001004, r32(0x40001004) | (1 << bit))   # CMU_DEVCLKEN0
+    w32(0x40000000, r32(0x40000000) | (1 << bit))   # RMU_MRCR0
+w32(0x40014000, 0x00000021)                 # SPICACHE_CTL
+w32(0x40010300, 0x10000001)                 # cpu 0x10000000 ...
+w32(0x40010304, 0x00014000)                 # ... -> nor 0x14000
+w32(0x40014004, 1)                          # invalidate, wait for bit 0
+```
+
+Then setting SPI0 CTL to the value a running device uses (`0x203b1c38`, versus
+the payload's `0x38`) changes the output to bytes that are **in neither the
+plaintext nor the ciphertext image**. Read together, those two results say:
+
+- in the payload's SPI mode the fetch is perfect and nothing decrypts;
+- the running mode's upper CTL bits engage **inline decryption in the SPI0 path**,
+  which then produces garbage.
+
+Decrypting the correct ciphertext with a missing key produces exactly that:
+output matching neither image. So the engine is there and switched on, and
+**the key is not loaded**.
+
+The boot ROM loads it from eFuse on the normal boot path; entering ADFU skips
+that. Replicating registers cannot help — every visible register in the
+memory controller, SPICACHE and CMU blocks was compared against a running
+device and set to match.
+
+### The next step, precisely
+
+Find the ROM routine that loads the flash decryption key from eFuse and call it
+through `cf`. Leads: the SDK ships `soc_atp.h` and `libsocatp.a` for leopard
+(ATP is the eFuse/trim interface), and the ROM's own boot path must call the
+equivalent before it can load the encrypted `fw0_boot`. `rm` can read the whole
+ROM, so this is static analysis, not guesswork.
+
 ## What is left
 
 The cache now fetches from the flash for real; the bytes are wrong. The most
