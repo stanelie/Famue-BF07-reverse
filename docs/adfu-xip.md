@@ -314,3 +314,42 @@ installing our code there is what needs plaintext in the first place.
 **Not circular for the device owner:** anyone who can run `dbg mdw` once has
 their plaintext forever. The serial requirement only blocks *other* people
 installing on *their* units.
+
+## The key is not copyable, and the load code is not readable
+
+Two measurements settle the "copy the key" idea:
+
+- **No key in the SPI0 registers.** The full block `0x40028000-0x40028100` was
+  compared running vs ADFU. The only differences are CTL (`+0x00`), `+0x04`,
+  the data register (`+0x0c`), and the length (`+0x10`). There is **no key
+  material anywhere** in the SPI0 space that appears when running. So the cipher
+  key is latched *inside* the decrypt engine, through a write-only path.
+- **The load code is in the unreadable region.** The boot ROM `0x1000-0xc000`
+  was dumped and searched: **zero references** to `EFUSE_BASE` (`0x40008000`) or
+  the SE crypto block. The eFuse-read and key-programming must live in
+  `0x0-0x1000` — exactly the region that faults on read (and takes the USB
+  stack with it). That region is almost certainly locked after boot.
+
+eFuse itself IS readable (`EFUSE_CTL0=1`, `EFUSE_CTL1=0xb0060200`, same running
+and ADFU), so the raw fuses can be read — but turning them into the engine's key
+is the ROM's internal job.
+
+### Where this leaves reading decrypted flash over ADFU
+
+The two clean routes are both blocked:
+
+1. *Copy the loaded key* — impossible, it is not in readable registers.
+2. *Replay the ROM's key-load* — the code is in the faulting/locked region and
+   cannot be disassembled.
+
+The remaining possibility is **calling** a ROM entry that performs the key-load
+(`cf` can call `<0x1000` even though `rm` cannot read it): the boot path decrypts
+the encrypted `fw0_boot`, so such a routine exists. But the callable API entries
+tried (`p_brom_nor_read`, spinor `vtable[0]` init) do not trigger it, and the
+narrower entries are unlabelled. Finding the right one is blind poking at ROM
+addresses — higher risk, and each miss needs a physical reset.
+
+**Honest assessment:** serial-free *reading* of decrypted flash is looking
+unlikely without either the locked ROM code or a documented key-load entry.
+The serial-free *install* goal is better served by the plaintext vendor firmware
+file (no key needed at all), which is where effort is better spent.
