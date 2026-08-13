@@ -35,6 +35,7 @@ redistributed here — the tools read firmware from the user's own device.
 | Doc | Contents |
 |---|---|
 | [docs/status.md](docs/status.md) | What works, what's blocked, what was ruled out |
+| [docs/user-tool.md](docs/user-tool.md) | **Back up and patch your own device over USB** — no case, no soldering |
 | [docs/flashing.md](docs/flashing.md) | **Backup, restore, patch** — the complete write path and its rules |
 | [docs/reader-architecture.md](docs/reader-architecture.md) | The replacement reader: threading, memory, pre-render, reflow |
 | [docs/reader-map.md](docs/reader-map.md) | Map of the vendor ebook app (lifecycle, scenes, pagination, input) |
@@ -57,6 +58,8 @@ redistributed here — the tools read firmware from the user's own device.
 | [tools/fwdis.py](tools/fwdis.py) | ARM Thumb-2 disassembler for the extracted image |
 | [tools/disasm.py](tools/disasm.py) | Annotated disassembler, resolves `bl` targets against `symbols.txt` |
 | [tools/extract_symbols.py](tools/extract_symbols.py) | Recovers 1267 function names from the firmware's own log calls |
+| [tools/bf07.py](tools/bf07.py) | **User-facing**: backup / verify / restore / install, over USB alone |
+| [tools/patchset.py](tools/patchset.py) | The reader's patch table: plaintext image in, patched sectors out |
 | [tools/mkflash.py](tools/mkflash.py) | Builds a verifying sector flasher from a patch table |
 | [tools/lark_cd.py](tools/lark_cd.py) | LARK ADFU host implementation (CBW framing, `cd` opcodes) |
 | [tools/verify_repair.py](tools/verify_repair.py) | Audit every sector against the backup and rewrite what differs |
