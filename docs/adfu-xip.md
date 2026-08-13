@@ -284,3 +284,33 @@ Path 1 is the clean long-term answer and makes the eFuse-key work unnecessary
 for the install use case. The ROM-key route remains the only way to *read*
 arbitrary decrypted flash over USB, and may yet be blocked if the key registers
 are write-only.
+
+## Can the RUNNING firmware serve decrypted flash over USB?
+
+The running firmware *does* have the key loaded, and its mass-storage stack has
+a vendor command surface. Its SCSI dispatcher (around `0x100e3400`) handles:
+
+```
+0x0f 0x10 0x12 0x19 0x2a 0x5a 0xa8 0xaa 0xb0 0xcb 0xcc 0xcd 0xfd 0xfe 0xff
+```
+
+- **`0xCC`** — identify, returns `ACTIONSUSBD` (we already use it)
+- **`0xCB`** — switch to ADFU (we already use it)
+- **`0xCD`** — in the running firmware this is **not** the ADFU escape. It
+  accepts only `0xCD 0xCB 0x01`, one specific action, then falls through to
+  "unsupported". There is no general read-memory behind it.
+
+There is a sub-command dispatch table indexed by a CDB byte
+(`ldrb r2,[r5,#13]; ldr r1,[r3,r2,lsl #2]`), but the table lives at
+**`0x18027158` — RAM**, populated at runtime, so its contents cannot be read
+from the firmware image. Whether it offers anything useful needs the device.
+
+**Why "just add code to the ADFU payload" does not solve this:** we already have
+arbitrary code execution in ADFU (`wm` + `cf`, proven). Our own code reads the
+same ciphertext, because the limitation is the keyless decryption engine, not
+what code runs. Code execution in the *running* firmware would work — but
+installing our code there is what needs plaintext in the first place.
+
+**Not circular for the device owner:** anyone who can run `dbg mdw` once has
+their plaintext forever. The serial requirement only blocks *other* people
+installing on *their* units.
