@@ -189,6 +189,36 @@ class Device:
                 raise SystemExit(f"write failed at 0x{a:06x}")
 
 
+def payload_alive():
+    """Is the flash payload already running?
+
+    Uploading it a second time is what wedges ADFU -- every USB transfer then
+    times out and only a power-cycle clears it. That is worth avoiding: a user
+    running `backup` and then `verify` would hit it every time.
+
+    The running payload answers a raw 16-byte `is` with 0xAA. The boot ROM does
+    not, so a timeout means "nothing loaded yet".
+    """
+    d = find(PID_ADFU)
+    if d is None:
+        return False
+    try:
+        d.set_configuration()
+    except usb.core.USBError:
+        pass
+    try:
+        p = bytearray(16)
+        p[0:2] = b"is"
+        struct.pack_into("<I", p, 4, 16)
+        struct.pack_into("<I", p, 8, 0)
+        d.write(0x02, bytes(p), 1500)
+        return bytes(d.read(0x81, 4, 1500))[:1] == b"\xaa"
+    except usb.core.USBError:
+        return False
+    finally:
+        usb.util.dispose_resources(d)
+
+
 def start_payload():
     """Upload and start the flash payload. Always fresh: a stale one fails."""
     path = os.path.abspath(PAYLOAD)
@@ -202,17 +232,24 @@ def start_payload():
     blob = open(path, "rb").read()
     if len(blob) % 256:
         blob += b"\0" * (256 - len(blob) % 256)
-    a = Adfu(timeout=8000)
-    a.write(OP_WRITE, 0x01010000, blob)
-    a.cmd(OP_EXEC1, 0x01010000)
-    usb.util.dispose_resources(a.d)
-    del a
+    try:
+        a = Adfu(timeout=8000)
+        a.write(OP_WRITE, 0x01010000, blob)
+        a.cmd(OP_EXEC1, 0x01010000)
+        usb.util.dispose_resources(a.d)
+        del a
+    except usb.core.USBError:
+        raise SystemExit(
+            "ADFU is not responding. It wedges if the payload is uploaded while\n"
+            "one is already running. Power-cycle the device (reset button) and\n"
+            "run this again -- nothing has been written.")
     time.sleep(2.5)
 
 
 def connect():
     enter_adfu()
-    start_payload()
+    if not payload_alive():
+        start_payload()
     d = Device()
     d.open_storage()
     return d
