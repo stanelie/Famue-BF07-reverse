@@ -92,6 +92,54 @@ Result, in order:
 | clock + reset + mapping | `00e800e8…` repeated — fetching, nothing served |
 | + SPI0 control copied | **live data that changes between reads** — but not the plaintext |
 
+## The ROM read path, disassembled
+
+`rm` can read the ROM, so the routines were dumped and disassembled locally
+rather than called blind.
+
+**`p_brom_nor_read` (`0x1fbc`)** — the signature IS the documented
+`(addr, len, buf)`; it loops over 512-byte chunks calling `0x27b0`:
+
+```
+1fc0  mov r5, r0        ; byte address, += 512 per chunk
+1fc2  mov r6, r2        ; buffer,       += 512 per chunk
+1fc8  lsrs r7, r1, #9   ; chunks = (len + 511) / 512
+1fda  bl 0x27b0
+```
+
+**`0x27b0`** issues a **Fast Read (0x0B)** on SPI0 and moves the data by DMA:
+
+| what | where |
+|---|---|
+| SPI0 base | `0x40028000` (literal at `0x2884`) |
+| ROM state struct | `0x01000010` (literal at `0x2880`); `+0x44`, `+0x4c` are mode flags |
+| transfer length | SPI0 `+0x10` |
+| DMA channel | `0x4001c100`, source SPI0 `+0x0c`, config `0x00200087` |
+
+**Correction:** SPI0 `+0x10` is a **length register**, not mode bits. An earlier
+experiment wrote `0x0b` there thinking it was a mode field copied from a running
+device; that write was meaningless.
+
+### Measured: the DMA is set up correctly and moves nothing
+
+After calling `p_brom_nor_read(0x14000, 512, buf)` the channel reads back:
+
+```
++0x00 00200087   config      +0x10 01008400   destination = our buffer
++0x04 00000001   started     +0x18 00000200   length 512
++0x08 4002800c   source      +0x1c 00000200   REMAINING still 512
+```
+
+So the transfer was programmed and started, and **zero bytes flowed** — the SPI
+controller never produced data. The ROM's own spinor init (`vtable[0]`, callable
+via `cf`, returns 0) does not change this, and neither does running it straight
+after a successful payload `rs`, which leaves SPI0 CTL at `0x38`.
+
+Throughout all of this the **payload's own `rs` keeps working** and returns the
+correct ciphertext, so the flash and the controller are healthy. What is missing
+is whatever mode the chip must be in for the ROM's Fast Read — and for the XIP
+engine, which fetched live-but-wrong bytes for the same likely reason.
+
 ## What is left
 
 The cache now fetches from the flash for real; the bytes are wrong. The most
@@ -103,13 +151,23 @@ packet layout assumed for `rx` is wrong.
 
 Next, in order of promise:
 
-1. **Work out `rx`'s real packet layout** (disassemble its handler properly),
-   then reset the flash and/or issue the mode command the XIP read expects.
-2. **Call the ROM's own spinor vtable** (`0x5d10`) through `cf` — its init entry
-   would put the controller and chip into the ROM's known-good state, which is
-   also what `p_brom_nor_read` needs.
-3. Capture the **full** SPI0 register block from a running device (only 16 words
-   were compared) in case a configuration register beyond `+0x3c` matters.
+1. **The flash chip's own mode.** Both the ROM read and the XIP engine behave
+   like the chip is not answering the command they issue. Reading its status
+   register would settle it. That needs a raw SPI command path: either the
+   payload's `rx` op (its packet layout is still unknown -- the guess wedged
+   ADFU) or the ROM spinor vtable's read-status / write-status entries, which
+   are callable via `cf`.
+2. **Capture the full SPI0 block** from a running device -- only 16 words were
+   compared, and the XIP command/dummy-cycle configuration may live past
+   `+0x3c`.
+3. **Trace where the payload's `rs` differs.** It works, so its instruction
+   sequence is a known-good recipe for this chip; diffing it against the ROM's
+   `0x27b0` would show what the chip actually needs.
+
+*Tried and ruled out:* calling `p_brom_nor_read` with every plausible argument
+order (the disassembly since confirmed the documented one is right); calling the
+ROM spinor init first; running it from the payload's working SPI state; setting
+SPI0 CTL and the cache registers to the values a running device uses.
 
 ## Running reference (captured from this device)
 
