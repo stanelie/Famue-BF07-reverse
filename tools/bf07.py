@@ -332,9 +332,17 @@ def cmd_install(args):
     if not os.path.exists(args.backup):
         raise SystemExit("refusing to install without a backup: run `backup` first")
     backup = open(args.backup, "rb").read()
-    plain = open(args.plain, "rb").read()
     sys.path.insert(0, HERE)
     from patchset import build          # the reader's patch table
+
+    if args.patch:
+        return install_patch(args, backup)
+    if not args.plain:
+        raise SystemExit("give --patch reader-patch.bin (recommended) or "
+                         "-p <decrypted image> (legacy)")
+
+    # Legacy path: needs the full decrypted image (one serial dump).
+    plain = open(args.plain, "rb").read()
     sectors = build(plain)              # {flash_addr: 4096 bytes of PLAINTEXT}
     d = connect()
     print(f"installing into {len(sectors)} sector(s)")
@@ -349,6 +357,59 @@ def cmd_install(args):
     print(f"If anything is wrong: bf07.py restore -b {args.backup}")
 
 
+def install_patch(args, backup):
+    """Install a distributable patch file -- ADFU only, no serial, no image.
+
+    Each patched sector is rebuilt block by block: the few blocks the patch
+    names are written as plaintext (the SoC encrypts them with the device's own
+    key), and every other block is restored from the device's OWN ciphertext,
+    verbatim. So the tool never needs the device's plaintext, only the 256 bytes
+    of stock context the patch carries -- and it works whether the flash key is
+    per-device or global, because nothing here assumes anything about the key.
+    """
+    from mkpatch import load_patch
+    reader, blocks, ref_sha = load_patch(open(args.patch, "rb").read())
+    print(f"patch: {len(reader)} reader sector(s), {len(blocks)} vendor block(s)")
+    print(f"       built from plaintext sha256 {ref_sha.hex()[:16]}...")
+    print("NOTE: your device must run the firmware this patch was built for.")
+    print("      A mismatch is recoverable with `restore` -- that is why a backup")
+    print("      is required.\n")
+
+    # group the named vendor blocks by their containing sector
+    by_sector = {}
+    for addr, data in blocks:
+        by_sector.setdefault(addr & ~0xfff, {})[addr & 0xfff] = data
+
+    d = connect()
+
+    # reader sectors: pure ours, write plaintext, leave 0xFF erased
+    for addr, data in reader:
+        d.erase(addr)
+        for off in range(0, SECTOR, 32):
+            if data[off:off + 32] != b"\xff" * 32:
+                d.write_plain(addr + off, data[off:off + 32])
+        print(f"  0x{addr:06x}: reader sector written")
+
+    # vendor sectors: keep the device's own ciphertext, swap only the named blocks
+    for sec in sorted(by_sector):
+        cur = d.read(sec, SECTOR)                 # this device's current ciphertext
+        d.erase(sec)
+        edits = by_sector[sec]
+        for off in range(0, SECTOR, 32):
+            if off in edits:
+                d.write_plain(sec + off, edits[off])         # SoC encrypts our patch
+            elif cur[off:off + 32] != b"\xff" * 32:
+                d.write_raw(sec + off, cur[off:off + 32])    # restore verbatim
+        back = d.read(sec, SECTOR)
+        moved = [hex(o) for o in edits if back[o:o + 32] != cur[o:o + 32]]
+        kept = all(back[o:o + 32] == cur[o:o + 32]
+                   for o in range(0, SECTOR, 32) if o not in edits)
+        print(f"  0x{sec:06x}: {len(moved)} block(s) patched, "
+              f"untouched blocks {'preserved' if kept else 'CHANGED (!)'}")
+    print("\ndone -- power-cycle the device")
+    print(f"If anything is wrong: bf07.py restore -b {args.backup}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -358,7 +419,8 @@ def main():
     p = sub.add_parser("restore"); p.add_argument("-b", "--backup", required=True); p.set_defaults(fn=cmd_restore)
     p = sub.add_parser("install")
     p.add_argument("-b", "--backup", required=True)
-    p.add_argument("-p", "--plain", required=True, help="decrypted fw0_sys image")
+    p.add_argument("--patch", help="reader-patch.bin (ADFU only, no serial/image)")
+    p.add_argument("-p", "--plain", help="decrypted fw0_sys image (legacy path)")
     p.set_defaults(fn=cmd_install)
     args = ap.parse_args()
     args.fn(args)

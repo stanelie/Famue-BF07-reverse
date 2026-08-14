@@ -53,10 +53,49 @@ SoC produced, erase, write that ciphertext raw, read it back identical.
 `restore` compares every sector against your backup and rewrites only what
 differs, then reads each one back to confirm.
 
+## Installing without serial: the patch file
+
+`install --patch reader-patch.bin` needs **ADFU only** -- no serial cable, no
+decrypted image, no vendor firmware file.
+
+The insight is that installing never needed decrypted *reads*. It needs patched
+**plaintext**, and almost all of that plaintext is either ours or already on the
+device:
+
+| what | where it comes from |
+|---|---|
+| the 2 reader sectors | ours -- written as plaintext, the SoC encrypts on write |
+| unchanged blocks of the 6 vendor sectors | **the device's own ciphertext**, rewritten verbatim (bit 31 clear) |
+| the 8 blocks we actually edit | the patch file -- **256 bytes** of stock context |
+
+So the only vendor content anyone needs is 256 bytes, and it is
+**firmware-version-specific, not device-specific**: identical on every unit
+running the same firmware. One person makes the patch once, with one serial
+dump; everyone else installs over USB alone.
+
+Nothing here assumes anything about the flash encryption key -- it works whether
+the key is per-device or global, because the device encrypts our blocks with its
+own key and its own ciphertext is never decrypted.
+
+```
+# once, by whoever has a decrypted dump:
+mkpatch.py -p fw_code_full.bin -o reader-patch.bin
+
+# by everyone else, ADFU only:
+bf07.py backup  -o mybf07.bin
+bf07.py install -b mybf07.bin --patch reader-patch.bin
+```
+
+**Validated on hardware:** restored to stock, installed from the patch file with
+no decrypted image present, and the result is byte-identical to the reference
+install -- the same 8 sectors with the same changed-block counts, and every
+untouched block preserved.
+
 ## The one thing that still needs a serial cable
 
-`install` needs the **decrypted** image (`-p`), because patches are built by
-editing plaintext.
+Only **building** a patch needs a decrypted image, and only once per firmware
+version. Installing an existing patch needs nothing but ADFU. The legacy
+`install -p <image>` path remains for anyone who has their own dump.
 
 - ADFU reads **ciphertext**.
 - ADFU cannot see the decrypted XIP window: measured, `rm 0x10000000` returns
