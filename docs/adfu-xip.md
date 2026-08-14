@@ -353,3 +353,67 @@ addresses — higher risk, and each miss needs a physical reset.
 unlikely without either the locked ROM code or a documented key-load entry.
 The serial-free *install* goal is better served by the plaintext vendor firmware
 file (no key needed at all), which is where effort is better spent.
+
+## RESOLVED: the cipher is live in ADFU. It was always the cache.
+
+Two earlier conclusions in this document were **wrong**, and both came from
+mistaking cache behaviour for cipher behaviour:
+
+- ~~"the decryption engine runs keyless in ADFU"~~
+- ~~"the key-load code is in a locked, unreadable ROM region"~~
+
+**The low ROM was never locked.** `0x188` had been read successfully all along
+(that is where the BROM API table came from); only the **null page** faults.
+`0x100`-`0x1000` reads fine. Which also settled the `p_launch` idea: it is
+
+```
+21c:  4708    bx r1
+```
+
+a one-instruction trampoline. It performs no setup, so calling it could never
+have loaded a key.
+
+**The cipher works in ADFU with its key loaded.** Proven without any
+cache ambiguity: write plaintext that has **never executed** (so it cannot be a
+stale line), let the SoC encrypt it on write, map that sector and read it back
+through the XIP window:
+
+```
+plaintext written : 05101b26313c47525d68737e89949faa...
+stored ciphertext : 3e66726179cacb3d251cdee6f93195fd...   (rs, raw)
+read back via XIP : 05101b26313c47525d68737e89949faa...   IDENTICAL
+```
+
+Every earlier "keyless" result was a stale cache line. ADFU is entered by a
+**warm** reboot, so decrypted lines from the previous boot survive -- and
+`fw0_sys+0` is the most likely line of all to still be cached, which is exactly
+the address that produced a false "PLAINTEXT" hit and then failed to reproduce.
+
+### The working recipe
+
+```python
+for bit in (3, 4, 8):                     # OTFD, SPI0, SPI0CACHE
+    w32(0x40001004, r32(0x40001004) | (1 << bit))   # CMU_DEVCLKEN0
+    w32(0x40000000, r32(0x40000000) | (1 << bit))   # RMU_MRCR0  (silently
+                                                    # ignores writes until this)
+w32(0x40014000, 0x21)                     # SPICACHE_CTL
+w32(0x40028000, 0x203b1c38)               # SPI0 CTL -- 0x38 reads CIPHERTEXT
+w32(0x40028004, 0x14)
+w32(0x40010300, 0x10000001)               # mapping window
+# per chunk:
+w32(0x40010304, flash_addr)               # re-point the window
+w32(0x40014004, 1)                        # invalidate, wait for bit 0
+read 0x10000000
+```
+
+**The window must be re-pointed and invalidated per chunk.** Reading many
+addresses after a single invalidate returns one stale line repeatedly -- the
+signature that caused every previous misdiagnosis.
+
+`tools/usb_plaindump.py` implements this: decrypted `fw0_sys` over USB alone.
+
+### What this changes
+
+Serial is no longer needed on the device side for anything: decrypted reads,
+patch building, backup, restore and install all work over USB. On Linux, where
+the `ACTIONSUSBD` switch is not blocked by the OS, no cable is needed at all.
