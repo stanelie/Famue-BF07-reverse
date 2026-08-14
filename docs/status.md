@@ -31,6 +31,8 @@ Written to be honest rather than encouraging. If you're picking this up, read th
 | **Hyphenation at existing hyphens** | ✅ compounds split instead of stranding a line |
 | **Percent seek from the vendor's keypad** | ✅ no page count, no scan — a byte offset |
 | **Position resume across exits and books** | ✅ |
+| **Position resume across a POWER CYCLE** | ✅ own bookmark file, not the vendor's `.bmk` |
+| **Install with no serial cable** | ✅ `install --patch`, 256 bytes of vendor context |
 | **Background paginator disabled** | ✅ nothing we display needs a page count |
 | **Vendor's own drawing disabled** | ✅ 3x faster render loop (304 ms -> 100 ms/tick) |
 
@@ -43,8 +45,9 @@ The write path and its rules are documented in [flashing.md](flashing.md).
   The fix is to measure on demand, which the font callback supports.
 - The `base_line = 0` correction is applied to the **shared** font, so it lifts text in
   the menus and file picker too, not only in the reader.
-- Our own bookmark file: position still rides on the vendor's `.bmk` and its restored
-  line index at book open.
+- The patch install has not been re-validated since the reader grew to a third
+  sector. The mkpatch range bug that exposed is fixed, but the end-to-end
+  byte-compare should be repeated at 3 sectors before anyone else uses it.
 - Writing the whole `fw0_sys` partition at once (only individual sectors so far).
 - Any recovery from firmware that fails **before** the shell starts. Keep serial wired.
 
