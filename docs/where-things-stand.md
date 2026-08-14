@@ -65,6 +65,9 @@ units.**
 - Re-uploading the ADFU payload while one is running wedges ADFU. Probe first.
 - Our `fw_log` output never reaches the UART. Any "listened and heard nothing"
   measurement made with it proves nothing.
+- A correction measured on ONE font is not a rule. Forcing `base_line = 0`
+  fixed the vendor's original face (it reported -2) and clipped the descenders
+  of another whose base line was legitimately positive.
 - **The display thread must not touch the filesystem.** The FS layer takes no
   lock anywhere, so a read from there races the ebook thread's book open. A font
   read placed on the display thread is what stopped books resuming after a reset.

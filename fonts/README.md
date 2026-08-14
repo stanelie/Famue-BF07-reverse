@@ -6,7 +6,9 @@ keeping that exact name. Then pick **"Custom"** in the reader's font menu.
 Nothing is written to the SD card and the vendor's sdfs container stays stock:
 the reader reads this file itself and answers LVGL's glyph callbacks directly.
 The "Custom" row is a relabelled vendor row: the font menu has five entries,
-and the one that used to name a font we displaced now names this one. See
+and the one that used to name a font we displaced now names this one. **With no
+`custom.font` on the drive the row reverts to its original label** and loads the
+vendor's font, so the reader is fine to install without one. See
 [reader-architecture.md](../docs/reader-architecture.md) for how menu labels
 resolve and why this was two small patches rather than a new row.
 

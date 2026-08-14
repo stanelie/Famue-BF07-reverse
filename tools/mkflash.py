@@ -55,7 +55,8 @@ EVER_PATCHED = {
     0xf5000,   # 0x100e1348 bitmap_font_get_glyph_dsc_cb (font capture)
     0x60000,   # 0x1004c002 message loop
     0xff000,   # 0x100eb534 page setter
-}
+    0x6d000,   # 0x1005934c app_menulist_load_res_id (menu label follows the file)
+}          # note 0x100e1440 (font open) shares 0xf5000 with the glyph callback
 touched = set(EVER_PATCHED)
 for site in list(hooks)+list(bwh)+list(words):
     touched.add((FW0+(site-XIP)) & ~0xfff)

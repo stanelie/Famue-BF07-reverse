@@ -1353,9 +1353,15 @@ void after_render(void)
      *
      * Re-applied every pass rather than once: the font is shared and reloaded
      * when the user changes it from the menu, which would restore the -2. */
+    /* Only a NEGATIVE base line, which is the case this was written for: the
+       vendor's own font reported -2 and that pushed glyphs down into the
+       bottom of the label. Forcing 0 unconditionally harmed any font whose
+       base line is legitimately positive -- the fang18 slot has line_height 24,
+       and zeroing its base line clipped the descenders of the fallback font
+       when no custom.font is installed. */
     if (S->font && !S->cf_installed) {
         volatile short *base_line = (volatile short *)(S->font + 10);
-        if (*base_line != 0) *base_line = 0;
+        if (*base_line < 0) *base_line = 0;
     }
 
     /* Does the user have a font on the volume the host can see? Answered ONCE,
@@ -1929,6 +1935,54 @@ int fontopen_body(void *font, const char *path)
         S->cf_installed = 0;
     }
     return rc;
+}
+
+/* ---- the menu label follows the file --------------------------------------
+ *
+ * The row's label id is a FLASH patch, so on its own it says "Custom" whether
+ * or not a custom.font exists -- and with no file the row loads the vendor's
+ * fang18, which is not custom anything. The id is only static until it is
+ * copied: app_menulist_load_res_id builds a 16-byte item per row and puts the
+ * id at item+0x0c. Correcting it there costs nothing and needs no flash.
+ *
+ * ID_CUSTOM is the string we rewrote in NOR; ID_ORIGINAL is the entry the row
+ * pointed at before, still present and still correct for the vendor's font. */
+#define ID_CUSTOM   0xf40f37eau        /* "Custom" (was Fangsong Small Font) */
+#define ID_ORIGINAL 0xf40f37edu        /* "Imitation Song large font"        */
+
+__attribute__((naked)) uint32_t menulist_real(void *ctx, void *rows, uint32_t max)
+{
+    __asm__ volatile(
+        "stmdb sp!, {r4, r5, r6, r7, r8, lr}\n"
+        "movw  r12, #0x9351\n"
+        "movt  r12, #0x1005\n"
+        "bx    r12\n");
+}
+
+uint32_t menulist_body(void *ctx, void *rows, uint32_t max)
+{
+    uint32_t items = menulist_real(ctx, rows, max);
+    if (!items || !ctx) return items;
+    if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st) return items;
+    struct inj_state *S = ANCHOR->st;
+    if (S->custom_font == 1) return items;      /* the file is there */
+
+    unsigned n = *(volatile uint8_t *)((uint32_t)ctx + 3);   /* item count */
+    if (n > 32) return items;
+    for (unsigned i = 0; i < n; i++) {
+        volatile uint32_t *id = (volatile uint32_t *)(items + i * 16 + 0x0c);
+        if (*id == ID_CUSTOM) *id = ID_ORIGINAL;
+    }
+    return items;
+}
+
+/* Replaces the `stmdb sp!, {r4-r8, lr}` at app_menulist_load_res_id. */
+__attribute__((naked)) void menulist_hook(void)
+{
+    __asm__ volatile(
+        "push  {r4, lr}\n"
+        "bl    menulist_body\n"
+        "pop   {r4, pc}\n");
 }
 
 /* Takes over lvgl_bitmap_font_open entirely: r0 and r1 are already the font

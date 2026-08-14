@@ -1622,3 +1622,36 @@ Loading is now split so each thread does only what it may:
 Accepted fonts are capped at 32 KB: the heap could not spare 8 KB for
 hyphenation patterns, so a larger font would fail the allocation anyway, and
 failing while sizing is cheaper than failing later.
+
+### The label follows the file
+
+The row's label id is a flash patch, so on its own it reads "Custom" whether or
+not a `custom.font` exists — and with no file the row loads the vendor's fang18,
+which is not custom anything.
+
+The id is only static until it is *copied*. `app_menulist_load_res_id` builds a
+16-byte item per row with the id at `item+0x0c`, so the reader wraps that
+function and, when no file was found, rewrites `0xf40f37ea` back to
+`0xf40f37ed` — the entry the row pointed at originally, still present and still
+correct for the vendor's font. No flash write, and it is re-evaluated on every
+menu build, so dropping the file on the drive is all it takes.
+
+### What a missing font does
+
+Every install path is guarded on `cf_ready == 1`, so an absent or malformed file
+simply never installs: `fs_open` fails (or the chunk walk never reaches `glyf`),
+nothing is allocated, and the vendor's loader serves the row normally.
+
+One thing did NOT degrade gracefully, and it is worth keeping as a warning about
+corrections written for one font. The display pass forced `base_line = 0` on
+whatever font was loaded whenever ours was not installed. That was written for
+the vendor's original font, which reported **-2** and pushed glyphs down into
+the bottom of the label. Applied to the fang18 slot — line_height 24, base_line
+legitimately positive — it clipped the descenders of the very font the no-file
+case falls back to. The test is now `if (*base_line < 0)`, which reproduces the
+original fix exactly and leaves other fonts alone.
+
+Remaining rough edges, neither user-visible:
+
+- a file that sizes correctly but fails to parse leaks its buffer until reboot
+- the file is read once per boot, so replacing it while running needs a reset
