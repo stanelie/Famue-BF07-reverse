@@ -6,13 +6,20 @@
 
 int main(int argc, char **argv)
 {
-    char line[128];
+    /* argv[1]: "en" (default) or "fr"; or "detect" to test language detection */
+    int lang = (argc > 1 && argv[1][0] == 'f') ? HY_LANG_FR : HY_LANG_EN;
+    int detect = (argc > 1 && argv[1][0] == 'd');
+    char line[512];
     while (fgets(line, sizeof line, stdin)) {
         int n = (int)strlen(line);
         while (n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = 0;
         if (!n) continue;
+        if (detect) {
+            printf("%s\n", hy_detect(line, n) == HY_LANG_FR ? "fr" : "en");
+            continue;
+        }
         unsigned char pts[8];
-        int c = hyphenate(line, n, pts, (int)sizeof pts);
+        int c = hyphenate(line, n, lang, pts, (int)sizeof pts);
         printf("%s", line);
         for (int i = 0; i < c; i++) printf(" %d", pts[i]);
         printf("\n");

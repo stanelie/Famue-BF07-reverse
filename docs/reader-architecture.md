@@ -1312,3 +1312,54 @@ each keep their place, and renaming a file does not lose it.
 
 Both run on the **ebook thread**, where file I/O is legal; the display thread
 must never touch the filesystem.
+
+## Hyphenation: Knuth-Liang, English and French
+
+Patterns live in flash and are read through XIP, so they cost **no RAM** — which
+was the deciding constraint, since the LVGL heap could not spare 8 KB, let alone
+35 KB.
+
+| | |
+|---|---|
+| English | 4,938 patterns, 26,611 bytes packed |
+| French | 1,216 patterns, 8,285 bytes packed |
+| reader total | 48,262 bytes of a 53,248-byte window |
+
+### The tables are separate, deliberately
+
+Fusing them was measured and rejected. Knuth-Liang patterns *compete*: values are
+max'd across matches, odd allows a break, even inhibits one. A union therefore
+opens breaks one language forbids and suppresses breaks the other needs. On
+4,000-word samples a fused table left only **62% of English and 47% of French**
+words correct, producing `cat-ti-sh-ly`, `en-vy-in-gly`, `éli-m-i-nais`.
+
+So the language is chosen **per book** instead, from the opening 512 bytes:
+accented characters score strongly, with French/English stop words settling
+books that open on an unaccented passage. Verified on prose, including French
+written without accents.
+
+### Packing
+
+Sorted patterns are front-coded (one byte of `shared<<4 | suffix_len`, then the
+suffix), values are stored per pattern, and a **fixed-size** sparse index every
+32 patterns carries *both* stream offsets — the values stream is variable length
+per pattern and cannot be indexed any other way. Raw 31 KB becomes 26.6 KB for
+English.
+
+### How it was verified
+
+`tools/test_hyphen.c` compiles the **device** implementation natively, and
+`tools/mkhyphen.py` contains a plain-Python reference. Diffing them across 5,000
+dictionary words per language is what makes this trustworthy — and it earned its
+keep immediately: the block scan originally stopped at exactly `stride` entries,
+so a pattern just past a block boundary was invisible and the prefix pruning
+then concluded nothing longer could match. **99 of 5,000 English words were
+wrong.** Scanning across the boundary is safe, because a block start re-encodes
+its string whole. Both languages now match the reference 5,000/5,000.
+
+Words containing characters outside the pattern alphabet (notably `-`) are left
+alone. That is why compounds like `court-circuiteras` are not split internally —
+the wrap already breaks them at their explicit hyphen.
+
+**Headroom is now ~5 KB.** Anything substantial added next needs either a
+smaller pattern set or space beyond `0x1f4000`.

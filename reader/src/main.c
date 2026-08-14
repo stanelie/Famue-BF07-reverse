@@ -114,6 +114,7 @@ struct inj_state {
     uint16_t wpunct[8];               /* curly quotes, dashes, ellipsis       */
     int32_t  saved_pos;               /* offset last written to the bookmark  */
     uint8_t  bmk_tried;               /* bookmark read attempted this book    */
+    uint8_t  lang;                    /* HY_LANG_*, detected once per book     */
     int32_t  drawn_start;             /* page offset currently in the labels  */
     uint16_t drawn_lines;
     int32_t  drawn_pm;                /* percent currently in the top bar     */
@@ -391,6 +392,29 @@ static int cp_w8(unsigned cp)
     return 8 * 8;                      /* unmeasured: a plausible glyph */
 }
 
+/* Width of a UTF-8 run in 1/8 px. The hyphenation path needs this: summing
+   char_w8 per BYTE charges an accented letter as a fallback-width lead byte
+   plus a zero continuation, which is wrong for French. */
+static int text_w8(const char *t, int n)
+{
+    int w = 0;
+    for (int i = 0; i < n; ) {
+        unsigned char c = (unsigned char)t[i];
+        if (c >= 0xC0) {
+            int seq = ((c & 0xF0) == 0xE0) ? 3 : 2;
+            unsigned cp = (seq == 3) ? (c & 0x0Fu) : (c & 0x1Fu);
+            for (int k = 1; k < seq && i + k < n; k++)
+                cp = (cp << 6) | ((unsigned char)t[i + k] & 0x3Fu);
+            w += cp_w8(cp);
+            i += seq;
+        } else {
+            w += char_w8(c);
+            i++;
+        }
+    }
+    return w;
+}
+
 /* REFLOW. Measured on a real book: 143 of 178 lines ended at a newline in the
    FILE and 84 of those were blank, so half the page was the file's own layout
    and the text lines ran ~16 chars against a 24-char width. So a single newline
@@ -539,17 +563,16 @@ static int wrap_one(const char *p, int avail, char *out, int indent,
             we++;
         }
         unsigned char pts[8];
-        int npts = hyphenate(p + ws_src, we - ws_src, pts, (int)sizeof pts);
+        struct inj_state *St = (ANCHOR->magic == INJ_MAGIC) ? ANCHOR->st : 0;
+        int npts = hyphenate(p + ws_src, we - ws_src,
+                             St ? St->lang : HY_LANG_EN, pts, (int)sizeof pts);
         if (npts > 0) {
-            int base = 0;
-            for (int t = 0; t < ws_out; t++)
-                base += char_w8((unsigned char)out[t]);
+            int base = text_w8(out, ws_out);
             int hyw = char_w8('-');
             int best = -1, bestw = 0;
             for (int t = 0; t < npts; t++) {          /* the longest that fits */
-                int plen = pts[t], sum = base;
-                for (int u = 0; u < plen; u++)
-                    sum += char_w8((unsigned char)p[ws_src + u]);
+                int plen = pts[t];
+                int sum = base + text_w8(p + ws_src, plen);
                 if (sum + hyw <= limit && ws_out + plen + 1 < MAXW - 1) {
                     best = plen;
                     bestw = sum + hyw;
@@ -749,6 +772,13 @@ void prepare_body(void)
             if (rd) vline = *(volatile int32_t *)((uint32_t)rd + RD_OFF_LINE);
             if (h != S->book_sig) {
                 S->book_sig = h;
+                {   /* pick the hyphenation language from the opening text */
+                    char probe[512];
+                    int pr = book_read(S, 0, probe, sizeof probe);
+                    S->lang = (pr > 64) ? (uint8_t)hy_detect(probe, pr) : HY_LANG_EN;
+                    static const char lg[] = "%s%s: LANG=%d\n";
+                    fw_log(lg, "", "inj", S->lang);
+                }
                 S->size = 0;              /* re-probe: different file */
                 S->sp = 0;
                 S->nxt_valid = 0;
