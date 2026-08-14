@@ -1,6 +1,10 @@
 # Where this project stands, and the routes forward
 
-Written 2026-08-06, after the first successful firmware modifications.
+Written 2026-08-06, after the first successful firmware modifications, and kept
+as a snapshot of what was known then. **For the current state read
+[where-things-stand.md](where-things-stand.md)** -- several "not yet done" items
+below have since been done (decrypted dumps over ADFU, the replacement reader,
+user fonts).
 
 ## What is proven
 

@@ -8,17 +8,22 @@ What gets written:
 
   * the reader itself, into the 53 KB of unused 0xFF padding at 0x1e7000, which
     is inside the XIP partition and so executes like any other firmware code;
-  * five words of vendor code -- three hooks and two layout constants.
+  * a handful of words of vendor code -- the hooks, two layout constants, and
+    one data word in the font menu's row table.
 
-Every one of those five is documented in docs/reader-architecture.md:
+Every one is documented in docs/reader-architecture.md:
 
-  0x1004a288  line height        -> our pitch (drawing position only)
   0x1004a1fc  container top      -> 24
   0x1004a222  container height   -> 24 subtracted
-  0x100493b2  timer TAIL         -> our render pass (reached unconditionally)
+  0x1004a288  line height        -> our pitch (drawing position only)
   0x1004c002  message receive    -> our page preparation (ebook thread)
+  0x100493b2  timer TAIL         -> our render pass (reached unconditionally)
+  0x100d92e8  gesture handler    -> input capture
   0x100e07b4  _lvgl_pointer_put  -> touch input capture
   0x100e1348  glyph dsc callback -> font capture, for real glyph widths
+  0x100e1440  lvgl_bitmap_font_open -> install the user font over the vendor's
+  0x1005934c  app_menulist_load_res_id -> menu label follows the file
+  0x10128e98  font menu row      -> label id for the "Custom" row (DATA)
 """
 import os
 import sys
@@ -32,9 +37,22 @@ CODE_BASE, CODE_LIMIT = 0x1e7000, 0x1f4000
 CONT_TOP, CONT_SUB = 24, 24
 
 # Symbol name -> the site it is branched from, and how.
+#
+# Keep this in step with tools/mkflash.py, which the development loop uses.
+# These two drifted apart once already: the font-open and menu hooks and the
+# label word patch existed only in the dev flasher, so `install --patch` would
+# have produced a reader with no user-font backend and no "Custom" label.
 BL_HOOKS = {"hook": 0x1004A288, "prepare_hook": 0x1004C002}
 BW_HOOKS = {"tail_hook": 0x100493B2, "pointer_hook": 0x100E07B4,
-            "font_hook": 0x100E1348, "gesture_hook": 0x100D92E8}
+            "font_hook": 0x100E1348, "gesture_hook": 0x100D92E8,
+            "fontopen_hook": 0x100E1440, "menulist_hook": 0x1005934C}
+
+# Vendor DATA patches {xip_addr: u32}. The font menu row for fang18 is
+# repointed at the label id 0xf40f37ea ("Fangsong Small Font"), which no row
+# referenced; tools/set_menu_label.py rewrites that string to "Custom" in the
+# NOR resource. Without the NOR step the row simply reads its old name -- the
+# reader itself works either way.
+WORD_PATCHES = {0x10128E98: 0xf40f37ea}
 
 
 def symbols(elf):
@@ -73,6 +91,8 @@ def build(plain, blob=None, elf=None):
     for name, site in BW_HOOKS.items():
         if name in syms:
             data[site - XIP:site - XIP + 4] = P.bw(site, syms[name])
+    for addr, value in WORD_PATCHES.items():
+        data[addr - XIP:addr - XIP + 4] = value.to_bytes(4, "little")
 
     sectors = {}
     # the reader's own sectors, padded with 0xFF like the free space they sit in
@@ -82,7 +102,8 @@ def build(plain, blob=None, elf=None):
         sec[0:len(chunk)] = chunk
         sectors[CODE_BASE + n * 0x1000] = bytes(sec)
     # every vendor sector a hook lands in
-    for site in list(BL_HOOKS.values()) + list(BW_HOOKS.values()) + [0x1004A1FC]:
+    for site in (list(BL_HOOKS.values()) + list(BW_HOOKS.values())
+                 + list(WORD_PATCHES) + [0x1004A1FC]):
         flash = (FW0 + (site - XIP)) & ~0xfff
         off = flash - FW0
         sectors[flash] = bytes(data[off:off + 0x1000])

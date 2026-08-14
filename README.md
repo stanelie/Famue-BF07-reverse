@@ -72,6 +72,7 @@ redistributed here — the tools read firmware from the user's own device.
 | [tools/grid.py](tools/grid.py), [keypad.py](tools/keypad.py), [digits.py](tools/digits.py) | Touch/keypad capture used to map the soft keypad |
 | [tools/recover.py](tools/recover.py), [adfu_reset.py](tools/adfu_reset.py), [cap.py](tools/cap.py) | Recovery, ADFU entry and UART capture helpers |
 | [tools/mkfont.py](tools/mkfont.py) | Render any TTF into the device's LVGL bitmap font format |
+| [tools/set_menu_label.py](tools/set_menu_label.py) | Rewrite a menu string in the NOR resource (the "Custom" label) |
 | [tools/mkhyphen.py](tools/mkhyphen.py) | Pack Knuth-Liang hyphenation patterns, with a Python reference |
 | [fonts/](fonts/) | A ready-made user font (Literata, OFL) — drop it on the drive |
 | [reader/](reader/) | The replacement ebook reader — C, built for XIP `0x101d3000` |
@@ -79,7 +80,8 @@ redistributed here — the tools read firmware from the user's own device.
 ## Key results
 
 - **A replacement ebook reader running on the device** — own wrapping, reflow,
-  pagination and pre-render, injected into 53 KB of free space in the XIP partition.
+  pagination and pre-render, injected into the 53 KB of free space in the XIP
+  partition (52,914 bytes of it used).
 - **Input taken from the touch driver**, not from the vendor's reader. The firmware
   dispatches input *above* LVGL, which is why probing the object tree found nothing for
   days; `_lvgl_pointer_put` (`0x100e07b4`) gives raw coordinates, and page turns, the
@@ -94,7 +96,12 @@ redistributed here — the tools read firmware from the user's own device.
   the device's font format; drop it on the drive as `custom.font`.
 - **Decrypted firmware readable over USB alone** — the flash cipher is live in
   ADFU with its key loaded, so `tools/usb_plaindump.py` dumps plaintext
-  `fw0_sys` with no serial cable. Verified byte-exact against a UART dump.
+  `fw0_sys` with no serial cable. Verified byte-exact against a UART dump. This
+  is also what makes the distributable patch buildable without a cable.
+- **A "Custom" row in the vendor's own font menu** — menu labels resolve
+  through `common.sty` to a string table in a NOR resource, and one font label
+  there was referenced by no row. The reader points the row at it and reverts it
+  at runtime when no font file is installed.
 - **The vendor's reader switched off in place** — its decode, layout, drawing and
   background paginator are all disabled, which made the render loop **3x faster**
   (304 ms -> 100 ms per tick) and removed a multi-minute scan per book open.

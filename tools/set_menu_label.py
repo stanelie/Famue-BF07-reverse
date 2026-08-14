@@ -48,6 +48,58 @@ def newest_backup():
     return c[-1]
 
 
+MAPPED = 0x125208c0     # the two blocks, in the NOR resource's mapped view
+CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir,
+                     "reference", "str160_blocks.bin")
+
+
+def read_plain_blocks():
+    """Plaintext of the two 32-byte blocks the string spans.
+
+    Read from YOUR device, not shipped: these 64 bytes are vendor strings. The
+    NOR resource is encrypted in flash but plaintext through the mapping the
+    firmware sets up at 0x12400000, so the debug shell can read it while the
+    device is running -- before it is put into ADFU to be written.
+    """
+    if os.path.exists(CACHE):
+        return open(CACHE, "rb").read()
+
+    import glob
+    import re
+    import time
+    import serial
+    ports = glob.glob("/dev/cu.usbserial-*")
+    if not ports:
+        raise SystemExit("need the UART to read the current strings, or place "
+                         f"64 bytes at {CACHE}")
+    s = serial.Serial(ports[0], 2000000, timeout=0.5)
+    time.sleep(0.3)
+    words = {}
+    for _ in range(4):
+        s.reset_input_buffer()
+        s.write(f"dbg mdw 0x{MAPPED:08x} 10\r\n".encode())
+        s.flush()
+        t, b = time.time(), b""
+        while time.time() - t < 1.2:
+            d = s.read(65536)
+            if d:
+                b += d
+        for m in re.finditer(r"^([0-9a-f]{8}): ((?:[0-9a-f]{8} ?){1,4})",
+                             b.decode("utf8", "replace"), re.M):
+            base = int(m.group(1), 16)
+            for i, w in enumerate(m.group(2).split()):
+                words[base + i * 4] = int(w, 16)
+        if len(words) >= 16:
+            break
+    s.close()
+    out = b"".join(words.get(MAPPED + i * 4, 0).to_bytes(4, "little")
+                   for i in range(16))
+    if len(words) < 16:
+        raise SystemExit("could not read the strings over the debug shell "
+                         "(is the device running, not in ADFU?)")
+    return out          # cached by the caller, and only when still pristine
+
+
 def to_adfu():
     """macOS cannot send the ADFU switch itself -- the kernel owns the device's
        only interface -- so go in over the UART, the way the flasher does."""
@@ -82,6 +134,10 @@ def main():
     print(f"string at flash 0x{TARGET:06x}, sector 0x{SECTOR:06x}, "
           f"offset 0x{TARGET - SECTOR:03x}")
 
+    # BEFORE ADFU: the strings are only readable through the mapping the
+    # running firmware sets up, and entering ADFU takes that away.
+    plain = read_plain_blocks()
+
     to_adfu()
     d = bf07.connect()
     cur = d.read(SECTOR, SECTOR_SIZE)
@@ -106,18 +162,20 @@ def main():
     print(f"  sector matches the backup outside our blocks"
           + (f" ({len(ours)} of ours already written)" if ours else ""))
 
-    # Plaintext of the two blocks the string spans, read from the mapped view
-    # while the device was running (peek at 0x125208c0).
-    plain = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              os.pardir, "reference", "str160_blocks.bin"),
-                 "rb").read()
     if len(plain) != 64:
         raise SystemExit("expected 64 bytes of plaintext for the two blocks")
 
     pos = (TARGET - SECTOR) & 31                      # offset inside block A
     base = (TARGET - SECTOR) - pos                    # block A's sector offset
+    if plain[pos:pos + len(NEW)] == NEW:
+        print(f"  already reads '{NEW.rstrip(chr(0).encode()).decode()}' "
+              f"-- nothing to do")
+        return
     if plain[pos:pos + STR160_LEN] != OLD:
         raise SystemExit(f"ABORT: plaintext does not hold {OLD!r} at +0x{pos:x}")
+    if not os.path.exists(CACHE):                     # pristine: worth keeping
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        open(CACHE, "wb").write(plain)
 
     edited = bytearray(plain)
     edited[pos:pos + STR160_LEN] = NEW + b"\x00" * (STR160_LEN - len(NEW))

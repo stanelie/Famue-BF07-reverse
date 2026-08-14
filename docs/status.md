@@ -32,7 +32,10 @@ Written to be honest rather than encouraging. If you're picking this up, read th
 | **Percent seek from the vendor's keypad** | ✅ no page count, no scan — a byte offset |
 | **Position resume across exits and books** | ✅ |
 | **Position resume across a POWER CYCLE** | ✅ own bookmark file, not the vendor's `.bmk` |
-| **Install with no serial cable** | ✅ `install --patch`, 256 bytes of vendor context |
+| **Install with no serial cable** | ✅ `install --patch`, 352 bytes of vendor context |
+| **User fonts over USB** | ✅ our own LVGL glyph backend; drop a `.font` on the drive |
+| **A "Custom" entry in the vendor's font menu** | ✅ label follows the file, reverts when absent |
+| **TTF → device font converter** | ✅ `mkfont.py`, small-optical-size + autohinted |
 | **DECRYPTED firmware dump over USB** | ✅ `usb_plaindump.py` -- the cipher is live in ADFU |
 | **Background paginator disabled** | ✅ nothing we display needs a page count |
 | **Vendor's own drawing disabled** | ✅ 3x faster render loop (304 ms -> 100 ms/tick) |

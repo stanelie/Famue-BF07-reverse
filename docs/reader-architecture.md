@@ -1323,7 +1323,7 @@ was the deciding constraint, since the LVGL heap could not spare 8 KB, let alone
 |---|---|
 | English | 4,938 patterns, 26,611 bytes packed |
 | French | 1,216 patterns, 8,285 bytes packed |
-| reader total | 48,262 bytes of a 53,248-byte window |
+| reader total | 52,914 bytes of a 53,248-byte window |
 
 ### The tables are separate, deliberately
 
@@ -1361,8 +1361,10 @@ Words containing characters outside the pattern alphabet (notably `-`) are left
 alone. That is why compounds like `court-circuiteras` are not split internally —
 the wrap already breaks them at their explicit hyphen.
 
-**Headroom is now ~5 KB.** Anything substantial added next needs either a
-smaller pattern set or space beyond `0x1f4000`.
+**Headroom is now 334 bytes.** The user-font backend and the menu hooks spent
+what the hyphenation work left. Anything substantial added next needs space
+beyond `0x1f4000` -- a `patchset.py`/`mkflash.py` change, since `CODE_LIMIT` is
+what bounds the window.
 
 ### The ebook thread's stack, again
 

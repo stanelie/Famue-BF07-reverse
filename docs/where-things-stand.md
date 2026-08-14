@@ -36,10 +36,10 @@ cable.**
 
 ## The distribution model
 
-`install --patch` needs a patch file carrying our reader plus **256 bytes** of
-stock vendor context at the hook sites. That 256 bytes is
-firmware-version-specific, not device-specific, and stays 256 bytes however
-large the reader grows. Everything else comes from the device itself: untouched
+`install --patch` needs a patch file carrying our reader plus **352 bytes** of
+stock vendor context at the hook sites (11 blocks, one per patched site). That
+context is firmware-version-specific, not device-specific, and grows only when
+a hook is added -- not when the reader itself grows. Everything else comes from the device itself: untouched
 blocks are its own ciphertext rewritten verbatim, and our blocks are encrypted
 by its own key on write. **Nothing depends on the flash key being shared between
 units.**

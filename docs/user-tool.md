@@ -64,21 +64,29 @@ device:
 
 | what | where it comes from |
 |---|---|
-| the reader sectors (2-3, as it grows) | ours -- written as plaintext, the SoC encrypts on write |
+| the reader sectors (13, and growing) | ours -- written as plaintext, the SoC encrypts on write |
 | unchanged blocks of the 6 vendor sectors | **the device's own ciphertext**, rewritten verbatim (bit 31 clear) |
-| the 8 blocks we actually edit | the patch file -- **256 bytes** of stock context |
+| the blocks we actually edit | the patch file -- **352 bytes** of stock context |
 
-So the only vendor content anyone needs is 256 bytes, and it is
+So the only vendor content anyone needs is 352 bytes, and it is
 **firmware-version-specific, not device-specific**: identical on every unit
-running the same firmware. One person makes the patch once, with one serial
+running the same firmware. One person makes the patch once from a decrypted
 dump; everyone else installs over USB alone.
+
+**That dump no longer needs a serial cable either.** `tools/usb_plaindump.py`
+reads plaintext `fw0_sys` over ADFU, because the flash cipher is live in ADFU
+with its key loaded (see [adfu-xip.md](adfu-xip.md)). On Linux or Windows the
+whole chain -- decrypted dump, patch, install -- is USB-only. On macOS the one
+remaining need for a cable is *entering* ADFU, which is an OS limitation, not a
+decryption one.
 
 Nothing here assumes anything about the flash encryption key -- it works whether
 the key is per-device or global, because the device encrypts our blocks with its
 own key and its own ciphertext is never decrypted.
 
 ```
-# once, by whoever has a decrypted dump:
+# once, by anyone with a device (no serial needed on Linux/Windows):
+usb_plaindump.py -o fw_code_full.bin
 mkpatch.py -p fw_code_full.bin -o reader-patch.bin
 
 # by everyone else, ADFU only:
@@ -86,16 +94,50 @@ bf07.py backup  -o mybf07.bin
 bf07.py install -b mybf07.bin --patch reader-patch.bin
 ```
 
-**Re-validated at 3 reader sectors** (`tools/validate_patch.py`): the working
-flash was captured as the reference, the sectors restored to stock, the patch
-installed, and all **9** sectors compared byte for byte -- identical, and the
-device booted with the reader live. The script writes the reference back if the
-comparison fails, so the device is never left in an unknown state.
+## The "Custom" font label is a separate, optional step
 
-**Validated on hardware, the right way:** a legacy full-plaintext install was
-performed and its ciphertext captured as a reference; the device was restored to
-stock; then the patch install was run and every sector compared **byte for byte**
-against that reference. All 8 sectors identical.
+`install --patch` covers everything in `fw0_sys`, including the word patch that
+points the font menu row at the label id `0xf40f37ea`. It does **not** cover the
+string that id resolves to, which lives in the NOR resource partition -- a
+different region, and one whose plaintext is 64 bytes of vendor strings that
+this repo will not carry.
+
+So a patch-only install gives you a working reader and a working user font; the
+row simply keeps its vendor name ("Fangsong Small Font"). To make it say
+"Custom":
+
+```
+set_menu_label.py            # dry run: reads YOUR device's strings over the UART
+set_menu_label.py --write
+```
+
+It reads the current strings through the mapping the running firmware sets up
+(the region is encrypted in flash, plaintext through the mapping), so nothing
+vendor-specific is shipped, and it refuses to write unless it finds the exact
+string it expects. Re-running on an already-labelled device is a no-op.
+
+The reader does not depend on any of this: with no `custom.font` on the drive
+the menu hook reverts the row to its original label at runtime.
+
+### How it has been validated
+
+**Currently, in software:** `patchset.build()` is diffed against the sectors the
+development flasher writes -- the build that is verified working on the device.
+All **21** common sectors are byte-identical. (The dev flasher writes two extra
+sectors, `0x5c000` and `0xff000`, which are historical hook sites it rewrites
+from stock to clear stale branches; they carry no patch, so the patch file does
+not need them.) This check costs nothing and catches exactly the drift that made
+this section necessary: the font-open and menu hooks and the label word patch
+lived only in `mkflash.py` for a while, so `install --patch` would have produced
+a reader with no user-font backend and no "Custom" label.
+
+**Previously, on hardware** (`tools/validate_patch.py`, at 3 reader sectors):
+the working flash was captured as the reference, the sectors restored to stock,
+the patch installed, and all 9 sectors compared byte for byte -- identical, with
+the device booting and the reader live. The script writes the reference back if
+the comparison fails, so the device is never left in an unknown state. Before
+that, at 2 reader sectors, the same path was checked against a legacy
+full-plaintext install: all 8 sectors identical.
 
 An earlier run of this same path produced a device that bus-faulted in the font
 hook at boot, and it was reported as validated because the check only compared

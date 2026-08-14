@@ -59,7 +59,7 @@ this wrong is why every command in this project's first weeks returned CSW statu
 Then the flash commands are available: `rs` read sector, `es` erase sector,
 `ws` write sector.
 
-## The four rules of writing
+## The five rules of writing
 
 These are hard constraints, each found by a failure:
 
@@ -71,6 +71,12 @@ These are hard constraints, each found by a failure:
 3. **Write plaintext with bit 31 of the address set.** The SoC encrypts on write.
    Writing pre-encrypted data, or writing without bit 31, both produce garbage.
 4. **Command acks are 4 bytes.** Waiting for more costs a USB timeout per command.
+5. **An ACK is not proof of a program.** The first encrypted write issued after a
+   run of verbatim writes is acknowledged and never programmed -- the block stays
+   at `0xff`. Write the encrypted blocks *first*, and read back to confirm a block
+   is not still erased. Checking "did it differ from stock?" does NOT catch this:
+   an unwritten block differs from stock too. This silently produced a menu label
+   of decrypted `0xff` three times before it was found.
 
 ## Verification, and why it is exact
 
