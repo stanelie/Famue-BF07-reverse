@@ -1287,3 +1287,28 @@ repaints — the bug above cannot come back silently behind an assumption.
 
 Page turns never waited on file I/O. What made them feel slow was the redraw
 cycle above, not preparation.
+
+## Position across a power cycle: our own bookmark
+
+Resume worked within a session and failed after a reset: the book reopened at
+the beginning.
+
+Both halves of the cause were already known, just never put together:
+
+- **Our state does not survive a reset.** It lives in the LVGL heap, and the
+  marker test proved RAM is cleared on reset.
+- **The vendor's `.bmk` cannot stand in.** We keep its decode failing on purpose
+  (12 lines into an 8-record context), so its `reading_line` never advances.
+  Measured after a reset: `reading_line = 0`. It faithfully saves 0.
+
+So the reader keeps its own bookmark: `/SD1://bf07read.pos`, a table of 8
+`(book signature, byte offset)` records. Signature rather than filename, because
+a book is already identified by hashing its first 64 bytes -- so several books
+each keep their place, and renaming a file does not lose it.
+
+- **load** once per book, as soon as the private handle is open;
+- **save** whenever the page settles and the offset differs from what was
+  written, so an abrupt power-off loses at most one page.
+
+Both run on the **ebook thread**, where file I/O is legal; the display thread
+must never touch the filesystem.

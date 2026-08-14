@@ -111,6 +111,8 @@ struct inj_state {
     uint8_t  wtab_ok;
     uint16_t wtab[95];
     uint16_t wpunct[8];               /* curly quotes, dashes, ellipsis       */
+    int32_t  saved_pos;               /* offset last written to the bookmark  */
+    uint8_t  bmk_tried;               /* bookmark read attempted this book    */
     int32_t  drawn_start;             /* page offset currently in the labels  */
     uint16_t drawn_lines;
     int32_t  drawn_pm;                /* percent currently in the top bar     */
@@ -269,6 +271,73 @@ static void book_open_own(struct inj_state *S)
         fs_close(&S->my_file);
         fw_memset(&S->my_file, 0, sizeof(fs_file_t));
     }
+}
+
+/* ---- our own bookmark ------------------------------------------------
+ *
+ * Position must survive a power cycle, and RAM does not: the state block lives
+ * in the LVGL heap and a reset clears it (proven with a marker). The vendor's
+ * .bmk cannot stand in either -- we deliberately keep its decode failing, so
+ * its reading_line never advances and it saves 0, which is exactly the
+ * "restarts from the beginning after a reset" bug.
+ *
+ * So we keep our own: a tiny file of (book signature, byte offset) records, so
+ * several books each remember their place. Signature, not filename, because we
+ * already hash the first 64 bytes to identify a book.
+ */
+#define BMK_PATH  "/SD1://bf07read.pos"
+#define BMK_SLOTS 8
+
+struct bmk_rec { uint32_t sig; int32_t pos; };
+
+static void bmk_load(struct inj_state *S)
+{
+    fs_file_t f;
+    fw_memset(&f, 0, sizeof f);
+    if (fs_open(&f, BMK_PATH, FS_O_READ) < 0) return;
+    struct bmk_rec recs[BMK_SLOTS];
+    int rc = fs_read(&f, recs, sizeof recs);
+    fs_close(&f);
+    if (rc < (int)sizeof(struct bmk_rec)) return;
+    int n = rc / (int)sizeof(struct bmk_rec);
+    for (int i = 0; i < n; i++) {
+        if (recs[i].sig == S->book_sig && recs[i].pos > 0) {
+            S->jump_line = -1;             /* our offset wins over any line */
+            S->want = recs[i].pos;
+            S->want_snap = 0;
+            S->saved_pos = recs[i].pos;
+            S->need_prep = 1;
+            static const char m[] = "%s%s: BMK resume=%d\n";
+            fw_log(m, "", "inj", recs[i].pos);
+            return;
+        }
+    }
+}
+
+static void bmk_save(struct inj_state *S)
+{
+    if (S->cur.start == S->saved_pos || S->cur.start < 0) return;
+    struct bmk_rec recs[BMK_SLOTS];
+    fw_memset(recs, 0, sizeof recs);
+    fs_file_t f;
+    fw_memset(&f, 0, sizeof f);
+    if (fs_open(&f, BMK_PATH, FS_O_READ) >= 0) {    /* keep other books' slots */
+        fs_read(&f, recs, sizeof recs);
+        fs_close(&f);
+    }
+    int slot = -1, free_slot = -1;
+    for (int i = 0; i < BMK_SLOTS; i++) {
+        if (recs[i].sig == S->book_sig) { slot = i; break; }
+        if (free_slot < 0 && recs[i].sig == 0) free_slot = i;
+    }
+    if (slot < 0) slot = (free_slot >= 0) ? free_slot : 0;   /* else evict [0] */
+    recs[slot].sig = S->book_sig;
+    recs[slot].pos = S->cur.start;
+    fw_memset(&f, 0, sizeof f);
+    if (fs_open(&f, BMK_PATH, FS_O_RDWR | FS_O_CREATE) < 0) return;
+    if (fs_write(&f, recs, sizeof recs) == (int)sizeof recs)
+        S->saved_pos = S->cur.start;
+    fs_close(&f);
 }
 
 /* Proportional width estimate in 1/8 px. The firmware's own measurer
@@ -591,6 +660,15 @@ void prepare_body(void)
         book_open_own(S);
     }
 
+    /* One bookmark read per book, then persist every settled page. Both run on
+       the ebook thread, where file I/O is legal -- the display thread must not
+       touch the filesystem. */
+    if (!S->bmk_tried && S->book_sig && S->file_ready) {
+        S->bmk_tried = 1;
+        bmk_load(S);
+    }
+    bmk_save(S);
+
     if (!S->need_prep) return;
     S->need_prep = 0;
 
@@ -631,6 +709,8 @@ void prepare_body(void)
                 S->nxt_valid = 0;
                 S->last_line = vline;
                 S->jump_line = vline;
+                S->saved_pos = -1;
+                S->bmk_tried = 0;
                 {
                     static const char b[] = "%s%s: BOOK line=%d\n";
                     fw_log(b, "", "inj", vline);

@@ -30,14 +30,23 @@ import patchset
 
 FW0 = 0x14000
 MAGIC = b"BF07PAT1"
-READER_SECTORS = {0x1e7000, 0x1e8000}
+
+def is_reader(addr):
+    """Sectors holding OUR code, derived from patchset -- never hardcoded.
+
+    This was a fixed {0x1e7000, 0x1e8000} and silently broke when the reader
+    grew to a third sector: 0x1e9000 was then treated as VENDOR code, so the
+    patch tried to carry 136 blocks (4352 bytes) of "stock context" that is
+    really our own reader sitting in erased padding.
+    """
+    return patchset.CODE_BASE <= addr < patchset.CODE_LIMIT
 
 
 def build_patch(plain):
     sectors = patchset.build(plain)
     reader, blocks = [], []
     for addr in sorted(sectors):
-        if addr in READER_SECTORS:
+        if is_reader(addr):
             reader.append((addr, sectors[addr]))
         else:
             stock = plain[addr - FW0:addr - FW0 + 0x1000]

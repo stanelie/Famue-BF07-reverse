@@ -49,6 +49,12 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
    same file a second time corrupts the FS layer's mutex bookkeeping. */
 #define FW_BOOK_FILE ((fs_file_t *)0x1801a084)
 #define FS_O_READ 0x01
+/* Zephyr fs flags: mode in the low bits, FS_O_CREATE separate. Used for our own
+   bookmark file -- the vendor's .bmk cannot serve, because its reading_line is
+   frozen at 0 by design (its turn path is dead), so it saves 0 on exit. */
+#define FS_O_WRITE 0x02
+#define FS_O_RDWR  0x03
+#define FS_O_CREATE 0x10
 #define FS_SEEK_SET 0
 /* [OBSERVED] "%sfile open error (%d)" */
 #define fs_open  ((int (*)(fs_file_t *, const char *, uint8_t))0x1007fba9)

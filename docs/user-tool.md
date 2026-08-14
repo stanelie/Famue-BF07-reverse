@@ -64,7 +64,7 @@ device:
 
 | what | where it comes from |
 |---|---|
-| the 2 reader sectors | ours -- written as plaintext, the SoC encrypts on write |
+| the reader sectors (2-3, as it grows) | ours -- written as plaintext, the SoC encrypts on write |
 | unchanged blocks of the 6 vendor sectors | **the device's own ciphertext**, rewritten verbatim (bit 31 clear) |
 | the 8 blocks we actually edit | the patch file -- **256 bytes** of stock context |
 
