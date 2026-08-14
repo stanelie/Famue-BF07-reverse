@@ -65,6 +65,9 @@ units.**
 - Re-uploading the ADFU payload while one is running wedges ADFU. Probe first.
 - Our `fw_log` output never reaches the UART. Any "listened and heard nothing"
   measurement made with it proves nothing.
+- **The display thread must not touch the filesystem.** The FS layer takes no
+  lock anywhere, so a read from there races the ebook thread's book open. A font
+  read placed on the display thread is what stopped books resuming after a reset.
 - **The first `write_plain` after a run of `write_raw` is ACKed but never
   programmed.** Write encrypted blocks first and verify a block is not still
   `0xff` -- "it differs from stock" passes for a block that was never written.

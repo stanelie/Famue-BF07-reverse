@@ -316,7 +316,27 @@ static int glyph_dsc(struct inj_state *S, unsigned short *dsc,
     return fw_glyph_dsc((void *)S->font, dsc, cp, next);
 }
 
-static void cfont_load(struct inj_state *S);
+static void cfont_size(struct inj_state *S);
+static void cfont_read(struct inj_state *S);
+static void cfont_install(struct inj_state *S);
+static int path_ends_with(const char *p, const char *tail);
+
+/* Which FILE is behind the vendor's font object?
+ *
+ * lvgl_bitmap_font_open stores the bitmap_font slot at dsc[0] (the font's dsc
+ * lives at font+0x14), and each slot carries its own path at +8 -- that is the
+ * string bitmap_font_open strcmps against when it looks a font up. Walking that
+ * chain lets the display thread tell which font is loaded WITHOUT having been
+ * present when it was opened. */
+static const char *font_path(uint32_t font)
+{
+    if (!font) return 0;
+    uint32_t dsc = *(volatile uint32_t *)(font + 0x14);
+    if (dsc < 0x18000000u || dsc >= 0x18100000u) return 0;
+    uint32_t slot = *(volatile uint32_t *)dsc;
+    if (slot < 0x18000000u || slot >= 0x18100000u) return 0;
+    return (const char *)(slot + 8);
+}
 
 #define BMK_PATH  "/SD1://bf07read.pos"
 /* User-installed font, on the FAT volume the host sees over USB. See the
@@ -775,6 +795,13 @@ void prepare_body(void)
         S->open_try++;
         book_open_own(S);
     }
+
+    /* The user's font, sized and read HERE because this is the thread where
+       file I/O is legal. Steps 1 and 3; the display thread allocates between
+       them. Doing this from the display hook raced the book open and cost the
+       bookmark -- resetting stopped resuming the book. */
+    if (S->custom_font == 0) cfont_size(S);
+    else if (S->custom_font == 1 && S->cf_buf && S->cf_ready == 0) cfont_read(S);
 
     /* One bookmark read per book, then persist every settled page. Both run on
        the ebook thread, where file I/O is legal -- the display thread must not
@@ -1341,15 +1368,27 @@ void after_render(void)
      * mid-read is the same reentrancy that produced the original stall. At
      * boot the display thread is already ticking and no book is open yet, so
      * the answer is settled long before the ebook app can ask for a font. */
-    if (S->custom_font == 0 && !S->file_ready) {
-        fw_memset(&S->probe_file, 0, sizeof S->probe_file);
-        if (fs_open(&S->probe_file, CUSTOM_FONT_PATH, FS_O_READ) < 0) {
-            S->custom_font = 2;
-        } else {
-            fs_close(&S->probe_file);
-            S->custom_font = 1;
-            cfont_load(S);             /* read it here, on this stack */
-        }
+    /* Step 2 of the font load: the buffer. NO file I/O on this thread -- see
+       cfont_size. The ebook thread sized it and will fill it. */
+    if (S->custom_font == 1 && S->cf_len && !S->cf_buf) {
+        void *p = lv_mem_alloc(S->cf_len);
+        if (p) S->cf_buf = (uint32_t)p;
+        else S->custom_font = 2;       /* no heap for it: stay on the vendor's */
+    }
+
+    /* Install our font whenever the slot it took over is the one loaded --
+     * not only when we happen to see the open.
+     *
+     * On a cold boot the ebook opens its font BEFORE this state exists, so
+     * fontopen_body passes through with S null and nothing installs: measured
+     * fo_calls 0, cf_installed 0, and the font object still holding the
+     * vendor's callbacks with line_height 24. The base_line forcing below then
+     * pushed every glyph 4px down inside a 20px label and cut the descenders
+     * off. Switching fonts and back was the only thing that fixed it, because
+     * that finally ran the open through our hook. */
+    if (S->cf_ready == 1 && !S->cf_installed && S->font) {
+        const char *p = font_path(S->font);
+        if (p && path_ends_with(p, "fang18.font")) cfont_install(S);
     }
 
     /* Re-measure when the user picks a different font from the menu.
@@ -1715,12 +1754,24 @@ const uint8_t *cf_get_bitmap(const void *font, uint32_t letter)
     return S->cf_bm;
 }
 
-/* Read the whole file once. Chunk lengths are summed to size the buffer, which
-   doubles as validation: a file that does not walk cleanly to `glyf` never gets
-   a buffer committed to it. */
-static void cfont_load(struct inj_state *S)
+/* Loading is split across two threads on purpose.
+ *
+ * File I/O belongs to the EBOOK thread -- the FS layer takes no lock anywhere,
+ * so touching it from the display thread races the book open. Doing exactly
+ * that is what stopped books resuming: our font read ran underneath
+ * book_open_own and the bookmark never survived a reset.
+ *
+ * Allocation stays on the DISPLAY thread, which is where every other
+ * allocation in this reader happens.
+ *
+ *   1. cfont_size()  ebook thread   -- how big is it? (also validates it)
+ *   2. display hook  display thread -- lv_mem_alloc(cf_len)
+ *   3. cfont_read()  ebook thread   -- fill the buffer, parse it
+ */
+static void cfont_size(struct inj_state *S)
 {
-    S->cf_ready = 2;
+    S->custom_font = 2;                          /* absent unless proven */
+    fw_memset(&S->probe_file, 0, sizeof S->probe_file);
     if (fs_open(&S->probe_file, CUSTOM_FONT_PATH, FS_O_READ) < 0) return;
 
     uint8_t hdr[8];
@@ -1735,20 +1786,23 @@ static void cfont_load(struct inj_state *S)
         if (hdr[4] == 'g' && hdr[5] == 'l' && hdr[6] == 'y' && hdr[7] == 'f')
             have_glyf = 1;
     }
-    if (!have_glyf || total < 32 || total > 0x20000) { fs_close(&S->probe_file); return; }
-
-    uint8_t *buf = (uint8_t *)lv_mem_alloc(total);
-    if (!buf) { fs_close(&S->probe_file); return; }
-    if (fs_seek(&S->probe_file, 0, FS_SEEK_SET) < 0
-        || (uint32_t)fs_read(&S->probe_file, buf, total) != total) {
-        fs_close(&S->probe_file);
-        return;                                  /* buffer leaks; boot-once */
-    }
     fs_close(&S->probe_file);
-
-    S->cf_buf = (uint32_t)buf;
+    if (!have_glyf || total < 32 || total > 0x8000) return;
     S->cf_len = total;
+    S->custom_font = 1;
+}
 
+static void cfont_read(struct inj_state *S)
+{
+    S->cf_ready = 2;
+    uint8_t *buf = (uint8_t *)S->cf_buf;
+    fw_memset(&S->probe_file, 0, sizeof S->probe_file);
+    if (fs_open(&S->probe_file, CUSTOM_FONT_PATH, FS_O_READ) < 0) return;
+    int rc = fs_read(&S->probe_file, buf, S->cf_len);
+    fs_close(&S->probe_file);
+    if ((uint32_t)rc != S->cf_len) return;
+
+    uint32_t total = S->cf_len;
     uint32_t off = 0, head = 0;
     while (off + 8 <= total) {
         uint32_t len = cf_u32(buf + off);

@@ -1570,3 +1570,55 @@ Both now do the same two things:
 
 The general lesson is the one this project keeps relearning: an ACK is not proof
 of a program, and "it changed" is not proof it changed *into the right thing*.
+
+### Two bugs from installing the font at the wrong moment
+
+Both were caught after the backend already worked, and both are about *when*
+and *on which thread* it loads.
+
+**Descenders clipped on a cold boot.** With the custom font already selected,
+a fresh boot rendered with the descenders cut off; switching font and back
+fixed it. Measured on the running device:
+
+```
+fo_calls = 0        our hook never saw an open this boot
+cf_installed = 0    the backend was never installed
+font +0x00 = 0x100e1345, +0x04 = 0x100e13bd    the VENDOR's callbacks
+line_height = 24, base_line = 0
+```
+
+So the book was not being drawn with our font at all — it was the vendor's own
+face, and the `base_line = 0` correction (which exists for *that* font at
+line_height 17) pushed every glyph 4 px down inside a 20 px label. The ebook
+opens its font before our state exists, so `fontopen_body` passed through with
+`S` null and nothing installed; only a font switch ran an open through our hook.
+
+Waiting for the open was the mistake. The font object says which file is behind
+it: `font+0x14` → `dsc[0]` → the bitmap_font slot, whose path sits at `+8` —
+the same string `bitmap_font_open` strcmps against when looking a font up. The
+display pass now walks that chain, and installs whenever the loaded file is the
+slot we took over. Whether the open happens before or after our state exists no
+longer matters.
+
+**Books stopped resuming after a reset.** The first version of the loader called
+`fs_open`/`fs_read` from the display hook. Line 798 of `main.c` already said
+this was not allowed:
+
+> One bookmark read per book, then persist every settled page. Both run on the
+> ebook thread, where file I/O is legal — **the display thread must not touch
+> the filesystem.**
+
+The font read raced `book_open_own`, the FS layer takes no lock anywhere, and
+the bookmark was the casualty — the same class of failure as the original stall.
+Loading is now split so each thread does only what it may:
+
+| step | thread | why |
+|---|---|---|
+| `cfont_size` — walk chunks for the total | ebook | file I/O lives here; also validates before a buffer is committed |
+| `lv_mem_alloc(cf_len)` | display | where every other allocation in this reader happens |
+| `cfont_read` — fill and parse | ebook | file I/O |
+| install into `lv_font_t` | display | pointer walking only, no I/O |
+
+Accepted fonts are capped at 32 KB: the heap could not spare 8 KB for
+hyphenation patterns, so a larger font would fail the allocation anyway, and
+failing while sizing is cheaper than failing later.
