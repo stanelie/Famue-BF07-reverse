@@ -22,6 +22,7 @@ and, more usefully, for the failures that shaped it.
 | install the reader | ADFU (`bf07.py install --patch`) |
 | dump DECRYPTED firmware | ADFU (`usb_plaindump.py`) |
 | build a patch | a decrypted dump — which you can now take over USB |
+| install a user font | **nothing** — drop a `.font` on the drive the player already exposes |
 | **live logs from a running device** | **still the UART** |
 
 The last row is the only device-side gap. Logs need the firmware *running*, so
@@ -66,10 +67,21 @@ units.**
   measurement made with it proves nothing.
 - Verify **content**, not the changed/unchanged pattern. A wrong block passes a
   pattern check, and one did — it bricked the boot until restored.
+- **The vendor's font loader is sdfs-only** (`sd_fopen`). Our `fs_open` succeeds
+  on the very same path because it is a different filesystem API — which is
+  precisely what made redirecting the loader look workable. It is not.
+- **`lvgl_bitmap_font_open` frees its own descriptor before returning -1.**
+  Closing after a failed open is a second free and reboots the player: a
+  "fallback" written as a safety net was itself the crash.
+- The player's USB disk mode exposes the FAT partition only — LUN size equals
+  partition size, so the sdfs region below it is unreachable from a host.
 
 ## Natural next steps
 
-1. **Move development to Linux** — removes the last cable.
-2. **A vendor SCSI command in the reader** for live memory reads and log
+1. **Find the localised string resource** behind the menu label ids. It is the
+   only thing between us and a properly named "Custom" font row; the row table
+   and its spare slot are already understood.
+2. **Move development to Linux** — removes the last cable.
+3. **A vendor SCSI command in the reader** for live memory reads and log
    streaming over USB. This is the remaining half of a fully USB workflow.
-3. Faster page turns, if the e-ink refresh can be driven in partial-update mode.
+4. Faster page turns, if the e-ink refresh can be driven in partial-update mode.

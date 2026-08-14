@@ -112,6 +112,23 @@ struct inj_state {
     uint8_t  wtab_ok;
     uint16_t wtab[95];
     uint16_t wpunct[8];               /* curly quotes, dashes, ellipsis       */
+    uint8_t  custom_font;             /* 0 unknown, 1 present, 2 absent       */
+    fs_file_t probe_file;             /* existence check, kept OFF the stack  */
+    uint32_t fo_calls;                /* font opens seen                      */
+    uint32_t fo_subst;                /* ...redirected to the user's font     */
+    uint32_t fo_fail;                 /* ...that failed and fell back         */
+    int32_t  fo_last;                 /* last open's return code              */
+    /* The user's own font, read by US and drawn by OUR callbacks. */
+    uint32_t cf_buf;                  /* whole file, in the LVGL heap         */
+    uint32_t cf_len;
+    uint32_t cf_cmap, cf_loca, cf_glyf;   /* chunk payloads, within cf_buf    */
+    uint32_t cf_glyf_len;
+    uint32_t cf_nloca;
+    uint8_t  cf_ready;                /* 0 untried, 1 loaded, 2 unusable      */
+    uint8_t  cf_installed;            /* our callbacks are in the font struct */
+    uint8_t  cf_advbits, cf_xybits, cf_whbits;
+    int16_t  cf_line_height, cf_base_line;
+    uint8_t  cf_bm[96];               /* one decoded glyph, for the bitmap cb */
     int32_t  saved_pos;               /* offset last written to the bookmark  */
     uint8_t  bmk_tried;               /* bookmark read attempted this book    */
     uint8_t  lang;                    /* HY_LANG_*, detected once per book     */
@@ -287,7 +304,24 @@ static void book_open_own(struct inj_state *S)
  * several books each remember their place. Signature, not filename, because we
  * already hash the first 64 bytes to identify a book.
  */
+/* Ask whichever backend is actually installed. With our font in the struct the
+   vendor's callback would answer from ITS dsc at font+0x14 -- still pointing at
+   the card font -- and hand back the wrong widths for the glyphs on screen. */
+int cf_get_dsc(const void *font, void *dsc, uint32_t letter, uint32_t next);
+
+static int glyph_dsc(struct inj_state *S, unsigned short *dsc,
+                     uint32_t cp, uint32_t next)
+{
+    if (S->cf_installed) return cf_get_dsc((void *)S->font, dsc, cp, next);
+    return fw_glyph_dsc((void *)S->font, dsc, cp, next);
+}
+
+static void cfont_load(struct inj_state *S);
+
 #define BMK_PATH  "/SD1://bf07read.pos"
+/* User-installed font, on the FAT volume the host sees over USB. See the
+   font-open hook below for why this slot exists and which menu row reaches it. */
+#define CUSTOM_FONT_PATH "/SD1://custom.font"
 #define BMK_SLOTS 8
 
 struct bmk_rec { uint32_t sig; int32_t pos; };
@@ -532,6 +566,20 @@ static int wrap_one(const char *p, int avail, char *out, int indent,
         }
         out[k++] = (char)c;
         i++;
+
+        /* A break is also legal AFTER an em or en dash, which prose uses
+           without surrounding spaces: "Because-still smiling-they were going".
+           Without this the whole run is one unbreakable token, so a line ends
+           early and the next starts with a word that would have fitted -- the
+           reported gap before "smiling". Recorded like an explicit hyphen: the
+           dash stays on this line and the next resumes after it. */
+        if (k >= 3 && (unsigned char)out[k - 3] == 0xE2
+                   && (unsigned char)out[k - 2] == 0x80
+                   && ((unsigned char)out[k - 1] == 0x94       /* em dash */
+                    || (unsigned char)out[k - 1] == 0x93)) {   /* en dash */
+            hy_src = i - 1;
+            hy_out = k - 1;
+        }
     }
 
     *px_out = w8 / 8;
@@ -1278,9 +1326,68 @@ void after_render(void)
      *
      * Re-applied every pass rather than once: the font is shared and reloaded
      * when the user changes it from the menu, which would restore the -2. */
-    if (S->font) {
+    if (S->font && !S->cf_installed) {
         volatile short *base_line = (volatile short *)(S->font + 10);
         if (*base_line != 0) *base_line = 0;
+    }
+
+    /* Does the user have a font on the volume the host can see? Answered ONCE,
+     * here, and only while no book file is open.
+     *
+     * Here rather than in the font-open hook because that hook runs on the
+     * ebook thread deep inside the vendor's loader, where there is not enough
+     * stack for fs_open. And only with no book open because the FS layer takes
+     * no lock anywhere: opening from this thread while the ebook thread is
+     * mid-read is the same reentrancy that produced the original stall. At
+     * boot the display thread is already ticking and no book is open yet, so
+     * the answer is settled long before the ebook app can ask for a font. */
+    if (S->custom_font == 0 && !S->file_ready) {
+        fw_memset(&S->probe_file, 0, sizeof S->probe_file);
+        if (fs_open(&S->probe_file, CUSTOM_FONT_PATH, FS_O_READ) < 0) {
+            S->custom_font = 2;
+        } else {
+            fs_close(&S->probe_file);
+            S->custom_font = 1;
+            cfont_load(S);             /* read it here, on this stack */
+        }
+    }
+
+    /* Re-measure when the user picks a different font from the menu.
+     *
+     * The font STRUCT is reused across a change -- the same reload that puts
+     * base_line back to -2 above -- so S->font stays valid and the pointer
+     * never changes, but every width behind it does. Nothing else announces
+     * the switch, so probe a few glyphs each pass and compare against the
+     * table we built. Four lookups against a full page render is nothing.
+     *
+     * Without this the table keeps the widths of whichever font was loaded at
+     * boot. Measured: after switching from Literata (wide) back to the
+     * vendor's Song face (narrow), every line broke 2-3 characters early
+     * because wrapping charged Literata's advances for Song's glyphs. */
+    if (S->font && S->wtab_ok) {
+        static const char probe[4] = { 'm', 'W', 'i', 'l' };
+        unsigned short dsc[6];
+        unsigned now = 0, had = 0;
+        int usable = 1;
+        for (int j = 0; j < 4; j++) {
+            dsc[0] = 0;
+            if (!glyph_dsc(S,dsc, (uint32_t)probe[j], 0) || !dsc[0]) {
+                usable = 0;
+                break;
+            }
+            now += dsc[0];
+            had += S->wtab[probe[j] - 32];
+        }
+        if (usable && now != had) {
+            S->wtab_ok = 0;               /* re-measured just below */
+            S->want = S->cur.start;       /* re-wrap the page we are on */
+            S->nxt_valid = 0;
+            S->need_prep = 1;
+            /* Force the repaint too: a re-wrap keeps the same start offset and
+               often the same line count, which is exactly what the redraw test
+               below treats as "nothing changed". */
+            S->drawn_start = -1;
+        }
     }
 
     /* Measure the alphabet once, with the real font. adv_w lands at dsc+0 in
@@ -1292,7 +1399,7 @@ void after_render(void)
         int ok = 0;
         for (int c = 32; c < 127; c++) {
             dsc[0] = 0;
-            if (fw_glyph_dsc((void *)S->font, dsc, (uint32_t)c, 0) && dsc[0]) {
+            if (glyph_dsc(S,dsc, (uint32_t)c, 0) && dsc[0]) {
                 S->wtab[c - 32] = dsc[0];
                 ok++;
             } else {
@@ -1307,7 +1414,7 @@ void after_render(void)
             0x2018, 0x2019, 0x201C, 0x201D, 0x2013, 0x2014, 0x2026, 0x00A0 };
         for (int j = 0; j < 8; j++) {
             dsc[0] = 0;
-            S->wpunct[j] = (fw_glyph_dsc((void *)S->font, dsc, cps[j], 0) && dsc[0])
+            S->wpunct[j] = (glyph_dsc(S,dsc, cps[j], 0) && dsc[0])
                          ? dsc[0] : 0;
         }
         if (ok > 64) S->wtab_ok = 1;      /* enough of the alphabet to trust */
@@ -1440,6 +1547,345 @@ void font_body(void *f)
     if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st) return;
     struct inj_state *S = ANCHOR->st;
     if (!S->font && f) S->font = (uint32_t)f;
+}
+
+/* ---- user font, from the volume the host can actually see ----------------
+ *
+ * The vendor's font menu stores an index 0..5 and a small if-chain at
+ * 0x10047af6 maps it to a path inside the sdfs container (/SD1:C/...). That
+ * container lives in the hidden region BEFORE the FAT partition, and the USB
+ * mass-storage LUN starts AT the partition -- measured: 55609941 sectors
+ * exposed, partition at LBA 5457067, and those sum to exactly the card size.
+ * So nothing a user drops on the drive they can see is ever reachable by one
+ * of those paths, and installing a font meant opening the case.
+ *
+ * The menu's own row table (0x10128e50, 28-byte rows, group id 0xcefe2df9 on
+ * all five font rows, with a spare all-zero row right after them) would take a
+ * sixth entry, but each row names its label by an id into a localised string
+ * resource that is not plaintext in the firmware -- a new id would draw blank.
+ * So instead take over the one slot that is not wanted, fang18, the row shown
+ * as "Imitation Song large".
+ *
+ * Hooked at the loader rather than at the two call sites that pass this path,
+ * so any caller is covered. Falls back to the vendor path when the file is
+ * missing: selecting the row without having installed a font must still
+ * render, since a failed open returns -1 and the ebook reports "layout
+ * failed" with nothing on screen. */
+
+/* Bounded and range-checked on purpose. This hook sits at the head of a
+   function the WHOLE system calls, and it runs BEFORE the vendor's own null
+   check on the path, so a caller that leaves a stale r1 would have us walking
+   a pointer the vendor never dereferences. Scanning to a NUL that is not there
+   faults, and a fault here is a silent reset. */
+static int path_ends_with(const char *p, const char *tail)
+{
+    uint32_t a = (uint32_t)p;
+    int xip = (a >= 0x10000000u && a < 0x10200000u);
+    int ram = (a >= 0x18000000u && a < 0x18100000u);
+    if (!xip && !ram) return 0;
+
+    int lp = 0, lt = 0;
+    while (lp < 128 && p[lp]) lp++;
+    if (lp >= 128) return 0;
+    while (tail[lt]) lt++;
+    if (lp < lt) return 0;
+    for (int i = 0; i < lt; i++)
+        if (p[lp - lt + i] != tail[i]) return 0;
+    return 1;
+}
+
+/* ---- our own LVGL font backend ------------------------------------------
+ *
+ * The vendor's loader is sdfs-only, so a font on the USB-visible volume can
+ * only be drawn if WE read it and WE answer LVGL's two glyph callbacks. Both
+ * structures below were read off the firmware rather than assumed:
+ *
+ *   lv_font_t          +0x00 get_glyph_dsc   +0x04 get_glyph_bitmap
+ *                      +0x08 line_height     +0x0a base_line   (int16)
+ *                      +0x14 dsc             (we never use it -- our state is
+ *                                             reached through the anchor)
+ *   lv_font_glyph_dsc_t +0 adv_w  +2 box_w  +4 box_h  +6 ofs_x  +8 ofs_y
+ *                      +10 bpp,  callback returns 1 on success
+ *
+ * from the stores in the vendor's own callback at 0x100e1344. adv_w is in
+ * WHOLE PIXELS in this firmware, which is also what mkfont.py writes, so the
+ * file's advances pass straight through. */
+static uint32_t cf_u32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+static uint16_t cf_u16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+
+static uint32_t cf_bits(const uint8_t *b, uint32_t *pos, int n)
+{
+    uint32_t v = 0;
+    for (int i = 0; i < n; i++) {
+        v = (v << 1) | ((b[*pos >> 3] >> (7 - (*pos & 7))) & 1);
+        (*pos)++;
+    }
+    return v;
+}
+static int cf_sbits(const uint8_t *b, uint32_t *pos, int n)
+{
+    uint32_t v = cf_bits(b, pos, n);
+    return (v & (1u << (n - 1))) ? (int)v - (1 << n) : (int)v;
+}
+
+struct cf_glyph { int adv, bx, by, w, h; uint32_t bitpos; };
+
+static int cf_gid(struct inj_state *S, uint32_t cp)
+{
+    const uint8_t *cm = (const uint8_t *)(S->cf_buf + S->cf_cmap);
+    uint32_t n = cf_u32(cm);
+    if (n > 64) return 0;
+    const uint8_t *sub = cm + 4;
+    for (uint32_t i = 0; i < n; i++, sub += 16) {
+        uint32_t start = cf_u32(sub + 4);
+        uint32_t len   = cf_u16(sub + 8);
+        uint32_t gid0  = cf_u16(sub + 10);
+        if (cp >= start && cp < start + len) return (int)(gid0 + (cp - start));
+    }
+    return 0;
+}
+
+static int cf_glyph_at(struct inj_state *S, int gid, struct cf_glyph *g)
+{
+    if (gid <= 0 || (uint32_t)gid >= S->cf_nloca) return 0;
+    const uint8_t *loca = (const uint8_t *)(S->cf_buf + S->cf_loca);
+    uint32_t off = cf_u32(loca + 4 + 4 * (uint32_t)gid);
+    if (off < 8) return 0;
+    uint32_t payload = off - 8;               /* loca counts the chunk header */
+    if (payload >= S->cf_glyf_len) return 0;
+
+    const uint8_t *gl = (const uint8_t *)(S->cf_buf + S->cf_glyf);
+    uint32_t bit = payload * 8;
+    g->adv = (int)cf_bits(gl, &bit, S->cf_advbits);
+    g->bx  = cf_sbits(gl, &bit, S->cf_xybits);
+    g->by  = cf_sbits(gl, &bit, S->cf_xybits);
+    g->w   = (int)cf_bits(gl, &bit, S->cf_whbits);
+    g->h   = (int)cf_bits(gl, &bit, S->cf_whbits);
+    g->bitpos = bit;
+    if (g->w < 0 || g->h < 0 || g->w > 64 || g->h > 64) return 0;
+    if ((bit + (uint32_t)(g->w * g->h) + 7) / 8 > S->cf_glyf_len) return 0;
+    return 1;
+}
+
+int cf_get_dsc(const void *font, void *dsc, uint32_t letter, uint32_t next)
+{
+    (void)font; (void)next;
+    if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st) return 0;
+    struct inj_state *S = ANCHOR->st;
+    if (S->cf_ready != 1 || !dsc) return 0;
+
+    struct cf_glyph g;
+    if (!cf_glyph_at(S, cf_gid(S, letter), &g)) return 0;
+
+    uint8_t *d = (uint8_t *)dsc;
+    *(uint16_t *)(d + 0) = (uint16_t)g.adv;      /* whole pixels here */
+    *(uint16_t *)(d + 2) = (uint16_t)g.w;
+    *(uint16_t *)(d + 4) = (uint16_t)g.h;
+    *(int16_t  *)(d + 6) = (int16_t)g.bx;
+    *(int16_t  *)(d + 8) = (int16_t)g.by;
+    d[10] = 1;                                   /* bpp */
+    return 1;
+}
+
+const uint8_t *cf_get_bitmap(const void *font, uint32_t letter)
+{
+    (void)font;
+    if (ANCHOR->magic != INJ_MAGIC || !ANCHOR->st) return 0;
+    struct inj_state *S = ANCHOR->st;
+    if (S->cf_ready != 1) return 0;
+
+    struct cf_glyph g;
+    if (!cf_glyph_at(S, cf_gid(S, letter), &g)) return 0;
+
+    /* The file's bitmap is already a continuous 1bpp stream, but it starts
+       mid-byte (the glyph header is 26 bits), so it has to be shifted into a
+       buffer LVGL can read from directly. */
+    uint32_t n = (uint32_t)(g.w * g.h);
+    if (n > sizeof S->cf_bm * 8) return 0;
+    fw_memset(S->cf_bm, 0, sizeof S->cf_bm);
+    const uint8_t *gl = (const uint8_t *)(S->cf_buf + S->cf_glyf);
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t p = g.bitpos + i;
+        if ((gl[p >> 3] >> (7 - (p & 7))) & 1) S->cf_bm[i >> 3] |= 0x80u >> (i & 7);
+    }
+    return S->cf_bm;
+}
+
+/* Read the whole file once. Chunk lengths are summed to size the buffer, which
+   doubles as validation: a file that does not walk cleanly to `glyf` never gets
+   a buffer committed to it. */
+static void cfont_load(struct inj_state *S)
+{
+    S->cf_ready = 2;
+    if (fs_open(&S->probe_file, CUSTOM_FONT_PATH, FS_O_READ) < 0) return;
+
+    uint8_t hdr[8];
+    uint32_t total = 0;
+    int have_glyf = 0;
+    for (int i = 0; i < 8 && !have_glyf; i++) {
+        if (fs_seek(&S->probe_file, (int32_t)total, FS_SEEK_SET) < 0) break;
+        if (fs_read(&S->probe_file, hdr, 8) != 8) break;
+        uint32_t len = cf_u32(hdr);
+        if (len < 8 || len > 0x20000) break;
+        total += len;
+        if (hdr[4] == 'g' && hdr[5] == 'l' && hdr[6] == 'y' && hdr[7] == 'f')
+            have_glyf = 1;
+    }
+    if (!have_glyf || total < 32 || total > 0x20000) { fs_close(&S->probe_file); return; }
+
+    uint8_t *buf = (uint8_t *)lv_mem_alloc(total);
+    if (!buf) { fs_close(&S->probe_file); return; }
+    if (fs_seek(&S->probe_file, 0, FS_SEEK_SET) < 0
+        || (uint32_t)fs_read(&S->probe_file, buf, total) != total) {
+        fs_close(&S->probe_file);
+        return;                                  /* buffer leaks; boot-once */
+    }
+    fs_close(&S->probe_file);
+
+    S->cf_buf = (uint32_t)buf;
+    S->cf_len = total;
+
+    uint32_t off = 0, head = 0;
+    while (off + 8 <= total) {
+        uint32_t len = cf_u32(buf + off);
+        if (len < 8 || off + len > total) return;
+        const uint8_t *t = buf + off + 4;
+        if      (t[0]=='h'&&t[1]=='e'&&t[2]=='a'&&t[3]=='d') head = off + 8;
+        else if (t[0]=='c'&&t[1]=='m'&&t[2]=='a'&&t[3]=='p') S->cf_cmap = off + 8;
+        else if (t[0]=='l'&&t[1]=='o'&&t[2]=='c'&&t[3]=='a') S->cf_loca = off + 8;
+        else if (t[0]=='g'&&t[1]=='l'&&t[2]=='y'&&t[3]=='f') {
+            S->cf_glyf = off + 8;
+            S->cf_glyf_len = len - 8;
+        }
+        off += len;
+    }
+    if (!head || !S->cf_cmap || !S->cf_loca || !S->cf_glyf) return;
+
+    const uint8_t *h = buf + head;
+    int ascent  = (int)cf_u16(h + 8);
+    int descent = (int)(int16_t)cf_u16(h + 10);      /* negative */
+    S->cf_advbits = h[32];
+    S->cf_xybits  = h[30];
+    S->cf_whbits  = h[31];
+    if (h[29] != 1) return;                          /* bpp: 1 only */
+    if (!S->cf_advbits || !S->cf_xybits || !S->cf_whbits) return;
+    S->cf_line_height = (int16_t)(ascent - descent);
+    S->cf_base_line   = (int16_t)(-descent);
+    S->cf_nloca = cf_u32(buf + S->cf_loca);
+    if (S->cf_nloca < 2 || S->cf_nloca > 4096) return;
+
+    S->cf_ready = 1;
+}
+
+static void cfont_install(struct inj_state *S)
+{
+    if (!S->font || S->cf_ready != 1) return;
+    volatile uint32_t *f = (volatile uint32_t *)S->font;
+    f[0] = (uint32_t)cf_get_dsc | 1u;
+    f[1] = (uint32_t)cf_get_bitmap | 1u;
+    *(volatile int16_t *)(S->font + 8)  = S->cf_line_height;
+    *(volatile int16_t *)(S->font + 10) = S->cf_base_line;
+    S->cf_installed = 1;
+    S->wtab_ok = 0;                    /* widths belong to the old font */
+    S->want = S->cur.start;
+    S->nxt_valid = 0;
+    S->need_prep = 1;
+    S->drawn_start = -1;
+}
+
+/* Re-enters the vendor's function past the four bytes we replaced, replaying
+   them first. Its epilogue is `pop {r4,r5,r6,pc}`, so reaching it with `bl`
+   makes it return HERE and hands us the result. */
+__attribute__((naked)) int fontopen_real(void *font, const char *path)
+{
+    __asm__ volatile(
+        "push  {r4, r5, r6, lr}\n"
+        "cmp   r0, #0\n"
+        "movw  r12, #0x1445\n"
+        "movt  r12, #0x100e\n"
+        "bx    r12\n");
+}
+
+/* Reads a flag the display thread already worked out -- deliberately no file
+   I/O here. The first version called fs_open from this hook and the player
+   reset when the ebook launched: this runs deep inside the vendor's font open,
+   on the ebook thread, whose stack was measured at 2280 bytes with ~328 to
+   spare, and fs_open's own frame on top of that is the project's oldest
+   failure mode showing up a third time.
+ *
+ * Wrapped rather than merely redirected because a redirected open MUST NOT be
+ * allowed to fail. The menu handler at 0x1004ae28 does:
+ *
+ *     close(font); rc = open(font, path); if (rc) close(font);
+ *
+ * -- so a failure closes a font that was already closed, and that double free
+ * is very likely what reset the player when switching back to this slot. If
+ * our path does not open, close and serve the vendor's own font instead: the
+ * user sees the stock face rather than a reboot. The counters make the next
+ * one diagnosable over serial instead of by guessing. */
+int fontopen_body(void *font, const char *path)
+{
+    struct inj_state *S = (ANCHOR->magic == INJ_MAGIC) ? ANCHOR->st : 0;
+
+    /* NO substitution. Measured on the UART, the whole reason this hook was
+     * built does not work:
+     *
+     *     sdfs:stor_id=1, p=255
+     *     sd_fopen no this file /SD1://custom.font
+     *     <E> bitmap_font_open: open font file /SD1://custom.font failed!
+     *
+     * The loader opens through sd_fopen -- the sdfs resource filesystem -- not
+     * through Zephyr FS. Our own fs_open on that identical path succeeds, which
+     * is why the probe says the file is there; the two calls simply address
+     * different filesystems. Nothing in the sdfs namespace can name a file on
+     * the FAT partition, so no spelling of the path can ever work here.
+     *
+     * And a failed open must not be "recovered" from: lvgl_bitmap_font_open
+     * frees its own descriptor before returning -1 (0x100e14c0), so the close
+     * this used to issue was a second free -- "0x18006b40 freed already",
+     * rom_buddy_free with a nil info, and the reboot that looked like the
+     * vendor's bug was ours.
+     *
+     * Getting a user font off the USB-visible volume therefore needs our own
+     * glyph callbacks rather than the vendor's loader. The wrapper stays as the
+     * place to install that, and the counters stay to keep it measurable. */
+    if (S) S->fo_calls++;
+    int rc = fontopen_real(font, path);
+    if (S) S->fo_last = rc;
+
+    /* The vendor's open has just written ITS callbacks and metrics into the
+       font struct. If this is the slot we took over, put ours back on top --
+       after the open, never instead of it, so the struct is fully initialised
+       and the vendor's own font stays loaded as the fallback. */
+    if (S && rc == 0 && path_ends_with(path, "fang18.font")) {
+        if (S->cf_ready == 1) {
+            S->font = (uint32_t)font;
+            cfont_install(S);
+            S->fo_subst++;
+        }
+    } else if (S && rc == 0 && (uint32_t)font == S->font) {
+        /* Only when the open targeted the struct we installed into. A font
+           switch triggers five opens (measured: fo_calls 0 -> 5), most of them
+           for other UI fonts, and clearing the flag on those would leave our
+           callbacks live while we asked the vendor's for widths. */
+        S->cf_installed = 0;
+    }
+    return rc;
+}
+
+/* Takes over lvgl_bitmap_font_open entirely: r0 and r1 are already the font
+   and the path, so the body is called with them untouched and its result is
+   the function's result. fontopen_real above is what re-enters the original. */
+__attribute__((naked)) void fontopen_hook(void)
+{
+    __asm__ volatile(
+        "push  {r4, lr}\n"
+        "bl    fontopen_body\n"
+        "pop   {r4, pc}\n");
 }
 
 /* Replaces `push {r4,r5,r6,lr}` + `cmp r2,#13`, replays both and rejoins at

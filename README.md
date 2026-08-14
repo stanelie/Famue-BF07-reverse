@@ -71,6 +71,9 @@ redistributed here — the tools read firmware from the user's own device.
 | [tools/regdiff.py](tools/regdiff.py) | Diff SoC registers between a running device and ADFU |
 | [tools/grid.py](tools/grid.py), [keypad.py](tools/keypad.py), [digits.py](tools/digits.py) | Touch/keypad capture used to map the soft keypad |
 | [tools/recover.py](tools/recover.py), [adfu_reset.py](tools/adfu_reset.py), [cap.py](tools/cap.py) | Recovery, ADFU entry and UART capture helpers |
+| [tools/mkfont.py](tools/mkfont.py) | Render any TTF into the device's LVGL bitmap font format |
+| [tools/mkhyphen.py](tools/mkhyphen.py) | Pack Knuth-Liang hyphenation patterns, with a Python reference |
+| [fonts/](fonts/) | A ready-made user font (Literata, OFL) — drop it on the drive |
 | [reader/](reader/) | The replacement ebook reader — C, built for XIP `0x101d3000` |
 
 ## Key results
@@ -84,6 +87,11 @@ redistributed here — the tools read firmware from the user's own device.
 - **Typography measured, not estimated** — glyph advances come from the renderer's own
   font (captured by hooking its glyph callback), so lines fill to the exact 168 px the
   labels are wide. Hyphenated compounds split at their hyphens.
+- **User-installable fonts over USB, with nothing written to the card.** The
+  vendor's font loader is sdfs-only (`sd_fopen`) and physically cannot open a
+  file on the FAT volume the host sees, so the reader reads the file itself and
+  answers LVGL's glyph callbacks directly. `tools/mkfont.py` turns any TTF into
+  the device's font format; drop it on the drive as `custom.font`.
 - **Decrypted firmware readable over USB alone** — the flash cipher is live in
   ADFU with its key loaded, so `tools/usb_plaindump.py` dumps plaintext
   `fw0_sys` with no serial cable. Verified byte-exact against a UART dump.

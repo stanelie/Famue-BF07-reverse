@@ -65,6 +65,12 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
 /* [OBSERVED] "%sfile seek error (%d)" */
 #define fs_seek  ((int (*)(fs_file_t *, int32_t, int))0x1007fde1)
 
+/* lvgl_bitmap_font_open / _close. Both take the caller's lv_font_t; open takes
+   the path as well and returns 0 on success, -1 on failure (three -1 exits, all
+   reached by `pop {r4,r5,r6,pc}`). close takes only the font -- there is no path
+   involved, so nothing keys the cache on the string we substitute. */
+#define fw_font_close ((int (*)(void *))0x100e150d)
+
 /* --- allocation --------------------------------------------------------
  * [OBSERVED] 0x100a0644 names itself in its own error string:
  *   "couldn't allocate memory (%lu bytes)" ... lv_mem.c ... 'lv_mem_alloc'

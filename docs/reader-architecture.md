@@ -1379,3 +1379,132 @@ over 30 characters are simply left unhyphenated.
 
 The lesson is not "avoid big locals" — it is that this constraint was already
 written down, and the code was written without re-reading it.
+
+## User fonts: the vendor's loader cannot see the volume you can
+
+The goal was fonts a user installs themselves, over USB, with no soldering and
+no opening the case. That took three attempts, and the first two failed for
+reasons worth keeping.
+
+### The storage the host sees is not the storage the fonts live in
+
+The vendor's fonts sit in the sdfs container at card offset `0x10000`, inside the
+hidden region *before* the FAT partition. When the player is in disk mode it
+exposes **55,609,941 sectors with no partition table** — and the FAT partition on
+the card begins at LBA **5,457,067**. The exposed LUN size equals the partition
+size exactly, so sector 0 of the host's view *is* the start of the partition and
+everything before it — sdfs, every vendor font — is unaddressable from a host at
+any offset.
+
+So the fonts cannot be replaced over USB, and a font dropped on the visible drive
+cannot be named by any vendor font path.
+
+### Attempt 1: redirect the vendor's loader. Dead end, and the UART said why
+
+Hooking `lvgl_bitmap_font_open` (`0x100e1440`) and swapping the `fang18` path for
+`/SD1://custom.font` fails:
+
+```
+sdfs:stor_id=1, p=255
+sd_fopen no this file /SD1://custom.font
+<E> bitmap_font_open:  open font file /SD1://custom.font failed!
+```
+
+The loader opens through **`sd_fopen` — the sdfs resource filesystem — not Zephyr
+FS**. Our own `fs_open` succeeds on that identical path, which is exactly what
+made the idea look sound: two different filesystem APIs, one path string. No
+spelling of the path can name a FAT file to `sd_fopen`.
+
+This is also the answer to "why not just add a menu row": the row table is
+understood (below), but a new row would still have to name a file the loader
+cannot open.
+
+### The free-on-failure trap
+
+A failed open must not be "cleaned up". `lvgl_bitmap_font_open` **frees its own
+descriptor before returning -1** (`0x100e14c0`), so a fallback that calls
+`lvgl_bitmap_font_close` afterwards frees it a second time:
+
+```
+<E> res_fs_close: Null file handle to close
+0x18006b40 freed already
+rom_buddy_free: buddy_no 1, where 0x18006b40, info 0x(nil), offset 0x34
+```
+
+— and the player reboots. The safety net *was* the crash. Note the menu handler
+at `0x1004ae28` does `close; open; if (rc) close;` on its own, which looks like
+the same bug but is not the one that fired here.
+
+### Attempt 2, which works: our own glyph backend
+
+The reader reads the file itself with `fs_open` (proven to work on that path),
+keeps it in the LVGL heap, and answers LVGL's two glyph callbacks directly. The
+vendor's `fang18` still opens normally underneath and stays loaded as a fallback;
+our callbacks are installed **after** its open succeeds, never instead of it, so
+the struct is always fully initialised.
+
+Both layouts were read from the stores in the vendor's own callback at
+`0x100e1344`, not assumed from upstream LVGL:
+
+| struct | layout |
+|---|---|
+| `lv_font_t` | `+0x00` get_glyph_dsc, `+0x04` get_glyph_bitmap (**dsc first** — v8 order), `+0x08` line_height, `+0x0a` base_line (int16), `+0x14` dsc |
+| `lv_font_glyph_dsc_t` | `+0` adv_w, `+2` box_w, `+4` box_h, `+6` ofs_x, `+8` ofs_y, `+10` bpp; returns 1 on success |
+
+`adv_w` is in **whole pixels** in this firmware, which is also what `mkfont.py`
+writes, so advances pass straight through.
+
+The file's glyph bitmap is already a continuous 1 bpp stream, but it starts
+26 bits into the glyph record, so each glyph is shifted into a small buffer that
+LVGL can read directly.
+
+### Generating a font that survives 1 bpp at 13 px
+
+`tools/mkfont.py` renders any TTF into the same `head`/`cmap`/`loca`/`glyf`
+format the device already loads. Two separate things make small monochrome text
+look blotchy, and both must be handled:
+
+1. **Stroke contrast in the design.** A face drawn for large text has stems much
+   heavier than its hairlines; at 13 px the grid rounds those to 2 px and 1 px,
+   so the contrast reappears as *weight*. Literata's 18 pt cut gives `b` a 2 px
+   stem against 1 px hairlines. Use a small optical size — for a variable font,
+   the smallest `opsz` (Literata: 7).
+2. **Grid fitting.** Unhinted, each stem rounds independently: caps land on 2 px
+   while lowercase lands on 1 px (`H` vs `b`), and one bowl comes out 1 px on the
+   left and 2 px on the right (`e`, `o`). FreeType's autohinter normalises stem
+   widths, which is why this renders through freetype-py with `FORCE_AUTOHINT`
+   rather than through Pillow — variable-font instances carry no usable
+   TrueType hints of their own.
+
+Render size is set by the line box, not by the name: at `opsz=7`, 13 px gives
+ascent 16 / descent 4, matching the vendor's `you18` exactly.
+
+### Widths must be re-measured when the font changes
+
+The width table is measured once from the renderer's own font. Nothing announces
+a font change — the vendor **reuses the same `lv_font_t`**, so the pointer never
+changes while every width behind it does. (That reuse is also why `base_line` has
+to be re-forced every pass.) Symptom when this is missed: after switching from a
+wide font back to a narrow one, every line breaks 2-3 characters early, because
+wrapping charges the old font's advances for the new font's glyphs.
+
+Four glyphs (`m W i l`) are probed each draw pass and compared against the table.
+On a mismatch the alphabet is re-measured, the page re-wrapped, and the repaint
+forced — that last part matters, because a re-wrap keeps the same start offset
+and often the same line count, which the redraw test otherwise reads as "nothing
+changed".
+
+### The menu row table
+
+For a properly labelled sixth row, the structure is known: rows are **28 bytes**
+at `0x10128e50`, the five font rows share group id `0xcefe2df9`, the callback is
+the last word, and there is a **spare all-zero row at `0x10128edc`**. The blocker
+is word 4 — a **label id into a localised string resource** that is not plaintext
+in the firmware or the first 16 MB of the card, so an unknown id would draw
+blank. Until that resource is found, the user font takes over the `fang18` slot,
+shown in the menu as "Imitation Song large".
+
+### Installing a font
+
+`mkfont.py` a TTF, drop the result on the visible drive as `custom.font`, pick
+that row. Nothing is written to the card, and the sdfs container stays stock.
