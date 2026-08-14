@@ -1508,3 +1508,65 @@ shown in the menu as "Imitation Song large".
 
 `mkfont.py` a TTF, drop the result on the visible drive as `custom.font`, pick
 that row. Nothing is written to the card, and the sdfs container stays stock.
+
+### Relabelling the menu row
+
+The row still said "Imitation Song large font" because the label is not in the
+firmware. Tracing it end to end:
+
+1. Each menu row carries a 32-bit **id**. `app_menulist_load_res_id`
+   (`0x1005934c`) walks the rows at **stride 28** and stops at the first row
+   whose id is zero, copying `+0x00`, `+0x08` and `+0x0c` into a 16-byte item.
+2. The id selects a **36-byte record in `common.sty`**, whose `+0x08` field is
+   a string index.
+3. That index picks an entry from the per-language string file. `common.eng`
+   holds 325 entries named `STR1`..`STR325`: a `RES` header, 16-byte entries of
+   `offset(4) len(2) type(1) name(9)`, then the strings.
+
+The six font labels are `STR157`..`STR162`, and the mapping is:
+
+| id | string |
+|---|---|
+| `f40f37ef` | Song typeface |
+| `f40f37ec` | Song typeface small font |
+| `f40f37ed` | Imitation Song large font |
+| **`f40f37ea`** | **Fangsong Small Font — referenced by no row** |
+| `f40f37eb` | Young round large font |
+| `f40f37e8` | Young round small font |
+
+That unused pair matches the `fang16` font index that has no row either. So a
+complete label+id was already built and wired with nothing pointing at it, which
+is what makes the relabel two small patches instead of a relocated table:
+
+- a **word patch** in `fw0_sys` repointing our row's id to `0xf40f37ea`, and
+- a **string rewrite** in NOR (`tools/set_menu_label.py`), `common.eng` at flash
+  `0x3b98d5`, turning "Fangsong Small Font" into "Custom".
+
+The resources live in a second sdfs container in NOR at flash `0x299000`, mapped
+to `0x12400000` while the firmware runs — which is how they were read at all,
+since the flash copy is encrypted. `dbg mdw` on the mapped view shows plaintext.
+
+**There is no spare row.** An earlier note here claimed the all-zero row at
+`0x10128ee0` was a free slot; it is the array **terminator**, and the next
+submenu's array begins 28 bytes later. A genuinely additional sixth row needs
+the array relocated into our flash and a handler for font index 2.
+
+### The write that ACKs but never programs
+
+**The first `write_plain` issued after a run of `write_raw` is acknowledged and
+never programmed.** The block stays erased, and the OTFD faithfully decrypts
+`0xFF` into noise — which is how a menu label came out as `G   =`.
+
+It survived three attempts because the natural check is "did this block change
+from stock?", and an unwritten block differs from stock too. The same hole was
+in `bf07.py install --patch`, which flagged a patched block only when it came
+back *unchanged*.
+
+Both now do the same two things:
+
+- **encrypted blocks are written first**, before any verbatim restores, and
+- **blocks are verified for what they ARE** — still `0xff`? — with a retry,
+  rather than for having changed.
+
+The general lesson is the one this project keeps relearning: an ACK is not proof
+of a program, and "it changed" is not proof it changed *into the right thing*.

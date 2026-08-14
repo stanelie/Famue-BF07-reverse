@@ -8,6 +8,8 @@ FW0=0x14000; XIP=0x10000000
 CONT_TOP=24; CONT_SUB=24   # container y=12, height=264-12=252
 out=sys.argv[1]; hooks=eval(sys.argv[2])   # {site: symbol_addr}
 bwh=eval(sys.argv[3]) if len(sys.argv)>3 else {}  # sites needing B.W not BL
+# Plain 32-bit data patches {xip_addr: value} -- for vendor TABLES, not code.
+words=eval(sys.argv[4]) if len(sys.argv)>4 else {}
 os.makedirs(out,exist_ok=True)
 blob=open(os.path.join(_ROOT,'reader','reader.bin'),'rb').read()
 # The reader spans as many sectors as it needs -- there are 53 KB of free 0xFF
@@ -32,6 +34,8 @@ for site,target in hooks.items():
     data[site-XIP:site-XIP+4]=P.bl(site,target)
 for site,target in bwh.items():
     data[site-XIP:site-XIP+4]=P.bw(site,target)
+for a,v in words.items():
+    data[a-XIP:a-XIP+4]=v.to_bytes(4,'little')
 # EVERY sector this project has ever patched is rewritten on every flash --
 # from stock, plus whatever THIS build patches.
 #
@@ -53,7 +57,7 @@ EVER_PATCHED = {
     0xff000,   # 0x100eb534 page setter
 }
 touched = set(EVER_PATCHED)
-for site in list(hooks)+list(bwh):
+for site in list(hooks)+list(bwh)+list(words):
     touched.add((FW0+(site-XIP)) & ~0xfff)
 jobs=[]
 for s in sorted(touched):

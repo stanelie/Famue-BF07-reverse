@@ -194,6 +194,23 @@ class Device:
         """Bit 31 SET: the SoC encrypts on the way in."""
         self._write(addr, data, encrypt=True)
 
+    def write_plain_checked(self, addr, data, attempts=4):
+        """write_plain, then confirm the block actually programmed.
+
+        The first write_plain issued after a run of write_raw is ACKed but
+        NEVER PROGRAMMED -- the block stays erased. Measured while relabelling
+        a menu string: the block read back 0xff..ff, and the OTFD decrypting
+        erased bytes put garbage on the screen.
+
+        It hid because the obvious check is "did this block change?", and an
+        unwritten block differs from stock too. Check what the block IS.
+        """
+        for _ in range(attempts):
+            self.write_plain(addr, data)
+            if self.read(addr, len(data)) != b"\xff" * len(data):
+                return
+        raise SystemExit(f"block at 0x{addr:06x} would not program")
+
     def _write(self, addr, data, encrypt):
         blank = b"\xff" * 32
         for off in range(0, len(data), 32):          # 32-byte transactions only
@@ -402,6 +419,14 @@ def install_patch(args, backup):
         if blank:
             raise SystemExit(f"0x{addr:06x}: {blank} block(s) should be erased "
                              f"but are not -- restore with -b {args.backup}")
+        # ...and the converse, which is the one that bites: a block that should
+        # carry data but is still erased. An ACK is not proof of a program.
+        lost = sum(1 for o in range(0, SECTOR, 32)
+                   if data[o:o + 32] != b"\xff" * 32
+                   and back[o:o + 32] == b"\xff" * 32)
+        if lost:
+            raise SystemExit(f"0x{addr:06x}: {lost} block(s) never programmed "
+                             f"-- restore with -b {args.backup}")
         print(f"  0x{addr:06x}: reader sector written and checked")
 
     # vendor sectors: keep the device's own ciphertext, swap only the named blocks
@@ -409,10 +434,13 @@ def install_patch(args, backup):
         cur = d.read(sec, SECTOR)                 # this device's current ciphertext
         d.erase(sec)
         edits = by_sector[sec]
+        # Our encrypted blocks go FIRST and are read back. Interleaving them
+        # with the verbatim restores loses whichever write_plain follows a run
+        # of write_raw -- see write_plain_checked.
+        for off in sorted(edits):
+            d.write_plain_checked(sec + off, edits[off])     # SoC encrypts our patch
         for off in range(0, SECTOR, 32):
-            if off in edits:
-                d.write_plain(sec + off, edits[off])         # SoC encrypts our patch
-            elif cur[off:off + 32] != b"\xff" * 32:
+            if off not in edits and cur[off:off + 32] != b"\xff" * 32:
                 d.write_raw(sec + off, cur[off:off + 32])    # restore verbatim
         # Verify CONTENT, not just which blocks moved.
         #
@@ -426,7 +454,9 @@ def install_patch(args, backup):
         bad = []
         for o in range(0, SECTOR, 32):
             if o in edits:
-                if back[o:o + 32] == cur[o:o + 32]:
+                if back[o:o + 32] == b"\xff" * 32:
+                    bad.append(f"+0x{o:03x} still erased (write lost)")
+                elif back[o:o + 32] == cur[o:o + 32]:
                     bad.append(f"+0x{o:03x} unchanged (write lost)")
             elif back[o:o + 32] != cur[o:o + 32]:
                 bad.append(f"+0x{o:03x} clobbered")

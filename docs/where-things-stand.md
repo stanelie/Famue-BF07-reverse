@@ -65,6 +65,12 @@ units.**
 - Re-uploading the ADFU payload while one is running wedges ADFU. Probe first.
 - Our `fw_log` output never reaches the UART. Any "listened and heard nothing"
   measurement made with it proves nothing.
+- **The first `write_plain` after a run of `write_raw` is ACKed but never
+  programmed.** Write encrypted blocks first and verify a block is not still
+  `0xff` -- "it differs from stock" passes for a block that was never written.
+- UI strings live in a second sdfs container in NOR at flash `0x299000`, mapped
+  at `0x12400000` while the firmware runs. Encrypted in flash, plaintext through
+  the mapping, so `dbg mdw` reads them and our flasher can rewrite them.
 - Verify **content**, not the changed/unchanged pattern. A wrong block passes a
   pattern check, and one did — it bricked the boot until restored.
 - **The vendor's font loader is sdfs-only** (`sd_fopen`). Our `fs_open` succeeds
@@ -78,10 +84,7 @@ units.**
 
 ## Natural next steps
 
-1. **Find the localised string resource** behind the menu label ids. It is the
-   only thing between us and a properly named "Custom" font row; the row table
-   and its spare slot are already understood.
-2. **Move development to Linux** — removes the last cable.
-3. **A vendor SCSI command in the reader** for live memory reads and log
+1. **Move development to Linux** — removes the last cable.
+2. **A vendor SCSI command in the reader** for live memory reads and log
    streaming over USB. This is the remaining half of a fully USB workflow.
-4. Faster page turns, if the e-ink refresh can be driven in partial-update mode.
+3. Faster page turns, if the e-ink refresh can be driven in partial-update mode.

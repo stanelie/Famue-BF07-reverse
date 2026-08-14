@@ -1,15 +1,14 @@
 # User fonts
 
 Drop `custom.font` on the FAT volume the player exposes over USB, in the root,
-keeping that exact name. Then pick **"Imitation Song large"** in the reader's
-font menu.
+keeping that exact name. Then pick **"Custom"** in the reader's font menu.
 
 Nothing is written to the SD card and the vendor's sdfs container stays stock:
 the reader reads this file itself and answers LVGL's glyph callbacks directly.
-The menu row still carries the vendor's label because the localised string
-resource behind the label ids has not been located — see
-[reader-architecture.md](../docs/reader-architecture.md) for the row table and
-what is still missing.
+The "Custom" row is a relabelled vendor row: the font menu has five entries,
+and the one that used to name a font we displaced now names this one. See
+[reader-architecture.md](../docs/reader-architecture.md) for how menu labels
+resolve and why this was two small patches rather than a new row.
 
 ## What is here
 
