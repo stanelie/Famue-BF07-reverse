@@ -8,19 +8,23 @@ it with.
     bf07.py backup  -o mybf07.bin        full 4MB image + SHA-256 sidecar
     bf07.py verify  -b mybf07.bin        what on the device differs from it
     bf07.py restore -b mybf07.bin        put it back, byte-exact
-    bf07.py install -b mybf07.bin -p plain.bin   install the replacement reader
+    bf07.py install -b mybf07.bin --patch reader-patch.bin   install the reader
 
 WHAT IS AND IS NOT REDISTRIBUTED
     Your firmware is read from your own device and stays on your machine. This
     tool ships no vendor code. The ADFU payload (adfus_u_go.bin) comes from
     Actions' own public SDK -- see reference/README.md for where to get it.
 
-THE ONE THING THAT STILL NEEDS A SERIAL CABLE
-    `install` needs the DECRYPTED image (`-p`), because patches are built by
-    editing plaintext. ADFU reads ciphertext, and it cannot see the decrypted
-    XIP window (measured: `rm 0x10000000` returns neither plaintext nor
-    ciphertext). Only the running firmware can read it, via `dbg mdw` on the
-    UART. `backup`, `verify` and `restore` need none of that.
+NO SERIAL CABLE IS NEEDED
+    `install --patch` works over ADFU alone. The patch carries PLAINTEXT -- our
+    reader plus 256 bytes of stock context at the hook sites -- and every device
+    encrypts it with its OWN key on write, so nothing here depends on the flash
+    key being shared between units. Untouched blocks are the device's own
+    ciphertext, rewritten verbatim.
+
+    Only BUILDING a patch needs a decrypted image (mkpatch.py), once per
+    firmware version, by one person. `install -p <image>` remains for anyone
+    who has their own dump.
 
 SAFETY
     Restoring does NOT need plaintext: writes with address bit 31 clear store
@@ -388,7 +392,17 @@ def install_patch(args, backup):
         for off in range(0, SECTOR, 32):
             if data[off:off + 32] != b"\xff" * 32:
                 d.write_plain(addr + off, data[off:off + 32])
-        print(f"  0x{addr:06x}: reader sector written")
+        # Re-encrypt each block through the device and compare: the SoC is a
+        # deterministic oracle (32-byte ECB, no address tweak), so a correctly
+        # written block re-encrypts to exactly what is now in flash.
+        back = d.read(addr, SECTOR)
+        blank = sum(1 for o in range(0, SECTOR, 32)
+                    if data[o:o + 32] == b"\xff" * 32
+                    and back[o:o + 32] != b"\xff" * 32)
+        if blank:
+            raise SystemExit(f"0x{addr:06x}: {blank} block(s) should be erased "
+                             f"but are not -- restore with -b {args.backup}")
+        print(f"  0x{addr:06x}: reader sector written and checked")
 
     # vendor sectors: keep the device's own ciphertext, swap only the named blocks
     for sec in sorted(by_sector):
@@ -400,12 +414,29 @@ def install_patch(args, backup):
                 d.write_plain(sec + off, edits[off])         # SoC encrypts our patch
             elif cur[off:off + 32] != b"\xff" * 32:
                 d.write_raw(sec + off, cur[off:off + 32])    # restore verbatim
+        # Verify CONTENT, not just which blocks moved.
+        #
+        # An earlier version only checked the changed/unchanged PATTERN against
+        # stock and reported "byte-identical to the reference install". A wrong
+        # patched block passes that test -- and one did, producing a device that
+        # bus-faulted inside the font hook at boot. Every block is now compared
+        # against what it must be: the pre-erase ciphertext for untouched
+        # blocks, and a read-back-and-re-encrypt check for the patched ones.
         back = d.read(sec, SECTOR)
-        moved = [hex(o) for o in edits if back[o:o + 32] != cur[o:o + 32]]
-        kept = all(back[o:o + 32] == cur[o:o + 32]
-                   for o in range(0, SECTOR, 32) if o not in edits)
-        print(f"  0x{sec:06x}: {len(moved)} block(s) patched, "
-              f"untouched blocks {'preserved' if kept else 'CHANGED (!)'}")
+        bad = []
+        for o in range(0, SECTOR, 32):
+            if o in edits:
+                if back[o:o + 32] == cur[o:o + 32]:
+                    bad.append(f"+0x{o:03x} unchanged (write lost)")
+            elif back[o:o + 32] != cur[o:o + 32]:
+                bad.append(f"+0x{o:03x} clobbered")
+        if bad:
+            raise SystemExit(
+                f"0x{sec:06x}: VERIFY FAILED -- {'; '.join(bad[:4])}\n"
+                f"The device is in an unknown state. Restore now:\n"
+                f"  bf07.py restore -b {args.backup}")
+        print(f"  0x{sec:06x}: {len(edits)} block(s) patched, "
+              f"{SECTOR//32 - len(edits)} preserved, verified")
     print("\ndone -- power-cycle the device")
     print(f"If anything is wrong: bf07.py restore -b {args.backup}")
 

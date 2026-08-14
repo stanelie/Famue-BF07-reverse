@@ -86,10 +86,22 @@ bf07.py backup  -o mybf07.bin
 bf07.py install -b mybf07.bin --patch reader-patch.bin
 ```
 
-**Validated on hardware:** restored to stock, installed from the patch file with
-no decrypted image present, and the result is byte-identical to the reference
-install -- the same 8 sectors with the same changed-block counts, and every
-untouched block preserved.
+**Validated on hardware, the right way:** a legacy full-plaintext install was
+performed and its ciphertext captured as a reference; the device was restored to
+stock; then the patch install was run and every sector compared **byte for byte**
+against that reference. All 8 sectors identical.
+
+An earlier run of this same path produced a device that bus-faulted in the font
+hook at boot, and it was reported as validated because the check only compared
+which blocks *changed* against stock -- never what they changed *to*. A wrong
+block passes that test. The installer now verifies content: every patched block
+must differ from its pre-erase value and every untouched block must equal it,
+and it aborts telling you to restore if not.
+
+Note the mixed-write worry that motivated the investigation was **disproved** on
+hardware: writing some blocks encrypted (bit 31 set) and others raw within one
+sector produced 128/128 blocks identical to a full-sector plaintext write. The
+cipher is stateless per 32-byte transaction.
 
 ## The one thing that still needs a serial cable
 
