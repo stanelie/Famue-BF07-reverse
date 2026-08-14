@@ -9,7 +9,9 @@
 #define HY_LANG_EN 0
 #define HY_LANG_FR 1
 
-#define HY_MAXWORD 48
+/* Keeps hyphenate()'s frame small: it runs on the ebook thread, whose stack is
+   2280 bytes and has historically had only ~328 to spare. */
+#define HY_MAXWORD 32
 #define HY_LEFTMIN  2          /* standard TeX values */
 #define HY_RIGHTMIN 3
 #define HY_MINWORD  5

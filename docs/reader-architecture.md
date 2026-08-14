@@ -1363,3 +1363,19 @@ the wrap already breaks them at their explicit hyphen.
 
 **Headroom is now ~5 KB.** Anything substantial added next needs either a
 smaller pattern set or space beyond `0x1f4000`.
+
+### The ebook thread's stack, again
+
+Adding French meant sampling a book's opening text to pick the language, and the
+first attempt read it into a **512-byte local**. The device then reset on every
+book open.
+
+That stack is **2280 bytes and has historically had ~328 to spare** — a 768-byte
+buffer caused exactly this crash earlier in the project, and the fix then was the
+fix now: read into the heap scratch page (`S->nxt.text`, rebuilt immediately
+afterwards) instead of the stack. `hyphenate()`'s own frame was also trimmed by
+dropping `HY_MAXWORD` from 48 to 32, since it runs on the same thread; words
+over 30 characters are simply left unhyphenated.
+
+The lesson is not "avoid big locals" — it is that this constraint was already
+written down, and the code was written without re-reading it.

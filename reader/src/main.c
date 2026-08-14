@@ -772,10 +772,17 @@ void prepare_body(void)
             if (rd) vline = *(volatile int32_t *)((uint32_t)rd + RD_OFF_LINE);
             if (h != S->book_sig) {
                 S->book_sig = h;
-                {   /* pick the hyphenation language from the opening text */
-                    char probe[512];
-                    int pr = book_read(S, 0, probe, sizeof probe);
+                {   /* Pick the hyphenation language from the opening text.
+                     *
+                     * Read into the SCRATCH PAGE, not the stack. A 512-byte
+                     * local here overflowed the ebook thread's 2280-byte stack
+                     * and reset the device on every book open -- the same
+                     * mistake a 768-byte buffer caused earlier in this project.
+                     * S->nxt is rebuilt below anyway. */
+                    char *probe = (char *)S->nxt.text;
+                    int pr = book_read(S, 0, probe, sizeof S->nxt.text);
                     S->lang = (pr > 64) ? (uint8_t)hy_detect(probe, pr) : HY_LANG_EN;
+                    S->nxt_valid = 0;
                     static const char lg[] = "%s%s: LANG=%d\n";
                     fw_log(lg, "", "inj", S->lang);
                 }
