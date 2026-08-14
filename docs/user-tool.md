@@ -86,6 +86,12 @@ bf07.py backup  -o mybf07.bin
 bf07.py install -b mybf07.bin --patch reader-patch.bin
 ```
 
+**Re-validated at 3 reader sectors** (`tools/validate_patch.py`): the working
+flash was captured as the reference, the sectors restored to stock, the patch
+installed, and all **9** sectors compared byte for byte -- identical, and the
+device booted with the reader live. The script writes the reference back if the
+comparison fails, so the device is never left in an unknown state.
+
 **Validated on hardware, the right way:** a legacy full-plaintext install was
 performed and its ciphertext captured as a reference; the device was restored to
 stock; then the patch install was run and every sector compared **byte for byte**
