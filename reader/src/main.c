@@ -15,6 +15,7 @@
  * region proven free by a canary under the real workload (reading + audio).
  */
 #include "fw.h"
+#include "hyphen.h"
 
 #define PITCH     19        /* +1 base in the caller = 20px pitch */
 /* We draw 12; the vendor is still TOLD 8 (VENDOR_LINES_PER_PAGE).
@@ -522,6 +523,50 @@ static int wrap_one(const char *p, int avail, char *out, int indent,
         out[hy_out + 1] = 0;
         return hy_src + 1;
     }
+    /* Knuth-Liang: split the word that did not fit.
+     *
+     * Tried after an explicit hyphen (a word already containing "-" breaks
+     * there) and before falling back to the last space, which is what leaves
+     * the ragged edge this is meant to fix. The whole word must be measured
+     * from the SOURCE, because `out` holds only the part that fitted. */
+    if (sp_out >= 0 && *why_out == WHY_WIDTH) {
+        int ws_out = sp_out + 1;
+        int ws_src = sp_src + 1;
+        int we = ws_src;
+        while (we < avail) {
+            unsigned char c2 = (unsigned char)p[we];
+            if (c2 == ' ' || c2 == '\n' || c2 == '\r' || c2 == '\t') break;
+            we++;
+        }
+        unsigned char pts[8];
+        int npts = hyphenate(p + ws_src, we - ws_src, pts, (int)sizeof pts);
+        if (npts > 0) {
+            int base = 0;
+            for (int t = 0; t < ws_out; t++)
+                base += char_w8((unsigned char)out[t]);
+            int hyw = char_w8('-');
+            int best = -1, bestw = 0;
+            for (int t = 0; t < npts; t++) {          /* the longest that fits */
+                int plen = pts[t], sum = base;
+                for (int u = 0; u < plen; u++)
+                    sum += char_w8((unsigned char)p[ws_src + u]);
+                if (sum + hyw <= limit && ws_out + plen + 1 < MAXW - 1) {
+                    best = plen;
+                    bestw = sum + hyw;
+                }
+            }
+            if (best > 0) {
+                for (int u = 0; u < best; u++)
+                    out[ws_out + u] = p[ws_src + u];
+                out[ws_out + best] = '-';
+                out[ws_out + best + 1] = 0;
+                *px_out = bestw / 8;
+                *why_out = WHY_WIDTH;
+                return ws_src + best;
+            }
+        }
+    }
+
     if (sp_out > 0) {
         out[sp_out] = 0;
         return sp_src + 1;
