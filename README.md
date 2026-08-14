@@ -84,6 +84,9 @@ redistributed here — the tools read firmware from the user's own device.
 - **Typography measured, not estimated** — glyph advances come from the renderer's own
   font (captured by hooking its glyph callback), so lines fill to the exact 168 px the
   labels are wide. Hyphenated compounds split at their hyphens.
+- **Decrypted firmware readable over USB alone** — the flash cipher is live in
+  ADFU with its key loaded, so `tools/usb_plaindump.py` dumps plaintext
+  `fw0_sys` with no serial cable. Verified byte-exact against a UART dump.
 - **The vendor's reader switched off in place** — its decode, layout, drawing and
   background paginator are all disabled, which made the render loop **3x faster**
   (304 ms -> 100 ms per tick) and removed a multi-minute scan per book open.

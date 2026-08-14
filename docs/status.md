@@ -33,6 +33,7 @@ Written to be honest rather than encouraging. If you're picking this up, read th
 | **Position resume across exits and books** | ✅ |
 | **Position resume across a POWER CYCLE** | ✅ own bookmark file, not the vendor's `.bmk` |
 | **Install with no serial cable** | ✅ `install --patch`, 256 bytes of vendor context |
+| **DECRYPTED firmware dump over USB** | ✅ `usb_plaindump.py` -- the cipher is live in ADFU |
 | **Background paginator disabled** | ✅ nothing we display needs a page count |
 | **Vendor's own drawing disabled** | ✅ 3x faster render loop (304 ms -> 100 ms/tick) |
 
@@ -45,9 +46,13 @@ The write path and its rules are documented in [flashing.md](flashing.md).
   The fix is to measure on demand, which the font callback supports.
 - The `base_line = 0` correction is applied to the **shared** font, so it lifts text in
   the menus and file picker too, not only in the reader.
-- The patch install has not been re-validated since the reader grew to a third
-  sector. The mkpatch range bug that exposed is fixed, but the end-to-end
-  byte-compare should be repeated at 3 sectors before anyone else uses it.
+- Live log streaming still needs the UART. Logs from a *running* device would
+  need a vendor SCSI command in the reader (unused opcodes exist in the
+  dispatcher at ~0x100e3400); ADFU cannot help, because the firmware is not
+  running then.
+- Entering ADFU over USB is blocked on **macOS** (the kernel owns the only
+  interface). Linux and Windows are fine; on macOS a serial cable is still the
+  way in, even though nothing after that needs it.
 - Writing the whole `fw0_sys` partition at once (only individual sectors so far).
 - Any recovery from firmware that fails **before** the shell starts. Keep serial wired.
 

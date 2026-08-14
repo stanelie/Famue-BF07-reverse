@@ -412,6 +412,20 @@ signature that caused every previous misdiagnosis.
 
 `tools/usb_plaindump.py` implements this: decrypted `fw0_sys` over USB alone.
 
+**Validated at full scale.** A 1,966,080-byte dump over USB was compared against
+the serial `dbg mdw` dump. Every byte matches except:
+
+- the 9 sectors this project patches (the device has the reader installed, the
+  reference is stock) -- and those match `patchset.build()` exactly;
+- erased padding inside the last reader sector, because **0xFF read through the
+  decrypting path comes back as noise, not 0xFF**. Inherent, not an error.
+
+The mapping-alignment trap is worth restating: a first attempt used 2 KB chunks
+and produced a dump that was **49% correct**, with every odd chunk repeating the
+previous one. That is not corruption -- the SDK rejects any mapping address that
+is not 4 KB aligned (`if (nor_phy_addr % 0x1000) return -EINVAL`), so the window
+simply never moved. 4 KB chunks fixed it: 1.9 MB in 129 s.
+
 ### What this changes
 
 Serial is no longer needed on the device side for anything: decrypted reads,
