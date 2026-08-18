@@ -262,20 +262,21 @@ than assumed:
   appears in the boot log: `CONFIG_TXRX_ADFU` is compiled out. Every reference
   board in the SDK also ships it as `0`. It would be GPIO_28/29 if enabled.
 * **No ADFU button** — `CONFIG_GPIO_ADFU` likewise disabled.
-* **The recovery app runs, and gives up only because the slot is empty.**
-  `fw0_rec` executes on every boot, then: `cannot found storage device sd` ->
-  `ota app init error` -> `skip ota recovery`. It probes `MMC_0`, which is
-  **`/SD:`, the user-accessible card slot** -- not the internal system card on
-  `MMC_1`. Nothing is misconfigured: there was simply never a card in the user
-  slot. This is the one fallback that is **not** closed, only untested; see
-  below. Forcing `GOTO_OTA` or `GOTO_RECOVERY` through `RTC_REMAIN3` does not
-  work (see [dead-ends.md](dead-ends.md)).
+* **The recovery app runs, but has no storage backend.** `fw0_rec` executes on
+  every boot, then: `dev MMC_0 not found` -> `cannot found storage device sd`
+  -> `ota app init error` -> `skip ota recovery`. **Tested with a FAT32 card
+  carrying `ota.bin` in the user slot: the log is byte-identical to the
+  empty-slot boot.** `dev MMC_0 not found` is a missing *driver*, not a missing
+  card -- `MMC_0`/`MMC_1` exist in `fw0_sys` (the application exposes both
+  cards over USB) but not in mbrec, and recovery runs in mbrec. No slot and no
+  card format changes this. Forcing `GOTO_OTA` or `GOTO_RECOVERY` through
+  `RTC_REMAIN3` does not work either (see [dead-ends.md](dead-ends.md)).
 
 **A serial cable does not rescue a trashed system.** The Zephyr shell *is* the
 firmware that was trashed. mbrec prints to the UART but takes no input, so you
 get a clear view of the failure and no way to act on it.
 
-### The SD-card path is the one real hope, and it needs no case opening
+### The SD-card path: tested, and it cannot work
 
 `fw0_rec` is a separate 64 KB program at `0x4000`. It does **not** execute from
 `fw0_sys`, so it can erase and rewrite it -- which is exactly what an OTA is for
@@ -283,15 +284,13 @@ on a single-bank XIP device -- and it runs on **every boot**, before the
 application, so a trashed `fw0_sys` does not stop it. It looks for `ota.bin` on
 `/SD:`, the **user** slot, reachable without opening the case.
 
-That makes it a vendor-intended, CRC-checked recovery needing no ADFU, no cable
-and no soldering: drop a card in, power on. **Still untested.** The safe way to
-establish it is a deliberately CRC-INVALID `ota.bin` in the user slot: if the
-boot log moves from `dev sd not found` to finding the file and rejecting it,
-the path is live end to end without a single byte being written.
-`tools/ota_tool.py` builds and validates the format against the vendor's own
-`build_ota_image.py`.
+On paper that is a vendor-intended, CRC-checked recovery needing no ADFU, no
+cable and no soldering. **It was tested and it does not work.** A FAT32 card
+with a deliberately CRC-invalid `ota.bin` was placed in the user slot: the boot
+log did not change by one character. `dev MMC_0 not found` is a missing driver
+in mbrec, not a missing card, so no slot and no card format will help.
 
-Until that test is done, treat the board as having no automatic recovery.
+Treat the board as having no automatic recovery. Recovery is ADFU or nothing.
 
 ### What to rely on instead: the ADFU flag
 

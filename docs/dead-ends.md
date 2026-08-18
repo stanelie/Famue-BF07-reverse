@@ -214,11 +214,40 @@ It does **not** rule out the **bootloader/recovery** path. `fw0_rec`
 it does not execute from `fw0_sys`, so it can erase and rewrite it. That is what
 an OTA is *for* on a single-bank XIP device.
 
-**Untested.** To verify: put a FAT32 card with a valid `ota.bin` in the **user**
-slot and watch the boot log for `found ota file` instead of `dev sd not found`.
-`tools/ota_tool.py` builds and validates the image format (already checked
-against the vendor's `build_ota_image.py`).
+### TESTED, and it does not work: the BOOTLOADER has no MMC driver
 
-This would be a *vendor-intended*, CRC-checked update path requiring no ADFU at
-all — worth having alongside the ADFU write path, not least because it is far
-easier for anyone reproducing this work.
+A FAT32 card carrying `ota.bin` was put in the **user** slot and the device
+rebooted. The boot log is **byte-identical to the empty-slot boot**:
+
+```
+I: sd_card_init
+!!!ERR: dev MMC_0 not found
+E: Cannot find mmc device MMC_0!
+...
+ota_storage_init I: init storage sd
+!!!ERR: dev sd not found
+ota_storage_init E: cannot found storage device sd
+ota_app_init I: ota app init error
+main I: skip ota recovery
+```
+
+`dev MMC_0 not found` is `device_get_binding()` returning NULL — a **missing
+driver**, not a missing card. No card can create a device binding, and card
+formatting is irrelevant: the failure happens long before any filesystem is
+consulted.
+
+The distinction the correction above missed is **which binary** the device list
+belongs to. Both `MMC_0` and `MMC_1` exist in **`fw0_sys`**, the application —
+which is why the running firmware exposes both cards over USB as separate LUNs,
+confirmed with a card in the user slot (`sdc` 26.5 GB internal, `sdd` 14.8 GB
+user). They do **not** exist in **mbrec / `fw0_rec`**, and the recovery path
+runs there, in a different binary with a different device tree.
+
+So the SD-card OTA cannot run on this device at all, whichever slot is used and
+whatever is on the card. The path is real in the SDK and the vendor's own
+recovery app is present and executing — it simply has no storage backend
+compiled in to read from.
+
+That closes the fourth fallback for real, on measurement rather than inference.
+Recovery on this board is ADFU or nothing, and the ADFU flag does not survive a
+power cycle — see *Recovery* in [flashing.md](flashing.md).
