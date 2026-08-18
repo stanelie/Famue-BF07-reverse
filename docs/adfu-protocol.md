@@ -1533,3 +1533,70 @@ transport, needing only the UART pads.
 
 Establishing that is the single highest-value thing left for making this device
 un-brickable.
+
+### The UART launcher protocol, read out of the ROM
+
+Reconstructed from the BROM dump. Addresses are ROM addresses.
+
+**Transport.** UART0 at `0x40038000` -- the *same peripheral and the same pads
+as the debug shell*, so no new wiring is needed beyond what a serial console
+already requires. `uart_set_baud` (`0x134c`) computes
+
+```
+divisor = 32,000,000 / baud        rejected if baud > 6,000,000
+UART0_BR = divisor | (divisor << 16)      ; same value in both halves
+```
+
+Confirmed live: with Zephyr's shell at 2,000,000 baud, `UART0_BR` reads
+`0x00100010` -- divisor 16, and 32e6/16 = 2e6 exactly.
+
+**The knock.** `uart_probe(count)` at `0x4a50` loops calling
+`uart_read(buf, 4, 1)` and compares the four bytes against `0x63636363`, i.e.
+the ASCII string **`"cccc"`**. The host spams `cccc`; the ROM is listening for
+it. `count` comes from the launcher argument:
+
+| launcher arg | poll count | when |
+|---|---|---|
+| 0 | 45 | early, **every boot**, before storage is tried |
+| 1 | 11000 | one branch of the post-failure path |
+| 2 | 200 | after storage boot fails, alternating with ADFU |
+
+**On match** the ROM replies through `uart_write`, then `uart_connect`
+(`0x46e0`) sends command `0x63` with an empty payload and sets a connected flag
+at `state+0x2c`. Disconnect (`0x4808`) sends `0x64`. Commands are ASCII letters:
+`'c'` connect, `'d'` disconnect, `'o'` (`0x6f`, `0x48c0`) carries a 4-byte
+argument.
+
+**Frame format**, from `send_frame` (`0x35ac`) -- a 6-byte header, then an
+optional checksummed payload:
+
+```
+byte 0    type/flag        (5 = control frame, otherwise data)
+byte 1    [7:4] cmd >> 8   [3:0] sequence nibble
+byte 2-3  payload length, LE16   (holds the sequence instead when type == 5)
+byte 4    cmd & 0xff
+byte 5    8-bit checksum over bytes 0..4        (0x2740)
+--- if length > 0 ---
+2 bytes   checksum of the payload               (0x26f4)
+n bytes   payload
+```
+
+`transact` (`0x47ac`) sends the frame, reads a response (`0x327c`), retries
+while the response is `0x0d` up to the limit at `state+0x30`, and bumps the
+sequence nibble at `state+0x2e` on success. The driver entry points live in a
+struct at RAM `0x010000a8`: `+0x48` read, `+0x4c` write, `+0x50` drain, seeded
+from the ROM vtable at `0x45d4`.
+
+**Still unknown.** The baud the ROM uses for the probe -- `uart_read` derives
+its per-byte timeout by *reading* `BR` rather than setting it, so the rate is
+whatever reset or early init left there, and that has not been traced. The
+practical attack is cheap, though: the knock is four identical bytes, so a host
+can sweep candidate rates sending `cccc` continuously and watch for a reply.
+Also unknown: the rest of the command set, and whether the launcher can write
+flash itself or -- as its name and `p_adfu_launcher` suggest -- only receives
+code into RAM and branches to it. The latter is sufficient for recovery.
+
+**Why this matters.** The `arg 0` probe runs on *every* boot before storage is
+touched, so this is reachable on a device whose `fw0_sys` is destroyed, using
+pads already wired for the debug console. It is the only identified route back
+into a board bricked in the one way the boot ROM does not otherwise catch.
