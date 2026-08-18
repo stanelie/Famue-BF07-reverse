@@ -131,10 +131,15 @@ class Device:
         self.d = find(PID_ADFU)
         if self.d is None:
             raise SystemExit("not in ADFU")
+        # Do NOT set_configuration() here. The payload owns the endpoints from
+        # the exec onward, and re-selecting the (already active) configuration
+        # resets them under it: every raw packet after that returns EIO. Linux
+        # configures the device at enumeration, so the call is redundant as
+        # well as destructive; macOS tolerated it. See docs/flashing.md.
         try:
-            self.d.set_configuration()
+            self.d.get_active_configuration()
         except usb.core.USBError:
-            pass
+            self.d.set_configuration()
         for _ in range(15):
             try:
                 self.d.read(0x81, 512, 150)
@@ -240,10 +245,14 @@ def payload_alive():
     d = find(PID_ADFU)
     if d is None:
         return False
+    # Same rule as Device.__init__, and it matters most here: probing a LIVE
+    # payload with set_configuration() kills it, so this returned False, the
+    # caller uploaded a second time, and ADFU wedged -- precisely the failure
+    # this function exists to prevent.
     try:
-        d.set_configuration()
+        d.get_active_configuration()
     except usb.core.USBError:
-        pass
+        d.set_configuration()
     try:
         p = bytearray(16)
         p[0:2] = b"is"
