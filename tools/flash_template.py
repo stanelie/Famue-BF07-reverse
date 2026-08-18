@@ -134,6 +134,13 @@ def cmd(op, l, ad, expect=None, data=None):
 drain()
 assert cmd(b'is', 16, 0, expect=4)[:1] == b'\xaa', "is failed"
 
+print("""
+!!  DO NOT DISCONNECT POWER until this prints RESULT. From the first erase
+!!  until the verify passes, fw0_sys is incomplete. A failed verify is
+!!  harmless -- run it again. Losing power is not: the GOTO_ADFU flag that
+!!  lets you back in does NOT survive a power cycle (measured), and mbrec
+!!  boots fw0_sys without checking it. There is no automatic recovery.
+""", flush=True)
 ok = True
 for FLASH, path, expect_blocks, full in JOBS:
     data = open(path, "rb").read()
@@ -172,5 +179,7 @@ for FLASH, path, expect_blocks, full in JOBS:
           f"expected {[hex(x) for x in expect_blocks]}  "
           f"{'OK' if good else 'MISMATCH'}", flush=True)
 
+print("\n!!  STAY IN ADFU -- do not power off; re-run to retry.\n"
+      if not ok else "verified -- safe to disconnect.", flush=True)
 print("RESULT:", "outbase FLASHED (5344 bytes of C)" if ok else "PROBLEM",
       flush=True)

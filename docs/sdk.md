@@ -67,9 +67,15 @@ Two consequences:
 1. ADFU has **two** entry mechanisms — serial-line (`CONFIG_TXRX_ADFU`) and button
    (`CONFIG_GPIO_ADFU`). The BF07 evidently isn't built with the button one, which
    explains why no combination ever worked.
-2. A corrupt `fw0_sys` routes to OTA, and a failed OTA reboots to ADFU. Recovery paths
-   exist — though the device's mbrec is a customised Aug 2022 build that predates this
-   source, so treat it as likely rather than guaranteed.
+2. ~~A corrupt `fw0_sys` routes to OTA, and a failed OTA reboots to ADFU.~~
+   **Measured false on this device.** `partition_valid_check()` validates the
+   partition *table*, not the application image, and the boot log shows
+   `app offset=0x14000 ,crc=0` — that `%d` is `crc_is_enabled`, so mbrec jumps
+   into `fw0_sys` **without checking it at all**. A corrupt system boots anyway
+   and hangs; nothing routes anywhere. See *Recovery* in
+   [flashing.md](flashing.md) for what actually happens and what to rely on
+   instead. This entry was inference from the SDK source; the device's mbrec is
+   a customised Aug 2022 build that predates it.
 
 ## Local copy
 

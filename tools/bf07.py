@@ -410,6 +410,23 @@ def cmd_verify(args):
     print(f"{len(bad)} sector(s) differ" if bad else "device matches the backup")
 
 
+DANGER_OPEN = """
+!!  DO NOT DISCONNECT POWER, and do not unplug the USB cable, until this
+!!  command prints that it is finished.
+!!
+!!  From the first erase until the verify passes, fw0_sys is incomplete. A
+!!  failed verify is harmless -- run the command again. Losing power in that
+!!  window is not: the GOTO_ADFU flag that would let you back in lives in
+!!  RTC_REMAIN3, and it does NOT survive a power cycle (measured: set, power
+!!  cycled, read back 0x00000000). The device would boot the half-written
+!!  firmware instead, and mbrec does not check it -- there is no automatic
+!!  recovery on this board.
+"""
+
+DANGER_CLOSED = ("verified -- safe to disconnect now. "
+                 "Power-cycle the device to boot it.")
+
+
 def cmd_restore(args):
     backup = open(args.backup, "rb").read()
     if len(backup) < FW0_END:
@@ -420,12 +437,21 @@ def cmd_restore(args):
         print("device already matches the backup")
         return
     print(f"restoring {len(bad)} sector(s)")
+    print(DANGER_OPEN)
+    failed = []
     for s, _ in bad:
         d.erase(s)
         d.write_raw(s, backup[s:s + SECTOR])     # ciphertext, verbatim
         ok = d.read(s, SECTOR) == backup[s:s + SECTOR]
+        if not ok:
+            failed.append(s)
         print(f"  0x{s:06x}: {'restored' if ok else 'STILL DIFFERS'}")
-    print("done -- power-cycle the device")
+    if failed:
+        raise SystemExit(
+            f"{len(failed)} sector(s) did not verify: "
+            + ", ".join(f"0x{s:06x}" for s in failed)
+            + "\nSTAY IN ADFU and run this command again -- do not power off.")
+    print(DANGER_CLOSED)
 
 
 def cmd_install(args):
@@ -446,14 +472,20 @@ def cmd_install(args):
     sectors = build(plain)              # {flash_addr: 4096 bytes of PLAINTEXT}
     d = connect()
     print(f"installing into {len(sectors)} sector(s)")
+    print(DANGER_OPEN)
     for addr in sorted(sectors):
         d.erase(addr)
         d.write_plain(addr, sectors[addr])       # SoC encrypts on write
         back = d.read(addr, SECTOR)
+        if back != sectors[addr]:
+            raise SystemExit(
+                f"0x{addr:06x} did not read back as written.\n"
+                f"STAY IN ADFU -- do not power off. Either run this again, or\n"
+                f"put the device back with: bf07.py restore -b {args.backup}")
         changed = [i for i in range(0, SECTOR, 32)
                    if back[i:i + 32] != backup[addr + i:addr + i + 32]]
         print(f"  0x{addr:06x}: {len(changed)} block(s) changed")
-    print("done -- power-cycle the device")
+    print(DANGER_CLOSED)
     print(f"If anything is wrong: bf07.py restore -b {args.backup}")
 
 
@@ -481,6 +513,7 @@ def install_patch(args, backup):
         by_sector.setdefault(addr & ~0xfff, {})[addr & 0xfff] = data
 
     d = connect()
+    print(DANGER_OPEN)
 
     # reader sectors: pure ours, write plaintext, leave 0xFF erased
     for addr, data in reader:
@@ -497,15 +530,17 @@ def install_patch(args, backup):
                     and back[o:o + 32] != b"\xff" * 32)
         if blank:
             raise SystemExit(f"0x{addr:06x}: {blank} block(s) should be erased "
-                             f"but are not -- restore with -b {args.backup}")
+                             f"but are not. STAY IN ADFU, do not power off.\n"
+                             f"  bf07.py restore -b {args.backup}")
         # ...and the converse, which is the one that bites: a block that should
         # carry data but is still erased. An ACK is not proof of a program.
         lost = sum(1 for o in range(0, SECTOR, 32)
                    if data[o:o + 32] != b"\xff" * 32
                    and back[o:o + 32] == b"\xff" * 32)
         if lost:
-            raise SystemExit(f"0x{addr:06x}: {lost} block(s) never programmed "
-                             f"-- restore with -b {args.backup}")
+            raise SystemExit(f"0x{addr:06x}: {lost} block(s) never programmed. "
+                             f"STAY IN ADFU, do not power off.\n"
+                             f"  bf07.py restore -b {args.backup}")
         print(f"  0x{addr:06x}: reader sector written and checked")
 
     # vendor sectors: keep the device's own ciphertext, swap only the named blocks
@@ -542,11 +577,13 @@ def install_patch(args, backup):
         if bad:
             raise SystemExit(
                 f"0x{sec:06x}: VERIFY FAILED -- {'; '.join(bad[:4])}\n"
-                f"The device is in an unknown state. Restore now:\n"
+                f"The device is in an unknown state. STAY IN ADFU and do not\n"
+                f"power off -- the way back in does not survive a power cycle.\n"
+                f"Restore now:\n"
                 f"  bf07.py restore -b {args.backup}")
         print(f"  0x{sec:06x}: {len(edits)} block(s) patched, "
               f"{SECTOR//32 - len(edits)} preserved, verified")
-    print("\ndone -- power-cycle the device")
+    print("\n" + DANGER_CLOSED)
     print(f"If anything is wrong: bf07.py restore -b {args.backup}")
 
 

@@ -245,7 +245,77 @@ from the backup. Reverting to stock has been done twice with zero differing bloc
 | `is failed` after a clean entry | payload state stale from an aborted run | re-upload and re-exec the payload, do not just retry `is` |
 | every USB transfer times out | ADFU itself is wedged | **physical power-cycle**; `usb reset` does not clear it |
 | device boots to a crash loop | bad write, shell still starts | hammer `dbg reboot adfu` during the boot cycles |
-| nothing on serial at all | write broke pre-shell init | not recoverable in software |
+| nothing on serial at all | write broke pre-shell init | see below — assume not recoverable |
+
+### There is no automatic fallback. Read this before writing.
+
+Four plausible safety nets are all closed on this device, each checked rather
+than assumed:
+
+* **mbrec does not validate the system image.** The boot log prints
+  `app offset=0x14000 ,crc=0`, and that `%d` is `crc_is_enabled` in
+  `soc_boot.c`. A corrupt `fw0_sys` is jumped into regardless. Nothing detects
+  it, and nothing routes to OTA or ADFU.
+* **No serial-loopback ADFU.** `check_adfu_connect()` bit-bangs `0x55aa55aa` out
+  on TX and reads it back on RX, so a wire between two pads would force ADFU
+  from the bootloader, before any application code. But `check txrx adfu` never
+  appears in the boot log: `CONFIG_TXRX_ADFU` is compiled out. Every reference
+  board in the SDK also ships it as `0`. It would be GPIO_28/29 if enabled.
+* **No ADFU button** — `CONFIG_GPIO_ADFU` likewise disabled.
+* **The recovery app runs and gives up.** `fw0_rec` executes on every boot, then:
+  `cannot found storage device sd` -> `ota app init error` -> `skip ota
+  recovery`. It probes `MMC_0`; the microSD is `MMC_1`. Forcing `GOTO_OTA` or
+  `GOTO_RECOVERY` through `RTC_REMAIN3` does not work either (see
+  [dead-ends.md](dead-ends.md)).
+
+**A serial cable does not rescue a trashed system.** The Zephyr shell *is* the
+firmware that was trashed. mbrec prints to the UART but takes no input, so you
+get a clear view of the failure and no way to act on it.
+
+### What to rely on instead: the ADFU flag
+
+`REBOOT_TYPE_GOTO_ADFU` (`0x100` in `RTC_REMAIN3`, magic `0x4252`) is the one
+reboot type that behaves differently: **the boot ROM consumes it, before mbrec
+and long before `fw0_sys`.** That is why `dbg reboot adfu` works at all, and why
+`reset_via_payload()` has to clear the flag explicitly to get a normal boot.
+Being handled in mask ROM, it does not care how corrupt the firmware is.
+
+So during a flashing session the flag is already set, and the safe order is:
+
+1. flash in ADFU as usual;
+2. reset **without** clearing the flag — the device returns to ADFU rather than
+   to a possibly-broken application;
+3. verify, and re-flash if needed;
+4. only then `reset_via_payload()`, which clears the flag and boots normally.
+
+That is a boot-once-into-recovery that exists today, and with a verified backup
+plus `bf07.py restore` it is a real net.
+
+### Its limit: the flag does not survive a power cycle
+
+Measured, not assumed:
+
+```
+normal boot          RTC_REMAIN3 = 0x00000000
+dbg reboot adfu      -> ADFU in 1 s, flag set to 0x42520100
+*** physical power cycle ***
+comes back as        10d6:b00b  (disk drive mode -- NOT ADFU)
+RTC_REMAIN3 =        0x00000000  (cleared)
+```
+
+So the net covers **warm resets only**. Pull the power mid-write and the flag
+is gone, mbrec boots the half-written `fw0_sys` without checking it, and none
+of the four fallbacks above will catch you.
+
+That makes the interval between the first erase and a passing verify the only
+genuinely dangerous part of this whole process, and it is dangerous only to
+loss of power -- a failed verify is harmless and simply re-run. The tools now
+say so: `bf07.py` (`install`, `install --patch`, `restore`) and the development
+flasher all print a DO-NOT-DISCONNECT banner before the first erase, print
+"safe to disconnect" only after the verify passes, and every abort inside the
+window tells you to STAY IN ADFU rather than power off.
+
+**Keep the device on mains or a charged battery for any write.**
 
 ## What a user-facing tool needs
 
