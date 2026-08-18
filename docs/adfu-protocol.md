@@ -1600,3 +1600,43 @@ code into RAM and branches to it. The latter is sufficient for recovery.
 touched, so this is reachable on a device whose `fw0_sys` is destroyed, using
 pads already wired for the debug console. It is the only identified route back
 into a board bricked in the one way the boot ROM does not otherwise catch.
+
+### Attempting the knock: not achieved, and what it ruled out
+
+Tested against a live device. **The launcher was not engaged.** What the attempt
+established is still worth having, because it eliminates most of the guesses.
+
+*The pins are right, and they are the ones already wired.* The launcher's first
+call (`0x2250`) saves GPIO CTL registers `0x74` and `0x78`; `GPIO_REG_CTL =
+base + pin*4`, so those are **GPIO_29 and GPIO_30**. Read live, both hold mux
+`0x5`, and `UART0_MFP_SEL = 5` in the SDK's `pinctrl_leopard.h`. They are UART0,
+the same peripheral and pads as the debug console. No extra wiring is needed and
+none of the failures below are a wiring problem.
+
+*The window is ~285 ms.* Timed from `dbg reboot`: the shell's last output, then
+silence, then the mbrec banner at **0.300 s**. The `arg 0` probe (45 polls) is
+inside that gap.
+
+*The ROM is silent until a match.* The bytes captured before the mbrec banner
+are exclusively Zephyr's own (`dbg reboot` echo, `system reboot, type 0x0!`) --
+71 bytes, 2 non-printable. So the ROM transmits nothing during the probe, and
+watching for stray output cannot reveal its baud.
+
+*Rates tried, all booting normally:* 115200, 230400, 250000, 460800, 500000,
+921600, 1000000, 1500000, 1600000, 2000000, 3000000, 3200000, 4000000 -- both
+starting the knock 200 ms after the reset command and streaming continuously
+from t≈0 across the whole window.
+
+**The blocker is the baud.** `0x2250` clock-enables and then *resets* the UART
+block, so `BR` reverts to its hardware default, and no code on the traced path
+sets it -- `uart_read` only *reads* `BR` to scale its per-byte timeout. The
+probe therefore runs at that reset default, which cannot be read the obvious
+way: reading it needs the console, and resetting the block to observe it kills
+the console.
+
+**The experiment that would settle it** is to run a stub in RAM with
+`tools/ramload.py`: reset UART0 through RMU exactly as `0x2250` does, read
+`UART0_BR`, restore the console's divisor, and leave the captured default at a
+known address for `dbg mdw` to pick up. That turns an unbounded baud sweep into
+a single measurement. Also untried: a **cold** power-on knock rather than a
+watchdog reset, in case the warm path differs.
