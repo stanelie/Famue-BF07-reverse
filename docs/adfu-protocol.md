@@ -1627,16 +1627,34 @@ watching for stray output cannot reveal its baud.
 starting the knock 200 ms after the reset command and streaming continuously
 from t≈0 across the whole window.
 
-**The blocker is the baud.** `0x2250` clock-enables and then *resets* the UART
-block, so `BR` reverts to its hardware default, and no code on the traced path
-sets it -- `uart_read` only *reads* `BR` to scale its per-byte timeout. The
-probe therefore runs at that reset default, which cannot be read the obvious
-way: reading it needs the console, and resetting the block to observe it kills
-the console.
+**The baud is 115200, from the ROM itself.** `0x2250` clock-enables and resets
+UART0 (`CLOCK_ID_UART0 = 24`, confirmed in the SDK), so `BR` goes to its reset
+value -- measured as **0** by reading the untouched `UART1`/`UART2` `BR`
+registers on the live device, a divisor that would make reception impossible.
+The ROM therefore must set a rate, and it does, in the init reached through
+vtable slot `+0x54`:
 
-**The experiment that would settle it** is to run a stub in RAM with
-`tools/ramload.py`: reset UART0 through RMU exactly as `0x2250` does, read
-`UART0_BR`, restore the console's divisor, and leave the captured default at a
-known address for `dbg mdw` to pick up. That turns an unbounded baud sweep into
-a single measurement. Also untried: a **cold** power-on knock rather than a
-watchdog reset, in case the warm path differs.
+```
+04a32  bl   0x1524              ; port config
+       bl   0x1490
+04a48  mov.w r0, #0x1c200       ; 115200
+04a4c  b.w  0x134c              ; uart_set_baud(115200)
+```
+
+`32,000,000 / 115200 = 277` (0.28% error -- well inside UART tolerance).
+
+**The host raises it afterwards.** `0x469c` is a command handler that takes a
+value from the payload, rejects anything above `0x005b8d80` (6,000,000) with
+status `0x20`, replies, then calls `uart_set_baud` through slot `+0x5c`. So the
+protocol is: knock at 115200, connect, then negotiate up.
+
+**Still not engaged.** Knocking at 115200 across the whole window, and checking
+for a valid reply frame rather than merely whether the device booted, produced
+nothing: 2959 bytes, all of it the device's own 2,000,000-baud boot output
+sampled at 115200, and the shell returned normally.
+
+So the rate is no longer the unknown. The remaining untested hypothesis is that
+a **watchdog reset does not take the same ROM path as a cold power-on** -- the
+`0x2be8` sequence is entered after the reboot type is consumed, and a
+`GOTO_SYSTEM` warm reset may bypass the launcher that a cold boot runs. Testing
+that needs the knock running across a physical power cycle.
