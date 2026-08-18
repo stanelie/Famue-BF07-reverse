@@ -38,10 +38,13 @@ def payload_alive():
     dv = usb.core.find(idVendor=0x10D6, idProduct=0x10D6)
     if dv is None:
         return False
+    # The payload owns the endpoints; re-selecting the already-active configuration
+    # resets them under it and every raw packet then EIOs on Linux. Configure
+    # only if nothing has. See docs/flashing.md.
     try:
+        dv.get_active_configuration()
+    except usb.core.USBError:
         dv.set_configuration()
-    except Exception:
-        pass
     try:
         p = bytearray(16)
         p[0:2] = b'ic'
@@ -84,10 +87,13 @@ if not ALREADY:
     time.sleep(2.5)
 
 d = usb.core.find(idVendor=0x10D6, idProduct=0x10D6)
+# The payload owns the endpoints; re-selecting the already-active configuration
+# resets them under it and every raw packet then EIOs on Linux. Configure
+# only if nothing has. See docs/flashing.md.
 try:
+    d.get_active_configuration()
+except usb.core.USBError:
     d.set_configuration()
-except Exception:
-    pass
 
 
 def drain(n=15):

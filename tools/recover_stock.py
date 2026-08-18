@@ -66,8 +66,11 @@ class Dev:
     def attach(self):
         self.d = usb.core.find(idVendor=0x10D6, idProduct=0x10D6)
         if self.d is None: raise RuntimeError("device gone")
-        try: self.d.set_configuration()
-        except usb.core.USBError: pass
+        # The payload owns the endpoints; re-selecting the already-active configuration
+        # resets them under it and every raw packet then EIOs on Linux. Configure
+        # only if nothing has. See docs/flashing.md.
+        try: self.d.get_active_configuration()
+        except usb.core.USBError: self.d.set_configuration()
         for _ in range(15):
             try: self.d.read(0x81,512,60)
             except usb.core.USBError: break

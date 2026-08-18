@@ -99,10 +99,13 @@ def main():
     if dev is None:
         raise SystemExit("device not found as 10d6:b00b — is it in normal mode?")
 
+    # The payload owns the endpoints; re-selecting the already-active
+    # configuration resets them under it and every raw packet then EIOs on
+    # Linux. Configure only if nothing has. See docs/flashing.md.
     try:
+        dev.get_active_configuration()
+    except usb.core.USBError:
         dev.set_configuration()
-    except Exception:
-        pass
     intf, ep_out, ep_in = find_eps(dev)
     print(f"mass storage: interface {intf}, "
           f"EP OUT 0x{ep_out:02x} / EP IN 0x{ep_in:02x}")

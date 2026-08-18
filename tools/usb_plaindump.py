@@ -44,10 +44,13 @@ class Dev:
         if self.d is None:
             raise SystemExit("not in ADFU (enter via serial or the USB switch, "
                              "then start the payload)")
+        # The payload owns the endpoints; re-selecting the already-active configuration
+        # resets them under it and every raw packet then EIOs on Linux. Configure
+        # only if nothing has. See docs/flashing.md.
         try:
-            self.d.set_configuration()
+            self.d.get_active_configuration()
         except usb.core.USBError:
-            pass
+            self.d.set_configuration()
 
     def _drain(self):
         for _ in range(15):

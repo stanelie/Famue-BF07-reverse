@@ -60,10 +60,13 @@ def reset_via_payload():
     d = usb.core.find(idVendor=0x10D6, idProduct=0x10D6)
     if d is None:
         return False
+    # The payload owns the endpoints; re-selecting the already-active
+    # configuration resets them under it and every raw packet then EIOs on
+    # Linux. Configure only if nothing has. See docs/flashing.md.
     try:
-        d.set_configuration()
+        d.get_active_configuration()
     except usb.core.USBError:
-        pass
+        d.set_configuration()
     for _ in range(15):
         try:
             d.read(0x81, 512, 60)

@@ -33,6 +33,7 @@ SAFETY
     install without one.
 """
 import argparse
+import glob
 import hashlib
 import os
 import struct
@@ -55,6 +56,37 @@ def find(pid):
     return usb.core.find(idVendor=VID, idProduct=pid)
 
 
+def mounted_volumes():
+    """Filesystems on this device that the OS still has mounted (Linux).
+
+    Entering ADFU pulls usb-storage off the interface and reboots the device,
+    so anything mounted from it disappears underneath the kernel. Best effort
+    and Linux-only: elsewhere this returns nothing and the caller proceeds, as
+    it always did.
+    """
+    found = []
+    try:
+        with open("/proc/mounts") as fh:
+            mounts = [ln.split()[:2] for ln in fh if ln.startswith("/dev/")]
+    except OSError:
+        return found
+    for blk in glob.glob("/sys/block/sd*"):
+        node = os.path.realpath(blk)
+        while node and node != "/":
+            vid = os.path.join(node, "idVendor")
+            if os.path.exists(vid):
+                try:
+                    if open(vid).read().strip().lower() == "10d6":
+                        name = os.path.basename(blk)
+                        found += [(src, mnt) for src, mnt in mounts
+                                  if src.startswith("/dev/" + name)]
+                except OSError:
+                    pass
+                break
+            node = os.path.dirname(node)
+    return found
+
+
 def enter_adfu(timeout=25):
     """Switch a normally-running device into ADFU, over USB alone.
 
@@ -68,9 +100,28 @@ def enter_adfu(timeout=25):
         raise SystemExit("No BF07 found. Connect it over USB and choose disk\n"
                          "drive mode on the boot menu, then try again.")
 
+    busy = mounted_volumes()
+    if busy:
+        raise SystemExit(
+            "The device's storage is still mounted:\n"
+            + "".join(f"    {src} on {mnt}\n" for src, mnt in busy) +
+            "Entering ADFU detaches usb-storage and reboots the device, which\n"
+            "would pull that filesystem out from under the kernel. Unmount it\n"
+            "first:\n"
+            + "".join(f"    udisksctl unmount -b {src}\n" for src, _ in busy))
+
     # The claim can fail at set_configuration OR at the first transfer,
     # depending on the backend, so the whole exchange is guarded.
     try:
+        # Linux binds usb-storage to the only interface this device has, and it
+        # re-binds between processes, so this cannot be done once out of band.
+        # With a udev rule granting access it succeeds unprivileged; without one
+        # it raises and the guidance below still applies.
+        try:
+            if dev.is_kernel_driver_active(0):
+                dev.detach_kernel_driver(0)
+        except (usb.core.USBError, NotImplementedError):
+            pass
         try:
             dev.set_configuration()
         except usb.core.USBError:
@@ -82,30 +133,49 @@ def enter_adfu(timeout=25):
         inp = usb.util.find_descriptor(intf, custom_match=lambda e:
             usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN)
 
-        def cbw(cdb, dlen, tag):
-            return struct.pack("<IIIBBB16s", 0x43425355, tag, dlen, 0x80, 0,
-                               len(cdb), cdb.ljust(16, b"\0"))
+        # Bulk-Only Transport, in full: CBW, then the data phase, then the
+        # CSW. The CSW is not optional bookkeeping -- leaving it unread halts
+        # the endpoint, and every later transfer on this device then fails
+        # with EOVERFLOW, EPIPE or a bogus status until something clears the
+        # halt. A whole afternoon of "the switch command does not work" was
+        # this, self-inflicted, on a device that was answering correctly.
+        mps = inp.wMaxPacketSize or 512
 
-        out.write(cbw(bytes([0xCC]) + b"\0" * 6 + bytes([11]), 11, 1), 3000)
-        ident = bytes(inp.read(11, 3000))
-        try:
-            inp.read(13, 1000)
-        except usb.core.USBError:
-            pass
+        def scsi(cdb, dlen, tag):
+            """-> (data, csw_status). status 0 is success, None unreadable."""
+            out.write(struct.pack("<IIIBBB16s", 0x43425355, tag, dlen, 0x80,
+                                  0, len(cdb), cdb.ljust(16, b"\0")), 3000)
+            data = b""
+            if dlen:
+                # Read a packet, not exactly dlen: a REJECTED command skips the
+                # data phase and answers with the 13-byte CSW, which overflows
+                # a dlen-sized buffer and hides the real status behind an
+                # errno. Taking a packet lets us tell the two apart.
+                data = bytes(inp.read(mps, 3000))
+                if data[:4] == b"USBS":            # CSW where data belonged
+                    return b"", data[12] if len(data) >= 13 else None
+                data = data[:dlen]
+            csw = bytes(inp.read(mps, 2000))
+            st = csw[12] if len(csw) >= 13 and csw[:4] == b"USBS" else None
+            return data, st
+
+        ident, st = scsi(bytes([0xCC]) + b"\0" * 6 + bytes([11]), 11, 1)
         if ident != b"ACTIONSUSBD":
-            raise SystemExit(f"unexpected identity {ident!r} -- is this a BF07?")
-        out.write(cbw(bytes([0xCB, 0x21]) + b"\0" * 5 + bytes([2]), 2, 2), 3000)
-        try:
-            inp.read(2, 2000)
-        except usb.core.USBError:
-            pass
+            raise SystemExit(
+                f"unexpected identity {ident!r} (status {st}) -- is this a "
+                f"BF07, and is it in disk drive mode?")
+        _, st = scsi(bytes([0xCB, 0x21]) + b"\0" * 5 + bytes([2]), 2, 2)
+        if st not in (0, None):
+            raise SystemExit(f"the device refused the ADFU switch (status {st})")
     except usb.core.USBError as e:
         if "Access denied" in str(e) or "busy" in str(e).lower() or e.errno == 13:
             raise SystemExit(
                 "Cannot reach the device's USB interface: the operating system\n"
                 "is holding it. The BF07 exposes only one interface (mass\n"
                 "storage), so there is nothing else to talk to.\n"
-                "  Linux  : run as root, or detach usb-storage from 10d6:b00b\n"
+                "  Linux  : install the udev rule for 10d6 (see docs/flashing.md)\n"
+                "           so the detach above can succeed unprivileged, or run\n"
+                "           this as root\n"
                 "  Windows: bind that interface to WinUSB (e.g. with Zadig)\n"
                 "  macOS  : not possible -- the kernel driver cannot be detached,\n"
                 "           and unmounting does not release it. Put the device in\n"

@@ -43,8 +43,11 @@ def main():
     d = usb.core.find(idVendor=0x10D6, idProduct=0x10D6)
     if d is None:
         raise SystemExit("not in ADFU (enter via serial `dbg reboot adfu`, then run the payload)")
-    try: d.set_configuration()
-    except usb.core.USBError: pass
+    # The payload owns the endpoints; re-selecting the already-active
+    # configuration resets them under it and every raw packet then EIOs on
+    # Linux. Configure only if nothing has. See docs/flashing.md.
+    try: d.get_active_configuration()
+    except usb.core.USBError: d.set_configuration()
     lo = int(sys.argv[1], 0) if len(sys.argv) > 1 else 0x1000
     hi = int(sys.argv[2], 0) if len(sys.argv) > 2 else 0x8000
     rom = rm(d, lo, hi - lo)

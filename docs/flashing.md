@@ -122,6 +122,56 @@ other way: uploading over a live payload sends CBW framing to something that no
 longer speaks it, and the upload EIOs. Fix the probe and both directions come
 right -- **a workaround for a lying test outlives the bug and becomes the bug.**
 
+### Entering and leaving ADFU without the UART
+
+Both directions work over USB alone, verified on Linux:
+
+**In** — `tools/adfu_enter_usb.py`, or `bf07.py` does it automatically. The
+normal-mode device answers the classic Actions handshake as ordinary
+mass-storage CBWs:
+
+```
+0xCC  , CDB[7]=11, dlen=11  -> "ACTIONSUSBD", CSW 0
+0xCB21, CDB[7]=2 , dlen=2   -> ff 55, CSW 0 ; the device reboots into ADFU
+```
+
+Measured: ADFU reached ~1 s later. On Linux the interface must first be taken
+from `usb-storage` (`detach_kernel_driver`), which the udev rule above makes
+possible unprivileged. **macOS cannot do this at all** -- its mass-storage
+driver cannot be detached -- so there the UART is still needed to get *in*.
+
+**Out** — `adfu_reset.py reset_via_payload()`. ADFU's own software reset is a
+dead end (see dead-ends.md) and this board has no ADFU button, but the running
+payload's `wm` op can do it in two register writes:
+
+```
+RTC_REMAIN3 (0x4000c03c) = 0x42520000   clear the "boot to ADFU" request
+WATCHDOG    (0x4000c020) = 0x5f         arm it; the reset follows
+```
+
+Clearing `RTC_REMAIN3` first is essential: `SYSRESETREQ` alone lands straight
+back in ADFU, because the boot ROM re-reads the reboot type that put it there.
+
+### Read the CSW, always
+
+Bulk-Only Transport is CBW, data, **CSW** -- and the CSW is not bookkeeping you
+can skip. Leaving it unread halts the endpoint, and every later transfer then
+fails with `EOVERFLOW`, `EPIPE`, or a plausible-looking wrong status, on a
+device that is answering perfectly well. An afternoon was lost concluding "the
+switch command does not work" from measurements taken on endpoints the
+measuring code had itself stalled. A clean `dbg reboot` and a correct sequence
+got it first try.
+
+The corollary: read a *packet*, not exactly `dlen`. A rejected command skips the
+data phase and replies with the 13-byte CSW, which overflows a `dlen`-sized
+buffer and buries the real status inside an errno.
+
+### Unmount before entering ADFU
+
+Entering ADFU detaches `usb-storage` and reboots the device. Anything mounted
+from its card goes away underneath the kernel. `bf07.py` refuses to start while
+a volume of its own is mounted and prints the `udisksctl unmount` line to run.
+
 ## The five rules of writing
 
 These are hard constraints, each found by a failure:

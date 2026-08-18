@@ -52,8 +52,11 @@ enter()
 if not in_adfu(): raise SystemExit("no ADFU")
 payload()
 d = usb.core.find(idVendor=0x10D6, idProduct=0x10D6)
-try: d.set_configuration()
-except usb.core.USBError: pass
+# The payload owns the endpoints; re-selecting the already-active configuration
+# resets them under it and every raw packet then EIOs on Linux. Configure
+# only if nothing has. See docs/flashing.md.
+try: d.get_active_configuration()
+except usb.core.USBError: d.set_configuration()
 def drain():
     for _ in range(15):
         try: d.read(0x81, 512, 60)
