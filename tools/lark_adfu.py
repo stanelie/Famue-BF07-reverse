@@ -11,6 +11,7 @@ See docs/adfu-protocol.md.
   flash read : cmd 0x11 -> CDB[0]=8, CDB[2..5]=addr, CDB[7]=len>>9, CDB[8]=len>>17
   flash write: cmd 0x10 -> CDB[0]=9, same layout
 """
+import os as _os
 import struct
 import sys
 import usb.core
@@ -89,7 +90,7 @@ class LarkAdfu:
 
 def main():
     import json
-    SCRATCH = "/private/tmp/claude-504/-Users-user/5d7d024b-ca45-4829-b929-aa9b9dba425d/scratchpad"
+    SCRATCH = _os.environ.get("BF07_BACKUPS", _os.path.expanduser("~/Documents/bf07-backups"))
     gt = json.load(open(f"{SCRATCH}/ground_truth.json"))
     truth = {int(k, 16): bytes.fromhex(v) for k, v in gt.items() if v}
 

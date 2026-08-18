@@ -7,10 +7,11 @@ import sys
 from capstone import CS_ARCH_ARM, CS_MODE_THUMB, Cs
 
 import os
+import serialport
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.environ.get("BF07_ROOT", os.path.dirname(_HERE))
 _BACKUPS = os.environ.get("BF07_BACKUPS", os.path.join(os.path.dirname(_ROOT), "bf07-backups"))
-PORT = os.environ.get("BF07_PORT", "/dev/cu.usbserial-XXXX")
+PORT = serialport.resolve()
 
 XIP = 0x10000000
 IMG = os.path.join(_BACKUPS, "fw_code_full.bin")

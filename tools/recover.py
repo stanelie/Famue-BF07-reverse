@@ -8,13 +8,14 @@ import os as _os
 sys.path.insert(0, _os.environ.get(
     "BF07_TOOLS", _os.path.dirname(_os.path.abspath(__file__))))
 import usb.core, serial
+import serialport
 
 def in_adfu():
     return usb.core.find(idVendor=0x10D6, idProduct=0x10D6) is not None
 
 print("hammering for ADFU (power the device on / let it loop)...")
 t0 = time.time()
-port = (glob.glob("/dev/cu.usbserial-*") or [None])[0]
+port = serialport.find()
 while time.time() - t0 < 120:
     if in_adfu():
         print(f"ADFU reached after {time.time()-t0:.0f}s")

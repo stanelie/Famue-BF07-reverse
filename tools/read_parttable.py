@@ -34,7 +34,7 @@ Layout (SDK zephyr/subsys/partition/partition.c):
     };                                // total 744 bytes
 
 Usage:
-    python3 read_parttable.py [--port /dev/cu.usbserial-...]
+    python3 read_parttable.py [--port /dev/ttyUSB0]
 """
 
 import argparse
@@ -45,8 +45,8 @@ import sys
 import time
 
 import serial
+import serialport
 
-PORT = os.environ.get("BF07_PORT", "/dev/cu.usbserial-XXXX")
 BAUD = 2000000
 PTR_ADDR = 0x1801D684
 MAGIC = 0x54504341          # 'ACPT'
@@ -107,12 +107,12 @@ def read_mem(s, addr, nwords):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--port", default=PORT)
+    serialport.add_argument(p)
     p.add_argument("--ptr", type=lambda x: int(x, 0), default=PTR_ADDR)
     p.add_argument("--save", default=None, help="write raw table bytes here")
     args = p.parse_args()
 
-    s = serial.Serial(args.port, BAUD, timeout=0.15)
+    s = serial.Serial(serialport.resolve(args.port), BAUD, timeout=0.15)
     time.sleep(0.3)
 
     raw = shell(s, f"dbg mdw 0x{args.ptr:x} 1", 2.0)

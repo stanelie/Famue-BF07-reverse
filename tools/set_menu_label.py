@@ -22,6 +22,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bf07                                                     # noqa: E402
+import serialport
 
 SECTOR_SIZE = 0x1000
 NOR_SDFS = 0x299000            # NOR resource container, mapped at 0x12400000
@@ -68,11 +69,11 @@ def read_plain_blocks():
     import re
     import time
     import serial
-    ports = glob.glob("/dev/cu.usbserial-*")
-    if not ports:
+    port = serialport.find()
+    if not port:
         raise SystemExit("need the UART to read the current strings, or place "
                          f"64 bytes at {CACHE}")
-    s = serial.Serial(ports[0], 2000000, timeout=0.5)
+    s = serial.Serial(port, 2000000, timeout=0.5)
     time.sleep(0.3)
     words = {}
     for _ in range(4):
@@ -109,11 +110,11 @@ def to_adfu():
     import usb.core
     if usb.core.find(idVendor=0x10D6, idProduct=0x10D6):
         return
-    ports = glob.glob("/dev/cu.usbserial-*")
-    if not ports:
+    port = serialport.find()
+    if not port:
         raise SystemExit("no USB serial adapter, and macOS cannot switch to "
                          "ADFU over USB -- connect the UART")
-    s = serial.Serial(ports[0], 2000000, timeout=0.2)
+    s = serial.Serial(port, 2000000, timeout=0.2)
     s.write(b"dbg reboot adfu\r\n")
     s.flush()
     time.sleep(1.2)

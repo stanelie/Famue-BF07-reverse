@@ -6,11 +6,12 @@ decrypting read path work -- which is what the ADFU payload would have to set up
 for `rm 0x10000000` to return the firmware instead of stale cache lines.
 """
 import glob, re, time, serial
+import serialport
 
 BLOCKS = [(0x40028000, "SPI-NOR controller (JEDEC 0x85 seen here)"),
           (0x40038000, "?"), (0x40054000, "?"), (0x40068000, "?")]
 
-s = serial.Serial(glob.glob("/dev/cu.usbserial-*")[0], 2000000, timeout=0.5)
+s = serialport.open(timeout=0.5)
 time.sleep(0.2)
 
 def blk(a, words):

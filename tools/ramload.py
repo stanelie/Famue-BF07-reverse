@@ -32,6 +32,7 @@ import sys
 import time
 
 import serial
+import serialport
 
 ANCHOR = 0x18018E98
 INJ_MAGIC = 0x52444252
@@ -44,10 +45,10 @@ OFF_CALLS = 0x0C
 
 
 def port():
-    p = glob.glob("/dev/cu.usbserial-*")
+    p = serialport.find()
     if not p:
         raise SystemExit("no UART adapter found")
-    return p[0]
+    return p
 
 
 class Shell:

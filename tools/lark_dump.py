@@ -10,6 +10,7 @@ Flash read (ADFURead cmd 0x11):
     cdb_len = 0x0c, flags = 0x80, CDB[0] = 8, CDB[1] = 0x80,
     CDB[2..5] = addr, CDB[7] = sectors & 0xff, CDB[8] = sectors >> 8
 """
+import os as _os
 import struct, sys, json, time
 import usb.core, usb.util
 
@@ -17,7 +18,7 @@ VID = PID = 0x10D6
 EP_OUT, EP_IN = 0x02, 0x81
 USBC, USBS = 0x43425355, 0x53425355
 SECTOR = 512
-SCRATCH = "/private/tmp/claude-504/-Users-user/5d7d024b-ca45-4829-b929-aa9b9dba425d/scratchpad"
+SCRATCH = _os.environ.get("BF07_BACKUPS", _os.path.expanduser("~/Documents/bf07-backups"))
 
 
 class Lark:

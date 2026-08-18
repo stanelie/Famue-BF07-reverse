@@ -3,6 +3,7 @@
 Run immediately AFTER tapping digits, so counters reflect real presses."""
 import glob,re,subprocess,time,serial
 import os as _os
+import serialport
 _HERE = _os.path.dirname(_os.path.abspath(__file__))
 ELF = _os.environ.get("BF07_ELF",
                       _os.path.join(_HERE, _os.pardir, "reader", "reader.elf"))
@@ -14,7 +15,7 @@ for ln in d[i:].splitlines()[1:]:
     if m and "DW_TAG" not in ln: nm=m.group(1)
     m=re.search(r"DW_AT_data_member_location:\s*(\d+)",ln)
     if m and nm: off[nm]=int(m.group(1)); nm=None
-s=serial.Serial(glob.glob("/dev/cu.usbserial-*")[0],2000000,timeout=0.4); time.sleep(0.2)
+s=serialport.open(timeout=0.4); time.sleep(0.2)
 def blk(a,n):
     for _ in range(3):
         s.reset_input_buffer(); s.write(f"dbg mdw 0x{a:08x} {n:x}\r\n".encode()); s.flush()

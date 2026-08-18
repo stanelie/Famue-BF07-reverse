@@ -28,8 +28,8 @@ import sys
 import time
 
 import serial
+import serialport
 
-PORT = os.environ.get("BF07_PORT", "/dev/cu.usbserial-XXXX")
 BAUD = 2000000
 BLOCK = 512
 
@@ -97,7 +97,7 @@ def main():
     p.add_argument("--start", type=lambda x: int(x, 0), default=0x0)
     p.add_argument("--count", type=int, default=0,
                    help="read only N blocks from --start (0 = to end)")
-    p.add_argument("--port", default=PORT)
+    serialport.add_argument(p)
     p.add_argument("--settle", type=float, default=0.06,
                    help="pause between blocks so the device drains")
     p.add_argument("--rest-every", type=int, default=256,
@@ -125,7 +125,7 @@ def main():
                     done.add(int(line, 16))
         print(f"resuming: {len(done)} blocks already captured")
 
-    s = serial.Serial(args.port, BAUD, timeout=0.15)
+    s = serial.Serial(serialport.resolve(args.port), BAUD, timeout=0.15)
     time.sleep(0.3)
 
     state = open(args.outfile + ".state", "a", buffering=1)

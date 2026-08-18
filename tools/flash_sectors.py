@@ -12,13 +12,14 @@ import os
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.environ.get("BF07_ROOT", os.path.dirname(_HERE))
 _BACKUPS = os.environ.get("BF07_BACKUPS", os.path.join(os.path.dirname(_ROOT), "bf07-backups"))
-PORT = os.environ.get("BF07_PORT", "/dev/cu.usbserial-XXXX")
+PORT = serialport.resolve()
 
 sys.path.insert(0, os.path.join(_ROOT, 'tools'))
 import serial
 import usb.core
 import usb.util
 from lark_cd import Adfu, OP_EXEC1, OP_WRITE
+import serialport
 
 SPD = os.environ.get("BF07_WORK", os.getcwd()) + "/"
 OUT = SPD + "outfull/"

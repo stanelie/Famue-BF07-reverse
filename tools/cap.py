@@ -1,6 +1,7 @@
 import glob, sys, time, serial
+import serialport
 keys = sys.argv[1:] or ["CB registered","BOUNCE","DELTA","TURN","PCT tenths"]
-s=serial.Serial(glob.glob("/dev/cu.usbserial-*")[0],2000000,timeout=0.5)
+s=serialport.open(timeout=0.5)
 out=open("logs/cap.log","w"); t0=time.time(); buf=b""
 while time.time()-t0 < 300:
     d=s.read(8192)

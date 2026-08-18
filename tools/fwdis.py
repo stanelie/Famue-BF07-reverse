@@ -5,10 +5,11 @@ Usage: dis.py <vaddr> [count_bytes] [--back N]
 Resolves PC-relative literal loads to their target values and annotates
 any that point into the string region so log calls are readable.
 """
+import os as _os
 import sys, struct
 from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
 
-SCRATCH = "/private/tmp/claude-504/-Users-user/5d7d024b-ca45-4829-b929-aa9b9dba425d/scratchpad"
+SCRATCH = _os.environ.get("BF07_BACKUPS", _os.path.expanduser("~/Documents/bf07-backups"))
 BASE = 0x10000000
 DATA = open(f"{SCRATCH}/fw_code_full.bin", "rb").read()
 

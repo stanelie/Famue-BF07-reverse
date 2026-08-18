@@ -8,12 +8,13 @@ only THAT something differs; this says what.
 import glob, re, sys, time, serial
 
 import os as _os
+import serialport
 # The stock image comes from YOUR OWN device (see docs/firmware-extraction.md);
 # it is never redistributed here. Point BF07_STOCK at your dump.
 STOCK = _os.environ.get("BF07_STOCK", "fw_code_full.bin")
 img = open(STOCK, "rb").read()          # img[0] == XIP 0x10000000
 
-s = serial.Serial(glob.glob("/dev/cu.usbserial-*")[0], 2000000, timeout=0.5)
+s = serialport.open(timeout=0.5)
 time.sleep(0.2)
 
 def block(a, words):

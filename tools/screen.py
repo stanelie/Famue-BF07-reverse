@@ -8,6 +8,7 @@ used rather than by eye.
 """
 import glob,re,subprocess,time,serial
 import os as _os
+import serialport
 _HERE = _os.path.dirname(_os.path.abspath(__file__))
 # Override with BF07_ELF if the build lives elsewhere.
 ELF = _os.environ.get("BF07_ELF",
@@ -38,7 +39,7 @@ PG = page_offsets(d)
 TXT = PG.get("text", 10)
 print(f"struct page: start={PG.get('start')} end={PG.get('end')} "
       f"nlines={PG.get('nlines')} text={TXT}")
-s=serial.Serial(glob.glob("/dev/cu.usbserial-*")[0],2000000,timeout=0.4); time.sleep(0.2)
+s=serialport.open(timeout=0.4); time.sleep(0.2)
 def blk(a,n):
     for _ in range(4):
         s.reset_input_buffer(); s.write(f"dbg mdw 0x{a:08x} {n:x}\r\n".encode()); s.flush()

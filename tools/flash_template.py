@@ -15,6 +15,7 @@ import serial
 import usb.core
 import usb.util
 from lark_cd import Adfu, OP_EXEC1, OP_WRITE
+import serialport
 
 # Where mkflash.py wrote the sector images (BF07_WORK, else alongside this file).
 SPD = os.environ.get("BF07_WORK", _HERE) + "/"
@@ -57,7 +58,7 @@ def payload_alive():
 
 ALREADY = payload_alive()
 if not ALREADY and not usb.core.find(idVendor=0x10D6, idProduct=0x10D6):
-    s = serial.Serial("/dev/cu.usbserial-AV7K776E", 2000000, timeout=0.2)
+    s = serialport.open(timeout=0.2)
     s.write(b"dbg reboot adfu\r\n")
     s.flush()
     time.sleep(1.2)

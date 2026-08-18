@@ -16,6 +16,7 @@ sys.path.insert(0, _os.environ.get(
     "BF07_TOOLS", _os.path.dirname(_os.path.abspath(__file__))))
 import usb.core, usb.util, serial
 from lark_cd import Adfu, OP_EXEC1, OP_WRITE
+import serialport
 
 STUB_ADDR = 0x0101C000
 # SYSRESETREQ alone lands straight back in ADFU: the boot ROM re-reads the
@@ -33,9 +34,9 @@ STUB = bytes([0x04,0x48, 0x05,0x49, 0x01,0x60,
 def in_adfu():
     return usb.core.find(idVendor=0x10D6, idProduct=0x10D6) is not None
 
-def enter_adfu(port="/dev/cu.usbserial-AV7K776E"):
+def enter_adfu(port=None):
     import glob
-    port = (glob.glob("/dev/cu.usbserial-*") or [port])[0]
+    port = serialport.find(port)
     s = serial.Serial(port, 2000000, timeout=0.2)
     s.write(b"dbg reboot adfu\r\n"); s.flush(); time.sleep(1.2); s.close()
     for _ in range(15):

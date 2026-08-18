@@ -20,6 +20,7 @@ import serial, usb.core, usb.util
 from lark_cd import Adfu, OP_EXEC1, OP_WRITE
 from mkpatch import load_patch
 import patchset
+import serialport
 
 SEC = 0x1000
 STOCK = os.environ["BF07_BACKUP"]           # your own encrypted backup
@@ -29,7 +30,7 @@ def in_adfu(): return usb.core.find(idVendor=0x10D6, idProduct=0x10D6) is not No
 
 def enter():
     if in_adfu(): return
-    s = serial.Serial(glob.glob("/dev/cu.usbserial-*")[0], 2000000, timeout=0.1)
+    s = serialport.open(timeout=0.1)
     for _ in range(120):
         s.write(b"dbg reboot adfu\r\n"); s.flush(); time.sleep(0.05)
         if in_adfu(): break

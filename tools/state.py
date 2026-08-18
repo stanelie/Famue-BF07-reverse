@@ -11,6 +11,7 @@ them. The offsets come from DWARF in the build under test, so they cannot drift.
 import glob, re, subprocess, sys, time, serial
 
 import os as _os
+import serialport
 _HERE = _os.path.dirname(_os.path.abspath(__file__))
 # Override with BF07_ELF if the build lives elsewhere.
 ELF = _os.environ.get("BF07_ELF",
@@ -38,7 +39,7 @@ def offsets():
 
 class Dev:
     def __init__(self):
-        self.s = serial.Serial(glob.glob("/dev/cu.usbserial-*")[0], 2000000, timeout=0.5)
+        self.s = serialport.open(timeout=0.5)
         time.sleep(0.3)
     def rd(self, a, n=1):
         for _ in range(4):

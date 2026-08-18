@@ -2,6 +2,10 @@
 
 Zephyr's shell, on the debug UART at **2,000,000 baud**. Full access, no authentication.
 
+The tools locate the adapter themselves (`tools/serialport.py`); pass `--port`
+or set `$BF07_PORT` to override. See *Choosing the serial port* in
+[flashing.md](flashing.md).
+
 ```
 uart:~$ help
   app  audio  clear  date  dbg  device  devmem  fs  hci_log  help  history

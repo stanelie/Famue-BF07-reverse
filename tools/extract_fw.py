@@ -10,10 +10,11 @@ import time
 import json
 import os
 import sys
+import serialport
 
-PORT = os.environ.get("BF07_PORT", "/dev/cu.usbserial-XXXX")
+PORT = serialport.resolve()
 BAUD = 2000000
-SCRATCH = '/private/tmp/claude-504/-Users-user/5d7d024b-ca45-4829-b929-aa9b9dba425d/scratchpad'
+SCRATCH = os.environ.get("BF07_BACKUPS", os.path.expanduser("~/Documents/bf07-backups"))
 
 REGIONS = [
     {'name': 'fw_code', 'base': 0x10000000, 'size': 0x1E0000},

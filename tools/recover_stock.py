@@ -16,6 +16,7 @@ sys.path.insert(0, os.environ.get(
     "BF07_TOOLS", os.path.dirname(os.path.abspath(__file__))))
 import serial, usb.core, usb.util
 from lark_cd import Adfu, OP_EXEC1, OP_WRITE
+import serialport
 
 # Your own encrypted backup (bf07.py backup). Never redistributed.
 STOCK = os.environ.get("BF07_BACKUP",
@@ -32,9 +33,9 @@ def wait_for_adfu(minutes=30):
     while time.time() < end and not in_adfu():
         try:
             if ser is None:
-                ports = glob.glob("/dev/cu.usbserial-*")
-                if not ports: time.sleep(1); continue
-                ser = serial.Serial(ports[0], 2000000, timeout=0.1)
+                port = serialport.find()
+                if not port: time.sleep(1); continue
+                ser = serial.Serial(port, 2000000, timeout=0.1)
             ser.write(b"dbg reboot adfu\r\n"); ser.flush()
         except Exception:
             try: ser.close()

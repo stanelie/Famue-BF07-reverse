@@ -21,6 +21,7 @@ import serial  # noqa: E402
 import usb.core  # noqa: E402
 import usb.util  # noqa: E402
 from lark_cd import Adfu, OP_EXEC1, OP_WRITE  # noqa: E402
+import serialport
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BACKUPS = os.path.expanduser("~/Documents/bf07-backups")
@@ -40,14 +41,14 @@ def enter_adfu():
     import glob
     if in_adfu():
         return True
-    ports = glob.glob("/dev/cu.usbserial-*")
+    port = serialport.find()
     t0 = time.time()
     while time.time() - t0 < 60:
         if in_adfu():
             return True
-        if ports:
+        if port:
             try:
-                s = serial.Serial(ports[0], 2000000, timeout=0.05)
+                s = serial.Serial(port, 2000000, timeout=0.05)
                 for _ in range(10):
                     s.write(b"dbg reboot adfu\r\n")
                     s.flush()

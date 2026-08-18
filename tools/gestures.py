@@ -7,6 +7,7 @@ the first place a press is visible as data we control. Offsets come from DWARF.
 import glob, re, subprocess, time, serial
 
 import os as _os
+import serialport
 _HERE = _os.path.dirname(_os.path.abspath(__file__))
 # Override with BF07_ELF if the build lives elsewhere.
 ELF = _os.environ.get("BF07_ELF",
@@ -24,7 +25,7 @@ def offsets():
         if m and name: out[name] = int(m.group(1)); name = None
     return out
 
-s = serial.Serial(glob.glob("/dev/cu.usbserial-*")[0], 2000000, timeout=0.5)
+s = serialport.open(timeout=0.5)
 time.sleep(0.2)
 def blk(a, n):
     for _ in range(4):

@@ -13,12 +13,49 @@ later corrected by measurement, the correction is what is written down.
 | | |
 |---|---|
 | Python | 3.9+ with **pyusb** and **pyserial** |
-| USB | libusb (macOS: nothing extra; Linux: udev rule for `10d6:10d6`) |
+| USB | libusb (macOS: nothing extra; Linux: udev rule for `10d6:10d6`, below) |
 | Serial | a 3.3 V UART adapter on the debug pads, **2,000,000 baud** |
-| Toolchain (patching only) | `arm-none-eabi-ld`/`objcopy`, plus clang or arm-none-eabi-gcc |
+| Toolchain (patching only) | `arm-none-eabi-ld`/`objcopy`, plus **clang ≤ 17** or arm-none-eabi-gcc |
+
+On Linux, ADFU needs the device readable without root:
+
+```
+# /etc/udev/rules.d/99-actions-adfu.rules
+SUBSYSTEM=="usb", ATTR{idVendor}=="10d6", MODE="0666", TAG+="uaccess"
+```
+
+The clang ceiling is not cosmetic. The reader is compiled `-O2` into a 52 KB
+hole and fills 99.5% of it, so the compiler version is load-bearing: clang-15
+builds 52,978 bytes, 16 gives 53,050, 17 gives 53,106, and **18 overflows** at
+53,519. Every version builds at ~46,100 with `-Os` if that headroom is ever
+needed — but that is different machine code, and has to be re-validated on the
+device before it is trusted.
 
 Serial is not optional for development. **The only recovery from a bad write
 requires the Zephyr shell to start.** Keep the UART wired whenever you write.
+
+### Choosing the serial port
+
+The same adapter is `/dev/ttyUSB0` on Linux, `/dev/cu.usbserial-*` on macOS and
+`COM3` on Windows, so the tools do not hardcode a path. `tools/serialport.py`
+asks pyserial what is attached and picks the USB-serial adapter, in this order:
+
+1. `--port` / `-p` on the command line — accepted by every tool that opens the
+   UART, including the ones with no other arguments
+2. `$BF07_PORT`
+3. autodetect
+
+The value may be a device path *or* any substring of the port's serial number
+or description, which is the portable form: `--port AV7K776E` selects one
+specific cable on all three operating systems, where a device path cannot.
+
+Autodetect refuses to choose between two candidates rather than guess, because
+picking the wrong adapter means writing flash commands at something that is not
+the reader. If it stops with a list, name one. Note that a Nordic PPK2 — often
+on the bench precisely when this board is being measured — presents two CDC-ACM
+ports; it is filtered out by USB VID, but other instruments may not be.
+
+Run `python3 tools/serialport.py` to see what it finds and what it would pick.
 
 ## The two connections
 
