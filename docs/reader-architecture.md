@@ -148,6 +148,8 @@ finished reader actually does, and the measurements that shaped it.
 
 | address | vendor role | our hook | thread |
 |---|---|---|---|
+| `0x1004a1fc` | container top | patched to `26` (stock `28`) | display |
+| `0x1004a222` | container height | patched to `264-36 = 228` (stock `-35`) | display |
 | `0x1004a288` | line height (`content_h / 8`) | `hook()` | display |
 | `0x100493a8` | the one call to the render function | `render_hook()` | display |
 | `0x1004c002` | `msg_manager_receive_msg` at the top of the loop | `prepare_hook()` | **ebook** |
@@ -1221,9 +1223,32 @@ or the last space. `seven-function` / `force-feedback` were stranding 70-83px of
 empty line. The letter/digit test excludes dashes used as punctuation, leading
 minus signs, and the `--` em-dash spelling.
 
+### Line pitch and container height
+
+Pitch is **19px**: `hook()` adds `PITCH` (18) and the caller's own `+1` makes
+the advance. The container is **228px** tall at y=26, so the twelve lines end
+at y=253 and the bottom 10px of the 264px screen stay clear -- at the previous
+20px pitch the container was 240px at y=24 and the last line sat flush against
+the bottom edge.
+
+The two constants are independent. Top is `movs r2, #CONT_TOP` feeding
+`lv_obj_set_pos(obj, 4, y)`; height is `subs r0, #CONT_SUB` applied to the
+value `0x100f9014` returns (264), feeding `lv_obj_set_size`. Moving the block
+down is `CONT_TOP` alone and does not resize it.
+
+**The container height must stay an exact multiple of the pitch.** The
+container has EIGHTEEN label children; we fill twelve, and the rest still hold
+the vendor's text. They are invisible only because label 12 begins exactly at
+the container's bottom edge. Any pitch reduction without the matching height
+reduction slides label 12 inside, and a thirteenth line of stale vendor text
+appears -- the same failure as the old "8 lines, then the bottom 4 redraw".
+
+Both constants live in `tools/patchset.py` and `tools/mkflash.py` as
+`CONT_TOP` / `CONT_SUB`, and must agree in both.
+
 ### Vertical position
 
-The font ships `base_line = -2` with `line_height = 17` in a 20px label. LVGL
+The font ships `base_line = -2` with `line_height = 17` in a 19px label. LVGL
 draws each glyph at `y + (line_height - base_line) - box_h - ofs_y`, so a
 negative base line pushes every glyph **down**: descenders clipped at the bottom
 while 2px went unused above. Setting `base_line = 0` lifts the text 2px and
@@ -1323,7 +1348,7 @@ was the deciding constraint, since the LVGL heap could not spare 8 KB, let alone
 |---|---|
 | English | 4,938 patterns, 26,611 bytes packed |
 | French | 1,216 patterns, 8,285 bytes packed |
-| reader total | 52,914 bytes of a 53,248-byte window |
+| reader total | 52,978 bytes of a 53,248-byte window |
 
 ### The tables are separate, deliberately
 

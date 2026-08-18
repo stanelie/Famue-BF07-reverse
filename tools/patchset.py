@@ -14,7 +14,7 @@ What gets written:
 Every one is documented in docs/reader-architecture.md:
 
   0x1004a1fc  container top      -> 24
-  0x1004a222  container height   -> 24 subtracted
+  0x1004a222  container height   -> 36 subtracted (264-36 = 228)
   0x1004a288  line height        -> our pitch (drawing position only)
   0x1004c002  message receive    -> our page preparation (ebook thread)
   0x100493b2  timer TAIL         -> our render pass (reached unconditionally)
@@ -34,7 +34,7 @@ import patch_lines as P                                          # noqa: E402
 
 FW0, XIP = 0x14000, 0x10000000
 CODE_BASE, CODE_LIMIT = 0x1e7000, 0x1f4000
-CONT_TOP, CONT_SUB = 24, 24
+CONT_TOP, CONT_SUB = 26, 36   # container y=26, height=264-36=228 (12 * 19px)
 
 # Symbol name -> the site it is branched from, and how.
 #

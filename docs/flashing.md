@@ -96,6 +96,32 @@ this wrong is why every command in this project's first weeks returned CSW statu
 Then the flash commands are available: `rs` read sector, `es` erase sector,
 `ws` write sector.
 
+### Never `set_configuration()` after the handoff
+
+The payload owns the USB endpoints from `cd 20` onward. Calling pyusb's
+`set_configuration()` after that point issues a `SET_CONFIGURATION`, which
+resets the endpoint state out from under it: the `is` that must follow the exec
+then fails, and every raw packet after it returns `EIO`. On Linux the kernel has
+already configured the device at enumeration, so the call is redundant as well
+as destructive. macOS tolerated it, which is why this survived unnoticed until
+the project moved hosts.
+
+Configure only if nothing has:
+
+```python
+try:
+    d.get_active_configuration()
+except usb.core.USBError:
+    d.set_configuration()
+```
+
+This bit twice, because the *liveness probe* made the same call. `payload_alive()`
+destroyed the payload it was probing, always reported dead, and the flasher
+compensated by re-uploading unconditionally. That workaround then failed the
+other way: uploading over a live payload sends CBW framing to something that no
+longer speaks it, and the upload EIOs. Fix the probe and both directions come
+right -- **a workaround for a lying test outlives the bug and becomes the bug.**
+
 ## The five rules of writing
 
 These are hard constraints, each found by a failure:

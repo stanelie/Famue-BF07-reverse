@@ -17,7 +17,7 @@
 #include "fw.h"
 #include "hyphen.h"
 
-#define PITCH     19        /* +1 base in the caller = 20px pitch */
+#define PITCH     18        /* +1 base in the caller = 19px pitch */
 /* We draw 12; the vendor is still TOLD 8 (VENDOR_LINES_PER_PAGE).
  *
  * These no longer have to agree. Page turns now come from the touch driver and
@@ -25,9 +25,15 @@
  * consume -- it only has to stay a value it can service, so that its decode
  * does not overflow its 8-record page context and its paginator terminates.
  *
- * The container holds 12 labels (our geometry patch makes it 240px at 20px
+ * The container holds 12 labels (our geometry patch makes it 228px at 19px
  * pitch). Writing only 8 left the bottom four showing the vendor's stale text:
- * the reported "8 lines, then the bottom 4 redraw". */
+ * the reported "8 lines, then the bottom 4 redraw".
+ *
+ * The container height must stay an exact multiple of the pitch. It really has
+ * EIGHTEEN label children and we fill twelve; the rest still hold the vendor's
+ * text. They are invisible only because label 12 starts exactly at the bottom
+ * edge. Shrink the pitch without shrinking the container and label 12 moves
+ * inside it -- a thirteenth line of stale vendor text appears. */
 #define INJ_LINES 12
 #define MAXW      44        /* buffer per displayed line          */
 #define CPL       25        /* fallback characters per line       */

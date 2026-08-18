@@ -5,7 +5,7 @@ _BACKUPS = os.environ.get("BF07_BACKUPS", os.path.join(os.path.dirname(_ROOT), "
 sys.path.insert(0, os.path.join(os.environ.get('BF07_ROOT', os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'tools'))
 import patch_lines as P
 FW0=0x14000; XIP=0x10000000
-CONT_TOP=24; CONT_SUB=24   # container y=12, height=264-12=252
+CONT_TOP=26; CONT_SUB=36   # container y=26, height=264-36=228 (12 * 19px)
 out=sys.argv[1]; hooks=eval(sys.argv[2])   # {site: symbol_addr}
 bwh=eval(sys.argv[3]) if len(sys.argv)>3 else {}  # sites needing B.W not BL
 # Plain 32-bit data patches {xip_addr: value} -- for vendor TABLES, not code.

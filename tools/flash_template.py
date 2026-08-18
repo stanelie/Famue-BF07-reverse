@@ -39,10 +39,13 @@ def payload_alive():
     dv = usb.core.find(idVendor=0x10D6, idProduct=0x10D6)
     if dv is None:
         return False
+    # No set_configuration() -- see the note at the main device open. Probing a
+    # LIVE payload with it is what made this detector destroy the thing it was
+    # detecting, so it always reported dead and the caller always re-uploaded.
     try:
+        dv.get_active_configuration()
+    except usb.core.USBError:
         dv.set_configuration()
-    except Exception:
-        pass
     try:
         p = bytearray(16)
         p[0:2] = b'ic'
@@ -85,10 +88,16 @@ if not ALREADY:
     time.sleep(2.5)
 
 d = usb.core.find(idVendor=0x10D6, idProduct=0x10D6)
+# Do NOT set_configuration() here. The payload has just taken over USB, and on
+# Linux the kernel already configured the device at enumeration -- so this call
+# is redundant AND destructive: the redundant SET_CONFIGURATION resets the
+# endpoint state the payload owns, and every raw packet after it fails with
+# EIO ("is failed"). macOS tolerated it, which is why this only appeared on the
+# move to Linux. Configure only if nothing has configured it yet.
 try:
+    d.get_active_configuration()
+except usb.core.USBError:
     d.set_configuration()
-except Exception:
-    pass
 
 
 def drain(n=15):
