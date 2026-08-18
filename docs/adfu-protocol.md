@@ -1451,3 +1451,85 @@ costing a power cycle. The first attempt did exactly that.
 No working soft reboot found. Since each blind opcode probe costs a physical
 press, the better path is to stop needing ADFU for iteration -- see the RAM
 trampoline plan in reader-architecture.md.
+
+## The boot ROM's own UART download path (and how a blank chip is flashed)
+
+A blank chip has no Zephyr, no mbrec and no ADFU-flag to set, so the factory
+must have a path that depends on nothing in flash. It does, it is in mask ROM,
+and both halves of it are documented by the vendor.
+
+`brom_interface.h` in the public SDK declares a boot-source enum --
+`BOOT_TYPE_SNOR, SNAND, SDMMC, **UART**, **USB**, POWERON, EFUSE` -- and two
+launchers in the BROM API table at `0x188`:
+
+```
++0x10  p_brom_uart_launcher(int)
++0x14  p_adfu_launcher(void)
+```
+
+Both are present on this device, read live from `0x188`:
+
+```
++0x10  brom_uart_launcher = 0x0000489d
++0x14  adfu_launcher      = 0x00001a51
+```
+
+Earlier notes recorded this table without those two entries. They are real.
+
+### The boot sequence, from the BROM dump
+
+```
+02be8  boot_main:
+         bl   0xba0          ; read a boot-config word (efuse/strapping)
+         movs r0, #0
+         bl   0x489c         ; UART LAUNCHER(0)  -- unconditional, every boot
+         bl   0x1b0c         ; attempt storage boot (NOR / NAND / card)
+         ...                 ; falling through here means storage boot FAILED
+         movs r0, #2
+         bl   0x489c         ; UART LAUNCHER(2)
+         bl   0x19c0         ; -> ADFU LAUNCHER
+         movs r0, #2
+         bl   0x489c         ; UART LAUNCHER(2)
+         bl   0x19c0         ; -> ADFU LAUNCHER      (it loops)
+```
+
+So when there is nothing bootable in flash, the ROM alternates between the UART
+launcher and the USB ADFU launcher indefinitely. **That is the manufacturing
+path**, and it cannot be erased: a virgin or bricked-bootloader part sits in
+that loop waiting for either transport.
+
+The UART side is backed by a real driver, not printk. `uart_read(buf, len,
+timeout)` at `0x13e0` derives a per-byte timeout from the baud register, polls
+for data, stores each byte and returns the count; there is a transmit path at
+`0x1588`, and a driver vtable at `0x45d4`. UART0 (`0x40038000`) is the second
+most-referenced peripheral in the ROM, 21 literals against 33 for USB.
+
+### Why this does NOT rescue a trashed `fw0_sys`
+
+The ROM only reaches its launchers when **storage boot fails**. A corrupt
+`fw0_sys` does not fail storage boot: mbrec is intact, loads, runs, and jumps
+into `fw0_sys` without checking it (`app offset=0x14000 ,crc=0`). The ROM never
+gets a second look.
+
+The practical split:
+
+| what is trashed | caught by | recoverable |
+|---|---|---|
+| `fw0_boot` / mbrec | boot ROM -- storage boot fails | **yes**, UART or USB ADFU |
+| `fw0_sys` (Zephyr) | nobody | **no** -- see *Recovery* in [flashing.md](flashing.md) |
+
+Which is the opposite of the intuition that the bootloader is the delicate part.
+
+### What is still unknown
+
+The `uart_launcher(0)` call happens on **every** boot, before storage is tried,
+which implies a brief early window where the ROM listens for something. The
+argument (0 / 1 / 2) presumably selects how long it waits or which pins. Not yet
+known: the baud rate, the framing, the magic sequence that makes it engage, or
+whether it accepts a payload the way ADFU accepts `adfus_u_go.bin`. Since it is
+called a *launcher*, by analogy with `p_adfu_launcher` it most likely receives
+code into RAM and branches to it -- which would make it a complete recovery
+transport, needing only the UART pads.
+
+Establishing that is the single highest-value thing left for making this device
+un-brickable.
