@@ -53,6 +53,81 @@ SoC produced, erase, write that ciphertext raw, read it back identical.
 `restore` compares every sector against your backup and rewrites only what
 differs, then reads each one back to confirm.
 
+## Two kinds of backup, and which one rescues what
+
+There are two things you can capture off a device, and they are **not**
+interchangeable. Take the first one.
+
+| | encrypted backup (`bf07.py backup`) | plaintext dump (`fw_code_full.bin`) |
+|---|---|---|
+| what it is | the whole 4 MB flash, as the device stores it | `fw0_sys` only, decrypted |
+| how you get it | ADFU, USB only, no serial | needs the **running** firmware to read decrypted XIP |
+| restores with | `restore -b` | `restore --plain` |
+| covers | **everything** | 1.9 MB of 4 MB -- **46%** |
+| portable to another unit | only if the flash key is shared (unknown) | **yes** -- the target SoC re-encrypts on write |
+
+### What the plaintext dump does *not* contain
+
+`fw0_sys` runs `0x14000`-`0x1f4000`. Everything else -- **2.2 MB, 53% of the
+flash** -- is absent from a plaintext dump:
+
+| region | size | why you might want it |
+|---|---|---|
+| `fw0_boot` / `fw1_boot` / params | 16 KB | the bootloader that performs the TX/RX-short rescue |
+| `fw0_rec` | 64 KB | the recovery program |
+| `fw0_sdfs` x2 | 2.1 MB | fonts and UI resources |
+| `nvram_fa` / `nvram_us` | 20 KB | **per-device** settings -- you would not want another unit's |
+
+### Prefer the encrypted backup
+
+Three reasons, beyond coverage:
+
+* **It is exact.** Verbatim ciphertext writes, no re-encryption round trip, and
+  no reliance on working out which blocks were erased (see below).
+* **It is far cheaper to apply.** `restore -b` diffs first and rewrites only the
+  sectors that differ -- typically the ~21 that were patched. `restore --plain`
+  rewrites all 480 unconditionally: roughly 23x the writes and the flash wear
+  for the same result.
+* **It covers failures the plaintext cannot** -- a damaged font resource, a bad
+  nvram, anything outside `fw0_sys`.
+
+### So when is `--plain` right?
+
+When a device has **no backup of its own** -- classically, you have two units and
+broke one while developing. Dump the plaintext from the working one, short TX/RX
+on the broken one to force ADFU, and restore. No vendor binary changes hands:
+it is your own hardware at both ends.
+
+There is a happy accident that makes this enough for *our* failure modes: the
+tooling here only ever writes `fw0_sys` (nothing below `0x14000`, nothing above
+`0x1f4000`), so the only thing it can break is exactly the part a plaintext dump
+covers.
+
+### The catch a plaintext dump carries
+
+A plaintext dump is read through the XIP decryptor, which cheerfully decrypts
+**erased** flash into a fixed 32-byte block of garbage -- so the dump cannot tell
+a hole from data. Writing it back verbatim would fill every hole with encrypted
+rubbish, including the 53 KB the reader installs into.
+
+`restore --plain` handles this: it finds that block by dominance (1736
+occurrences against a runner-up of 181 in the reference image) and leaves those
+blocks erased, while still writing genuine `0xFF` *data* blocks, of which there
+are five. Checked block by block against a ciphertext backup, the result
+reproduces the real erased/programmed layout exactly -- 59,704 written against
+59,704 programmed, no disagreements.
+
+The marker is `decrypt(0xFF x 32)` under **that device's** key, so it is derived
+from the image rather than hardcoded.
+
+### A cheap way to settle whether the key is per-device
+
+Nobody here has established whether the flash key differs between units, because
+nothing needed to know. If you ever have two devices, dump plaintext from each
+and compare that erased-flash marker: identical means a shared key and
+interchangeable ciphertext backups, different means per-device keys. One
+comparison, no writes.
+
 ## Installing without serial: the patch file
 
 `install --patch reader-patch.bin` needs **ADFU only** -- no serial cable, no
