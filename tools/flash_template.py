@@ -47,12 +47,18 @@ def payload_alive():
     except usb.core.USBError:
         dv.set_configuration()
     try:
+        # Ask `is` and require the payload's 0xAA. The old test sent `ic` and
+        # accepted ANY reply, but the BOOT ROM also replies to a malformed
+        # 16-byte packet -- it speaks 31-byte CBWs -- so a bare ROM read as
+        # "payload already running", the upload was skipped, and the `is`
+        # assert below then failed. Latent until build.sh stopped forcing a
+        # re-upload; check WHAT came back, not that something did.
         p = bytearray(16)
-        p[0:2] = b'ic'
-        struct.pack_into("<I", p, 4, 64)
+        p[0:2] = b'is'
+        struct.pack_into("<I", p, 4, 16)
         struct.pack_into("<I", p, 8, 0)
         dv.write(0x02, bytes(p), 1500)
-        return len(bytes(dv.read(0x81, 64, 1500))) > 0
+        return bytes(dv.read(0x81, 4, 1500))[:1] == b'\xaa'
     except Exception:
         return False
     finally:
