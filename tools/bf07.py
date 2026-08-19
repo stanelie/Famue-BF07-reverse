@@ -46,6 +46,7 @@ import usb.util
 VID, PID_NORMAL, PID_ADFU = 0x10D6, 0xB00B, 0x10D6
 FLASH_SIZE = 0x400000
 FW0_START, FW0_END, SECTOR = 0x14000, 0x200000, 0x1000
+FW0_SYS_END = 0x1F4000          # fw0_sdfs begins here
 HERE = os.path.dirname(os.path.abspath(__file__))
 PAYLOAD = os.environ.get("BF07_PAYLOAD", os.path.join(HERE, os.pardir, "reference", "adfus_u_go.bin"))
 
@@ -265,9 +266,14 @@ class Device:
         """
         self._write(addr, data, encrypt=False)
 
-    def write_plain(self, addr, data):
-        """Bit 31 SET: the SoC encrypts on the way in."""
-        self._write(addr, data, encrypt=True)
+    def write_plain(self, addr, data, skip_blank=True):
+        """Bit 31 SET: the SoC encrypts on the way in.
+
+        skip_blank=False writes 0xFF blocks too. Needed only by a faithful
+        full-image restore, where a 0xFF block may be genuine DATA rather than
+        padding -- see restore_plain().
+        """
+        self._write(addr, data, encrypt=True, skip_blank=skip_blank)
 
     def write_plain_checked(self, addr, data, attempts=4):
         """write_plain, then confirm the block actually programmed.
@@ -286,14 +292,14 @@ class Device:
                 return
         raise SystemExit(f"block at 0x{addr:06x} would not program")
 
-    def _write(self, addr, data, encrypt):
+    def _write(self, addr, data, encrypt, skip_blank=True):
         blank = b"\xff" * 32
         for off in range(0, len(data), 32):          # 32-byte transactions only
             block = data[off:off + 32]
             # An erased sector is already 0xFF. Writing 0xFF as PLAINTEXT would
             # encrypt it into ciphertext garbage -- padding after the reader
             # showed up as 2 extra changed blocks, which is how this was caught.
-            if block == blank:
+            if block == blank and skip_blank:
                 continue
             a = addr + off
             ack = self.cmd(b"ws", 32, a | (1 << 31) if encrypt else a,
@@ -427,7 +433,105 @@ DANGER_CLOSED = ("verified -- safe to disconnect now. "
                  "Power-cycle the device to boot it.")
 
 
+def erased_sentinel(img):
+    """The plaintext value that ERASED flash decrypts to, found in the image.
+
+    A plaintext dump is read through the XIP decryptor, which happily decrypts
+    erased flash into a fixed 32-byte block of garbage. So a dump cannot tell
+    "erased" from "data" by inspection, and writing it back verbatim would fill
+    every hole with encrypted rubbish -- including the 53 KB the reader is
+    installed into, which `install --patch` then refuses because blocks that
+    should be erased are not.
+
+    Measured on the reference dump: one distinct block, 1736 occurrences, and it
+    never appears where flash is genuinely programmed. It is the device's own
+    decryption of 0xFF, so a donor image carries the DONOR's value -- hence
+    deriving it from the image rather than hardcoding it. Identification is by
+    dominance: 1736 against a runner-up of 181, a 9.6x margin.
+    """
+    import collections
+    c = collections.Counter(img[o:o + 32] for o in range(0, len(img), 32))
+    top = c.most_common(2)
+    if len(top) < 2:
+        return None
+    (blk, n1), (_, n2) = top
+    if blk == b"\xff" * 32 or n1 < 5 * max(n2, 1):
+        return None
+    return blk
+
+
+def restore_plain(args):
+    """Rewrite fw0_sys from a PLAINTEXT image -- for a device with no backup.
+
+    Why this works without knowing the flash key: writes with bit 31 set hand
+    plaintext to the SoC, which encrypts it with *this* device's own key. So a
+    decrypted image captured from a second, working unit installs correctly
+    here, whatever the key situation is. The device's own ciphertext backup is
+    the better source when it exists (`restore -b`), because it needs no
+    re-encryption at all; this is the path for the unit you broke while
+    developing, restored from the one you did not.
+
+    Only `fw0_sys` is touched. mbrec, the recovery partition and the nvram
+    partitions are outside the range and are never written, which is also why
+    the TX/RX-short rescue keeps working no matter how this goes.
+    """
+    img = open(args.plain, "rb").read()
+    if len(img) % SECTOR:
+        raise SystemExit(f"{args.plain} is {len(img)} bytes -- not a whole "
+                         f"number of {SECTOR}-byte sectors")
+    end = FW0_START + len(img)
+    if end > FW0_SYS_END:
+        raise SystemExit(f"image runs to 0x{end:06x}, past fw0_sys "
+                         f"(0x{FW0_SYS_END:06x}); refusing")
+    n = len(img) // SECTOR
+    print(f"restoring {n} sector(s) of fw0_sys from plaintext "
+          f"0x{FW0_START:06x}-0x{end:06x}")
+    blank = b"\xff" * 32
+    sentinel = None if args.no_erase_detect else erased_sentinel(img)
+    if sentinel:
+        holes = sum(1 for i in range(0, len(img), 32)
+                    if img[i:i + 32] == sentinel)
+        print(f"erased-flash marker detected: {sentinel[:8].hex(' ')}... "
+              f"({holes} block(s) will be LEFT ERASED)")
+    else:
+        print("no erased-flash marker detected -- writing every block. If this "
+              "image came from an XIP dump, holes will be filled with garbage.")
+    d = connect()
+    print(DANGER_OPEN)
+    for i in range(0, len(img), SECTOR):
+        addr = FW0_START + i
+        sec = img[i:i + SECTOR]
+        # A block is erased flash IFF it equals the sentinel. Everything else is
+        # real data and must be written -- INCLUDING 0xFF blocks, which are
+        # genuine content here, not padding. Five such blocks exist in the
+        # reference image, and skipping them would leave them decrypting to
+        # sentinel garbage instead of 0xFF.
+        want = [o for o in range(0, SECTOR, 32)
+                if not (sentinel and sec[o:o + 32] == sentinel)]
+        for attempt in range(4):
+            d.erase(addr)
+            for o in want:
+                d.write_plain(addr + o, sec[o:o + 32], skip_blank=False)
+            back = d.read(addr, SECTOR)
+            # An ACK is not proof of a program: a block we wrote that reads back
+            # erased was never programmed. Check what it IS.
+            lost = [o for o in want if back[o:o + 32] == blank]
+            if not lost:
+                break
+        else:
+            raise SystemExit(
+                f"0x{addr:06x}: {len(lost)} block(s) never programmed after 4 "
+                f"attempts. STAY IN ADFU, do not power off.")
+        if (i // SECTOR) % 32 == 0 or i + SECTOR >= len(img):
+            print(f"  0x{addr:06x}  {i // SECTOR + 1}/{n}", flush=True)
+    print(DANGER_CLOSED)
+
+
 def cmd_restore(args):
+    if args.plain:
+        return restore_plain(args)
+    if not args.backup:
+        raise SystemExit("give -b <backup> (preferred) or --plain <image>")
     backup = open(args.backup, "rb").read()
     if len(backup) < FW0_END:
         raise SystemExit("backup is too small to be a full image")
@@ -593,7 +697,14 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("backup"); p.add_argument("-o", "--out", default="bf07-backup.bin"); p.set_defaults(fn=cmd_backup)
     p = sub.add_parser("verify"); p.add_argument("-b", "--backup", required=True); p.set_defaults(fn=cmd_verify)
-    p = sub.add_parser("restore"); p.add_argument("-b", "--backup", required=True); p.set_defaults(fn=cmd_restore)
+    p = sub.add_parser("restore")
+    p.add_argument("-b", "--backup", help="this device's own backup (preferred)")
+    p.add_argument("--plain", help="plaintext fw0_sys image, e.g. captured from "
+                                   "a second working unit (no backup needed)")
+    p.add_argument("--no-erase-detect", action="store_true",
+                   help="write every block, even ones that look like erased "
+                        "flash decrypted through XIP (rarely correct)")
+    p.set_defaults(fn=cmd_restore)
     p = sub.add_parser("install")
     p.add_argument("-b", "--backup", required=True)
     p.add_argument("--patch", help="reader-patch.bin (ADFU only, no serial/image)")
