@@ -247,20 +247,40 @@ from the backup. Reverting to stock has been done twice with zero differing bloc
 | device boots to a crash loop | bad write, shell still starts | hammer `dbg reboot adfu` during the boot cycles |
 | nothing on serial at all | write broke pre-shell init | see below — assume not recoverable |
 
-### There is no automatic fallback. Read this before writing.
+### Recovery of last resort: short TX and RX, then reset
 
-Four plausible safety nets are all closed on this device, each checked rather
-than assumed:
+**Short the debug UART's TX and RX pads together and press reset.** The device
+enters ADFU instead of booting; remove the short afterwards. Confirmed on
+hardware.
+
+This is the bootloader's `check_adfu_connect()` -- it drives `0x55aa55aa` out of
+one pin and reads it back on the other, and the short supplies the loopback. It
+runs **before** mbrec reads the partition table and **before** it jumps into
+`fw0_sys`: on a shorted boot the log stops dead after `txrx`, with none of the
+`nor:` / partition table / `Firmware Version` / `boot_nor` lines a normal boot
+prints.
+
+That makes it the answer to the one failure nothing else catches. `fw0_sys` is
+booted without any integrity check (`crc=0`), so a bad write leaves a device
+that hangs -- but this trigger still reaches ADFU, and
+`bf07.py restore -b <backup>` puts it back. It needs a jumper and the reset
+button, nothing else: no working firmware, no SD card, no host software getting
+in first, and no dependence on the ADFU flag (which does not survive a power
+cycle).
+
+Keep it in mind before any write, and keep a verified backup.
+
+### The other fallbacks are closed
+
+Checked rather than assumed:
 
 * **mbrec does not validate the system image.** The boot log prints
   `app offset=0x14000 ,crc=0`, and that `%d` is `crc_is_enabled` in
   `soc_boot.c`. A corrupt `fw0_sys` is jumped into regardless. Nothing detects
   it, and nothing routes to OTA or ADFU.
-* **No serial-loopback ADFU.** `check_adfu_connect()` bit-bangs `0x55aa55aa` out
-  on TX and reads it back on RX, so a wire between two pads would force ADFU
-  from the bootloader, before any application code. But `check txrx adfu` never
-  appears in the boot log: `CONFIG_TXRX_ADFU` is compiled out. Every reference
-  board in the SDK also ships it as `0`. It would be GPIO_28/29 if enabled.
+* ~~No serial-loopback ADFU.~~ **This one works** -- see below. It was wrongly
+  written off because the SDK's `check txrx adfu` string never appeared in a
+  boot log; this build prints only a short `txrx`, and only on success.
 * **No ADFU button** — `CONFIG_GPIO_ADFU` likewise disabled.
 * **The recovery app runs, but has no storage backend.** `fw0_rec` executes on
   every boot, then: `dev MMC_0 not found` -> `cannot found storage device sd`
@@ -290,7 +310,8 @@ with a deliberately CRC-invalid `ota.bin` was placed in the user slot: the boot
 log did not change by one character. `dev MMC_0 not found` is a missing driver
 in mbrec, not a missing card, so no slot and no card format will help.
 
-Treat the board as having no automatic recovery. Recovery is ADFU or nothing.
+There is no *automatic* recovery. But there is a manual one that always works:
+the TX/RX short above.
 
 ### What to rely on instead: the ADFU flag
 

@@ -24,15 +24,17 @@ ADFU is **not** a shortcut to dumping firmware.
 Recovery from ADFU requires the physical reset button. **Never enter ADFU without
 physical access to the device.**
 
-## There is no hardware ADFU button
+## There is no hardware ADFU *button* — but the TX/RX short works
 
 Every button and combination was tried while applying USB power, across two sessions —
-always normal boot (`10d6:b00b`), never `10d6:10d6`.
+always normal boot (`10d6:b00b`), never `10d6:10d6`. So `CONFIG_GPIO_ADFU` is indeed
+not built.
 
-The SDK explains it: `check_adfu()` supports **two** mechanisms —
-`CONFIG_TXRX_ADFU` (serial-line based) and `CONFIG_GPIO_ADFU` (a button). This board
-evidently isn't built with the button variant. `zephyr/tools/jlink_script/uart/uart_adfu.txt`
-contains literally `dbg reboot adfu` — the UART shell command *is* the documented method.
+`CONFIG_TXRX_ADFU` **is**, and it works. See *Forcing ADFU by shorting TX and RX*
+below. An earlier version of this entry claimed otherwise, on the grounds that the
+SDK's `printk("check txrx adfu\n")` never appeared in a boot log. That was absence
+of a *string*, not absence of the *feature*: this build emits only a short `txrx`
+message, and only when the check succeeds.
 
 ## SD-card OTA never runs on this board
 
@@ -251,3 +253,50 @@ compiled in to read from.
 That closes the fourth fallback for real, on measurement rather than inference.
 Recovery on this board is ADFU or nothing, and the ADFU flag does not survive a
 power cycle — see *Recovery* in [flashing.md](flashing.md).
+
+
+## Forcing ADFU by shorting TX and RX — CONFIRMED ON HARDWARE
+
+**Short the debug UART's TX and RX pads together and press reset.** The device
+enters ADFU (`10d6:10d6`) instead of booting. Remove the short afterwards.
+
+This is `check_adfu_connect()` in the bootloader: it drives `0x55aa55aa` out of
+one pin and reads it back on the other, and a match means "enter ADFU". The
+loopback is exactly what the short provides.
+
+Captured receive-only at 2,000,000 baud while the short was applied and reset
+pressed:
+
+```
+Ver1.1-mbrec (build Aug 26 2022 11:18:41)
+CHG_CTL_SVCC: 0x1c986f
+VOUT_CTL0: 0x80589480
+dvfs= 0xf
+txrx
+<silence -- device is in ADFU>
+```
+
+**What is absent from that log is the point.** A normal boot continues with
+`nor:`, the partition table, `Firmware Version`, `main I: ota recovery main`,
+and finally `app offset=0x14000 ,crc=0` / `boot_nor`. On the shorted boot **none
+of those appear**. mbrec diverts to ADFU immediately after the check, *before*
+it reads the partition table and *before* it jumps into `fw0_sys`.
+
+### This is the recovery path, and it closes the gap
+
+`fw0_sys` is the one thing on this board with no automatic protection: mbrec
+boots it without checking (`crc=0`), so a corrupt application simply hangs. But
+`check_adfu()` runs **before** that jump. So:
+
+**A device with a destroyed `fw0_sys` can still be recovered — short TX/RX,
+press reset, land in ADFU, and `bf07.py restore -b <backup>`.**
+
+It needs only a jumper across two pads and the reset button; no host software
+has to reach the device first, no serial adapter is required for the trigger
+itself, and it does not depend on `fw0_sys`, the SD card, or the ADFU flag
+(which does not survive a power cycle).
+
+Not established: whether this still works if **mbrec itself** is destroyed. The
+check lives in mbrec, so probably not — but that case is the one the boot ROM
+already catches, because storage boot fails and the ROM falls into its ADFU/UART
+launcher loop.
