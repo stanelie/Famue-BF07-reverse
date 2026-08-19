@@ -1653,8 +1653,28 @@ for a valid reply frame rather than merely whether the device booted, produced
 nothing: 2959 bytes, all of it the device's own 2,000,000-baud boot output
 sampled at 115200, and the shell returned normally.
 
-So the rate is no longer the unknown. The remaining untested hypothesis is that
-a **watchdog reset does not take the same ROM path as a cold power-on** -- the
-`0x2be8` sequence is entered after the reboot type is consumed, and a
-`GOTO_SYSTEM` warm reset may bypass the launcher that a cold boot runs. Testing
-that needs the knock running across a physical power cycle.
+So the rate is no longer the unknown.
+
+**Tested across a physical reset, at 115200: still not engaged.** The knock was
+streamed continuously while the reset button was pressed. The reset is
+unambiguous in the capture -- a 385 ms silence at t=9.727 s, then a 200-byte
+burst of aliased 2,000,000-baud boot log, then the shell's echo pattern
+returning at t=10.34 s. That is a normal boot straight through to Zephyr, in
+about 600 ms. Zero frames matching the ROM's own format (6 bytes, `cmd` in
+`{0x63,0x64,0x6f}`, valid header checksum) appear anywhere in the window.
+
+An earlier attempt at this produced no reset at all -- 100 s of continuous echo
+with no silence longer than 377 ms, while USB was off the bus for 121 s. The
+UART staying live through a USB disconnect means the SoC never went down.
+**Unplugging USB does not reset this device; the reset button does.** Any future
+knock attempt must show the silence gap before its result means anything.
+
+**Where this stops.** The pins, the window, the frame format, the command
+letters and the baud are all established, and none of them is the obstacle. The
+one thing still unexamined is the gate: `boot_main` reads a boot-config word at
+`0xba0` and tests bits of it (`lsls #0x15`, `lsls #0x14`) around the launcher
+calls, so the probe may be conditioned on an efuse or strapping value that is
+simply not set on a production unit. Establishing that means reversing `0xba0`
+and finding where that word comes from -- a deeper dig than the recovery payoff
+currently justifies, and worth recording as the next thread rather than pulling
+it now.
