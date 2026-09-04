@@ -57,6 +57,7 @@ open an issue to have them removed.
 | [docs/adfu-protocol.md](docs/adfu-protocol.md) | LARK ADFU USB protocol, recovered from the vendor tool |
 | [docs/actions-formats.md](docs/actions-formats.md) | Actions `.fw` package formats and how to decrypt them |
 | [docs/sdk.md](docs/sdk.md) | The official Actions LARK SDK (public!) and what it proves |
+| [docs/second-firmware-build.md](docs/second-firmware-build.md) | **The second firmware build** — why a patch is not portable between them |
 | [docs/dead-ends.md](docs/dead-ends.md) | Things that don't work, and why — read this first |
 
 ## Tools
@@ -84,6 +85,7 @@ open an issue to have them removed.
 | [tools/mkfont.py](tools/mkfont.py) | Render any TTF into the device's LVGL bitmap font format |
 | [tools/set_menu_label.py](tools/set_menu_label.py) | Rewrite a menu string in the NOR resource (the "Custom" label) |
 | [tools/mkhyphen.py](tools/mkhyphen.py) | Pack Knuth-Liang hyphenation patterns, with a Python reference |
+| [tools/retarget.py](tools/retarget.py) | Relocate the reader's hook sites onto a different firmware build |
 | [fonts/](fonts/) | A ready-made user font (Literata, OFL) — drop it on the drive |
 | [reader/](reader/) | The replacement ebook reader — C, built for XIP `0x101d3000` |
 
