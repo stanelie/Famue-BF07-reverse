@@ -21,8 +21,10 @@ the only way back.
 | USB | libusb |
 | ADFU payload | from Actions' **public** LARK SDK — see [../reference/README.md](../reference/README.md) |
 
-Nothing here contains vendor firmware. Your firmware is read from your own
-device and stays on your machine.
+The tooling contains no vendor firmware — your firmware is read from your own
+device and stays on your machine. Stock images from the author's own units are
+archived separately under [../firmware/](../firmware/), as a fallback for a
+device with no backup of its own.
 
 ## How it gets into ADFU without a serial cable
 

@@ -1,137 +1,190 @@
-# Famue BF07 — Reverse Engineering Notes
+# Famue BF07 — better ebook reading, installed over USB
 
-Research notes and working code for the **Famue BF07**, a 2.7" e-ink e-reader / audio
-player. The goal was a better ebook reader; the result is a **replacement reader
-injected into the vendor firmware**.
+The Famue BF07 is a small e-ink e-reader. This installs a replacement ebook
+reader onto it — real reflow, hyphenation, page turns and a percent-seek
+driven by the touch screen — over the USB cable you already charge it with.
+**No case to open, no soldering.**
 
-Everything here was derived from a live device over its debug UART plus static analysis
-of publicly available files. No proprietary source was used, and no vendor firmware is
-redistributed here — the tools read firmware from the user's own device.
+## What you get
 
-> **Status: a replacement ebook reader is running on the device, and it is the reader.**
-> It owns the file handle, the wrapping, the pagination, the input, the drawing and the
-> progress display; the vendor's reader no longer decodes, draws or paginates. Twelve
-> reflowed lines per page, glyph widths measured with the renderer's own font, page
-> turns and a percent seek driven by touch input we read ourselves. Read/write/verify/
-> restore over ADFU all work, and reverting to stock is byte-exact.
-> See [docs/status.md](docs/status.md) for what is and isn't done, and
-> [docs/dead-ends.md](docs/dead-ends.md) for what was ruled out.
+- Real text reflow and hyphenation, instead of the stock reader's fixed
+  layout.
+- Page turns and a percent seek driven directly by the touch screen.
+- Roughly 3x faster page rendering (the stock reader's own decode/layout code
+  is switched off, not just hidden behind the new one).
+- An optional custom font, installed by dropping one file on the drive — no
+  tool needed for that part.
 
-## The device
+Everything here was reverse engineered from a device its owner already owned,
+using only its own debug UART and files Actions Semiconductor and lvgl
+publish themselves. See [research/](research/) for the full writeup of how
+this was figured out and how it works.
 
-| | |
+The installer above reads your firmware from your own device and ships none of
+its own. Stock firmware images from the author's units are archived under
+[research/firmware/](research/firmware/) as a recovery fallback, since the BF07
+looks to be out of production with no working vendor update path.
+
+## Before you start
+
+**Take a backup before you do anything else.** The install tool refuses to
+run without one, and it is the only way back if anything looks wrong
+afterward — restoring from it is byte-exact and has been proven on hardware
+repeatedly.
+
+This bundle installs a specific patch, built against **firmware
+`1.00_2506301055`**. It's very likely your device runs exactly this, since
+it's what these devices have shipped with — but if the reader doesn't start
+after the install step, or the device doesn't boot normally, **don't
+experiment further: run the restore command below immediately.** It puts the
+device back exactly as it was.
+
+Once the install step starts, **do not disconnect the USB cable or power off
+the device** until it prints that it has finished. Interrupting a normal
+`backup`, `verify`, or `restore` is harmless — nothing is being written. Only
+`install` (and `restore`, when it has something to fix) writes to the device,
+and each of those tells you clearly when it's safe to disconnect.
+
+## Prerequisites
+
+| OS | What you need |
 |---|---|
-| Product | Famue BF07 (board name `xlx_58120_bf07`, ODM "XLX") |
-| SoC | Actions Technology, **LARK** family (ARM Cortex-M) |
-| ADFU chip id | `0x2351` |
-| OS | **Zephyr RTOS 2.7.0** |
-| GUI | **LVGL v8** |
-| Display | 176 × 264 e-ink |
-| Flash | **4 MB SPI NOR**, Puya (JEDEC `0x85`), *inside the SoC package* |
-| Firmware ver | `1.00_2506301055`, version_code `0x00010000` |
+| **Linux** | Python 3.8+ with `pyusb` (`pip install pyusb`) and `libusb`. Add this udev rule so the tool can talk to the device without `sudo`: |
 
-## Documents
+```
+# /etc/udev/rules.d/99-actions-adfu.rules
+SUBSYSTEM=="usb", ATTR{idVendor}=="10d6", MODE="0666", TAG+="uaccess"
+```
 
-| Doc | Contents |
+Then `sudo udevadm control --reload-rules && sudo udevadm trigger`, and
+unplug/replug the device once. (No rule yet? Just run the commands below with
+`sudo`.)
+
+| OS | What you need |
 |---|---|
-| [docs/status.md](docs/status.md) | What works, what's blocked, what was ruled out |
-| [docs/user-tool.md](docs/user-tool.md) | **Back up and patch your own device over USB** — no case, no soldering |
-| [docs/flashing.md](docs/flashing.md) | **Backup, restore, patch** — the complete write path and its rules |
-| [docs/reader-architecture.md](docs/reader-architecture.md) | The replacement reader: threading, memory, pre-render, reflow |
-| [docs/reader-map.md](docs/reader-map.md) | Map of the vendor ebook app (lifecycle, scenes, pagination, input) |
-| [docs/hardware.md](docs/hardware.md) | Board, UART, chip identification |
-| [docs/debug-shell.md](docs/debug-shell.md) | The Zephyr shell: commands, quirks, traps |
-| [docs/firmware-extraction.md](docs/firmware-extraction.md) | How to dump the decrypted firmware |
-| [docs/ebook-layout.md](docs/ebook-layout.md) | **The original goal** — text layout internals and patch points |
-| [docs/ota-format.md](docs/ota-format.md) | The `AOTA` OTA container, reverse engineered then verified |
-| [docs/adfu-protocol.md](docs/adfu-protocol.md) | LARK ADFU USB protocol, recovered from the vendor tool |
-| [docs/actions-formats.md](docs/actions-formats.md) | Actions `.fw` package formats and how to decrypt them |
-| [docs/sdk.md](docs/sdk.md) | The official Actions LARK SDK (public!) and what it proves |
-| [docs/dead-ends.md](docs/dead-ends.md) | Things that don't work, and why — read this first |
+| **Windows** | Python 3.8+ with `pyusb` (`pip install pyusb`), and the device's ADFU interface bound to **WinUSB** using [Zadig](https://zadig.akeo.ie/) (device shows as USB VID `10D6`, PID `B00B` or `10D6` depending on mode). **This path hasn't been dry-run tested yet** — everything validated so far is on Linux; if you hit something the steps below don't cover, please open an issue. |
+| **macOS** | **Not supported yet.** macOS's kernel keeps the device's USB mass-storage interface for itself and won't release it, which this tool needs to switch the device into ADFU mode. There's a workaround using a serial cable soldered to the debug pads — see [research/docs/flashing.md](research/docs/flashing.md) — but it isn't a no-case-opening path, so it isn't documented here as the standard route. |
 
-## Tools
+## Download
 
-| Tool | Purpose |
-|---|---|
-| [tools/extract_fw.py](tools/extract_fw.py) | Dump decrypted firmware over UART via `dbg mdw` |
-| [tools/ota_tool.py](tools/ota_tool.py) | Build/verify `AOTA` OTA images |
-| [tools/fwdis.py](tools/fwdis.py) | ARM Thumb-2 disassembler for the extracted image |
-| [tools/disasm.py](tools/disasm.py) | Annotated disassembler, resolves `bl` targets against `symbols.txt` |
-| [tools/extract_symbols.py](tools/extract_symbols.py) | Recovers 1267 function names from the firmware's own log calls |
-| [tools/bf07.py](tools/bf07.py) | **User-facing**: backup / verify / restore / install, over USB alone |
-| [tools/patchset.py](tools/patchset.py) | The reader's patch table: plaintext image in, patched sectors out |
-| [tools/mkflash.py](tools/mkflash.py) | Builds a verifying sector flasher from a patch table |
-| [tools/lark_cd.py](tools/lark_cd.py) | LARK ADFU host implementation (CBW framing, `cd` opcodes) |
-| [tools/verify_repair.py](tools/verify_repair.py) | Audit every sector against the backup and rewrite what differs |
-| [tools/xipdiff.py](tools/xipdiff.py) | Diff the **live** device against stock in plaintext, no ADFU needed |
-| [tools/state.py](tools/state.py) | Dump the reader's state by name, offsets read from DWARF |
-| [tools/screen.py](tools/screen.py) | Read the rendered page and check every line's fit |
-| [tools/gestures.py](tools/gestures.py) | Read captured touch/gesture input from the device |
-| [tools/devflash.sh](tools/devflash.sh) | Developer loop: build the reader, flash it, verify every sector |
-| [tools/regdiff.py](tools/regdiff.py) | Diff SoC registers between a running device and ADFU |
-| [tools/grid.py](tools/grid.py), [keypad.py](tools/keypad.py), [digits.py](tools/digits.py) | Touch/keypad capture used to map the soft keypad |
-| [tools/recover.py](tools/recover.py), [adfu_reset.py](tools/adfu_reset.py), [cap.py](tools/cap.py) | Recovery, ADFU entry and UART capture helpers |
-| [tools/mkfont.py](tools/mkfont.py) | Render any TTF into the device's LVGL bitmap font format |
-| [tools/set_menu_label.py](tools/set_menu_label.py) | Rewrite a menu string in the NOR resource (the "Custom" label) |
-| [tools/mkhyphen.py](tools/mkhyphen.py) | Pack Knuth-Liang hyphenation patterns, with a Python reference |
-| [fonts/](fonts/) | A ready-made user font (Literata, OFL) — drop it on the drive |
-| [reader/](reader/) | The replacement ebook reader — C, built for XIP `0x101d3000` |
+Get the latest bundle from the [Releases page](../../releases) — download
+`bf07-bundle-<version>.zip`, and check its sha256 against the one printed on
+the release page if you want to confirm nothing got corrupted in transit.
+Unzip it, then open a terminal in the folder it created.
 
-## Key results
+## Step 1 — Back up
 
-- **A replacement ebook reader running on the device** — own wrapping, reflow,
-  pagination and pre-render, injected into the 53 KB of free space in the XIP
-  partition (52,914 bytes of it used).
-- **Input taken from the touch driver**, not from the vendor's reader. The firmware
-  dispatches input *above* LVGL, which is why probing the object tree found nothing for
-  days; `_lvgl_pointer_put` (`0x100e07b4`) gives raw coordinates, and page turns, the
-  keypad and the percent seek are all built on it.
-- **Typography measured, not estimated** — glyph advances come from the renderer's own
-  font (captured by hooking its glyph callback), so lines fill to the exact 168 px the
-  labels are wide. Hyphenated compounds split at their hyphens.
-- **User-installable fonts over USB, with nothing written to the card.** The
-  vendor's font loader is sdfs-only (`sd_fopen`) and physically cannot open a
-  file on the FAT volume the host sees, so the reader reads the file itself and
-  answers LVGL's glyph callbacks directly. `tools/mkfont.py` turns any TTF into
-  the device's font format; drop it on the drive as `custom.font`.
-- **Decrypted firmware readable over USB alone** — the flash cipher is live in
-  ADFU with its key loaded, so `tools/usb_plaindump.py` dumps plaintext
-  `fw0_sys` with no serial cable. Verified byte-exact against a UART dump. This
-  is also what makes the distributable patch buildable without a cable.
-- **A "Custom" row in the vendor's own font menu** — menu labels resolve
-  through `common.sty` to a string table in a NOR resource, and one font label
-  there was referenced by no row. The reader points the row at it and reverts it
-  at runtime when no font file is installed.
-- **The vendor's reader switched off in place** — its decode, layout, drawing and
-  background paginator are all disabled, which made the render loop **3x faster**
-  (304 ms -> 100 ms per tick) and removed a multi-minute scan per book open.
-- **1267 firmware functions recovered by name**, because every function passes its own
-  name to the logger. This turned static analysis from guesswork into map-reading.
-- **Full read/write/verify/restore of flash over ADFU**, byte-exact in both directions.
-- **Full engineering shell** over UART at **2,000,000 baud**.
-- **Byte-exact decrypted firmware dump** (1,966,080 B = the whole `fw0_sys` partition),
-  verified 20/20 against the live device.
-- **Exact patch offsets** for the text layout — wrap width, lines/page, word-break set.
-  (Constant-patching turned out to be a dead end for line count; see
-  [docs/ebook-more-lines.md](docs/ebook-more-lines.md) for why, and what replaced it.)
-- **OTA container format** reverse engineered by hand, then confirmed field-for-field
-  against Actions' own `build_ota_image.py`.
-- **LARK ADFU protocol** recovered from `HardwareEx.dll` — CBW framing, valid opcodes,
-  and the exact CDB layouts.
-- Discovery that the **official Actions LARK SDK is public**, which corroborated most of
-  the above independently.
+```
+python3 tools/bf07.py backup -o mybf07.bin
+```
 
-## Credits / prior art
+Expect something like:
 
-- [ilyakurdyukov/actions_flash](https://github.com/ilyakurdyukov/actions_flash) — ADFU tool
-  for ATJ2127/ATJ2157, plus a reverse-engineered ADFU payload in C.
-- [nfd/atj2127decrypt](https://github.com/nfd/atj2127decrypt) — ATJ2127 firmware decryption
-  and a clean Python ADFU implementation.
-- [Rockbox `atjboottool`](https://github.com/Rockbox/rockbox/tree/master/utils/atj2137/atjboottool)
-  — decrypts the older Actions FWU format.
-- [lvgl/lv_port_actions_technology](https://github.com/lvgl/lv_port_actions_technology) —
-  the official Actions LARK SDK.
+```
+reading 4096 KB ...
+wrote mybf07.bin in 7.5s
+sha256 82f09263...
+Keep this file. It is the only way back.
+```
 
-## Licence
+**Copy `mybf07.bin` somewhere off the device** — a USB drive, cloud storage,
+anywhere else. If your computer's drive fails, you want this file to still
+exist.
 
-Notes and tools here: public domain / CC0. Third-party projects retain their own licences.
+## Step 2 — Verify
+
+```
+python3 tools/bf07.py verify -b mybf07.bin
+```
+
+Expect:
+
+```
+comparing 0x014000-0x200000 against mybf07.bin ...
+device matches the backup
+```
+
+This doesn't change anything — it just re-reads the device and checks it
+against the file you just saved, confirming your computer, cable, and the
+tool can all talk to the device reliably before step 3 writes anything.
+
+If it reports sectors that differ, **stop and get in touch** (open an issue)
+rather than continuing — that shouldn't happen on a device you just backed up
+and haven't touched since.
+
+## Step 3 — Install the reader
+
+```
+python3 tools/bf07.py install -b mybf07.bin --patch reference/reader-patch.bin
+```
+
+You'll see a warning:
+
+```
+!!  DO NOT DISCONNECT POWER, and do not unplug the USB cable, until this
+!!  command prints that it is finished.
+```
+
+**Respect it.** It normally takes well under a minute. When it's done, you'll
+see:
+
+```
+verified -- safe to disconnect now. Power-cycle the device to boot it.
+If anything is wrong: bf07.py restore -b mybf07.bin
+```
+
+Press the reset button (or power-cycle) to boot into the new reader. Open a
+book and try turning a few pages.
+
+## Step 4 (optional) — Custom font
+
+Drop [`fonts/custom.font`](fonts/custom.font) onto the drive the device
+exposes over USB, then pick **Custom** in the reader's font menu. That's the
+whole step — no tool involved. See [fonts/README.md](fonts/README.md) if you
+want to build your own from a different font file.
+
+## Advanced (optional, needs a serial cable) — the "Custom" label
+
+The font menu row above will say **"Fangsong Small Font"** rather than
+"Custom" unless one extra, serial-cable-only step is run once. This is
+cosmetic only — the font itself works either way. See
+[research/docs/user-tool.md](research/docs/user-tool.md#the-custom-font-label-is-a-separate-optional-step)
+if you want it.
+
+## Troubleshooting
+
+| Message / symptom | What it means | What to do |
+|---|---|---|
+| `No BF07 found. Connect it over USB and choose disk drive mode on the boot menu` | The device isn't visible yet | Reconnect the cable, pick disk-drive mode on the device's own boot menu, try again |
+| `The device's storage is still mounted... Unmount it first` | Your OS auto-mounted the device's drive | Run the `udisksctl unmount` (or equivalent) command it prints, then retry |
+| A `verify` or `install` run stalls or every USB transfer times out | ADFU got wedged | **Physically power-cycle the device** (a soft `usb reset` won't clear this) and retry from `backup` |
+| `install` reports a `VERIFY FAILED` and tells you to stay connected | A write didn't take | Do exactly what it says — **stay connected, don't power off** — and immediately run the `restore` command it prints |
+| Device won't boot at all after install | Something went wrong during the write | With the device still connected: `python3 tools/bf07.py restore -b mybf07.bin` |
+| None of the above works, device is completely unresponsive | Extremely rare, but recoverable with physical access to the debug UART pads | See [research/docs/flashing.md](research/docs/flashing.md#recovery-of-last-resort-short-tx-and-rx-then-reset) — this is the true last resort and needs opening the case |
+
+## Rolling back
+
+```
+python3 tools/bf07.py restore -b mybf07.bin
+```
+
+This works at any time, as many times as you like, and is byte-exact — it
+puts the device back precisely as `backup` found it, stock reader included.
+
+## How this works
+
+The install writes a small, verified patch: a replacement reader dropped into
+unused flash space, plus a handful of one-word hooks in the stock firmware
+that redirect it there. Nothing else on the device changes, and every write
+is read back and checked before the tool tells you it's safe to disconnect.
+The full story — how the device was reverse engineered, how the reader was
+built, and everything that didn't work along the way — is in
+[research/](research/).
+
+## License
+
+Everything in this repository — notes, tools, and the reader patch itself —
+is released into the public domain (CC0), see [LICENSE](LICENSE). The one
+exception is `reference/adfus_u_go.bin`, a third-party ADFU payload from
+Actions' own public SDK, included in the release bundle for convenience — see
+[THIRD_PARTY_NOTICE.md](THIRD_PARTY_NOTICE.md).

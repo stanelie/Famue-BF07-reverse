@@ -12,8 +12,9 @@ it with.
 
 WHAT IS AND IS NOT REDISTRIBUTED
     Your firmware is read from your own device and stays on your machine. This
-    tool ships no vendor code. The ADFU payload (adfus_u_go.bin) comes from
-    Actions' own public SDK -- see reference/README.md for where to get it.
+    tool ships no vendor code of its own. The ADFU payload (adfus_u_go.bin)
+    comes from Actions' own public SDK; if a release bundle didn't include it,
+    see reference/README.md for where to get it.
 
 NO SERIAL CABLE IS NEEDED
     `install --patch` works over ADFU alone. The patch carries PLAINTEXT -- our

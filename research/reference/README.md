@@ -1,6 +1,11 @@
 # Reference material
 
-Third-party projects that were essential. Not vendored here — clone them yourself.
+Third-party projects that were essential. Not vendored in this git tree — clone
+them yourself. (`adfus_u_go.bin`, the LARK ADFU payload, is the one exception:
+it ships inside the **built release bundle** — see `../tools/make_release.py`
+and [THIRD_PARTY_NOTICE.md](../../THIRD_PARTY_NOTICE.md) — but is still not
+committed to this repo's git history; `.gitignore` excludes it here same as
+everything else with a `.bin` extension.)
 
 | Project | Used for |
 |---|---|

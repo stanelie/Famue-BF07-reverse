@@ -7,3 +7,9 @@ __pycache__/
 *.o
 *.elf
 *.map
+dist/
+
+# The stock firmware archive is deliberately tracked -- see
+# research/firmware/README.md and THIRD_PARTY_NOTICE.md. Everything else
+# matching *.bin stays ignored.
+!research/firmware/*.bin
