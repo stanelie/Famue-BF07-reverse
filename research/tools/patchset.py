@@ -47,6 +47,51 @@ BW_HOOKS = {"tail_hook": 0x100493B2, "pointer_hook": 0x100E07B4,
             "font_hook": 0x100E1348, "gesture_hook": 0x100D92E8,
             "fontopen_hook": 0x100E1440, "menulist_hook": 0x1005934C}
 
+# More than one BF07 firmware build ships, and they are separately linked, so
+# both the hook sites AND the reader binary are build-specific: the reader
+# reaches vendor functions by absolute address, baked in as movw/movt pairs.
+# Pairing the wrong reader with a build would call every vendor function 0x24
+# bytes off. Keyed by sha256 of the DECRYPTED fw0_sys so it cannot be got
+# wrong by hand; addresses from tools/retarget.py, header from tools/mkfwh.py.
+#
+# An unknown image is a hard failure, not a fallback to the defaults above --
+# guessing here is what bricks a device.
+BUILDS = {
+    # Jun 30 2025 10:51:24  (1.00_2506301055)
+    "f500883a0d1bd40755b26a87d2abb7c8b945b3c828fce7b1d3f90a78e3e304dd": {
+        "reader": "reader.bin", "elf": "reader.elf",
+        "BL": {"hook": 0x1004A288, "prepare_hook": 0x1004C002},
+        "BW": {"tail_hook": 0x100493B2, "pointer_hook": 0x100E07B4,
+               "font_hook": 0x100E1348, "gesture_hook": 0x100D92E8,
+               "fontopen_hook": 0x100E1440, "menulist_hook": 0x1005934C},
+        "WORD": {0x10128E98: 0xf40f37ea},
+        "CONT_Y": 0x1004A1FC, "CONT_SUB": 0x1004A222,
+    },
+    # May 27 2025 13:30:26  -- shipped on a unit bought LATER than the above
+    "c91814dd420f316365880783ef6591ce9df44204aa45c56a2e524721591ce7df": {
+        "reader": "reader-may27.bin", "elf": "reader-may27.elf",
+        "BL": {"hook": 0x1004A288, "prepare_hook": 0x1004C002},
+        "BW": {"tail_hook": 0x100493B2, "pointer_hook": 0x100E0790,
+               "font_hook": 0x100E1324, "gesture_hook": 0x100D92C4,
+               "fontopen_hook": 0x100E141C, "menulist_hook": 0x10059328},
+        "WORD": {0x10128E78: 0xf40f37ea},
+        "CONT_Y": 0x1004A1FC, "CONT_SUB": 0x1004A222,
+    },
+}
+
+
+def build_spec(plain):
+    import hashlib
+    h = hashlib.sha256(plain).hexdigest()
+    if h not in BUILDS:
+        raise SystemExit(
+            f"unknown firmware build (plaintext sha256 {h[:16]}...).\n"
+            f"Known builds:\n" + "".join(f"  {k[:16]}...\n" for k in BUILDS) +
+            "Add it with tools/retarget.py + tools/mkfwh.py, and rebuild the\n"
+            "reader against the generated header -- its vendor calls are\n"
+            "compiled in by address and will not work on another build.")
+    return BUILDS[h]
+
 # Vendor DATA patches {xip_addr: u32}. The font menu row for fang18 is
 # repointed at the label id 0xf40f37ea ("Fangsong Small Font"), which no row
 # referenced; tools/set_menu_label.py rewrites that string to "Custom" in the
@@ -75,23 +120,25 @@ def build(plain, blob=None, elf=None):
     write with address bit 31 set.
     """
     root = os.path.dirname(_HERE)
-    blob = blob or open(os.path.join(root, "reader", "reader.bin"), "rb").read()
-    elf = elf or os.path.join(root, "reader", "reader.elf")
+    spec = build_spec(plain)          # refuses an unknown build outright
+    blob = blob or open(os.path.join(root, "reader", spec["reader"]), "rb").read()
+    elf = elf or os.path.join(root, "reader", spec["elf"])
     if CODE_BASE + len(blob) > CODE_LIMIT:
         raise SystemExit(f"reader is {len(blob)} bytes; free space is "
                          f"{CODE_LIMIT - CODE_BASE}")
     syms = symbols(elf)
 
     data = bytearray(plain)
-    data[0x1004A1FC - XIP:0x1004A1FC - XIP + 2] = P.movs_imm8(2, CONT_TOP)
-    data[0x1004A222 - XIP:0x1004A222 - XIP + 2] = P.sub_imm8(0, CONT_SUB)
-    for name, site in BL_HOOKS.items():
+    cy, cs = spec["CONT_Y"], spec["CONT_SUB"]
+    data[cy - XIP:cy - XIP + 2] = P.movs_imm8(2, CONT_TOP)
+    data[cs - XIP:cs - XIP + 2] = P.sub_imm8(0, CONT_SUB)
+    for name, site in spec["BL"].items():
         if name in syms:
             data[site - XIP:site - XIP + 4] = P.bl(site, syms[name])
-    for name, site in BW_HOOKS.items():
+    for name, site in spec["BW"].items():
         if name in syms:
             data[site - XIP:site - XIP + 4] = P.bw(site, syms[name])
-    for addr, value in WORD_PATCHES.items():
+    for addr, value in spec["WORD"].items():
         data[addr - XIP:addr - XIP + 4] = value.to_bytes(4, "little")
 
     sectors = {}
@@ -102,8 +149,8 @@ def build(plain, blob=None, elf=None):
         sec[0:len(chunk)] = chunk
         sectors[CODE_BASE + n * 0x1000] = bytes(sec)
     # every vendor sector a hook lands in
-    for site in (list(BL_HOOKS.values()) + list(BW_HOOKS.values())
-                 + list(WORD_PATCHES) + [0x1004A1FC]):
+    for site in (list(spec["BL"].values()) + list(spec["BW"].values())
+                 + list(spec["WORD"]) + [spec["CONT_Y"]]):
         flash = (FW0 + (site - XIP)) & ~0xfff
         off = flash - FW0
         sectors[flash] = bytes(data[off:off + 0x1000])
