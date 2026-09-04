@@ -431,3 +431,37 @@ simply never moved. 4 KB chunks fixed it: 1.9 MB in 129 s.
 Serial is no longer needed on the device side for anything: decrypted reads,
 patch building, backup, restore and install all work over USB. On Linux, where
 the `ACTIONSUSBD` switch is not blocked by the OS, no cable is needed at all.
+
+## CONFIRMED on a second unit: the key is not per-chip
+
+A second BF07 arrived (bought to isolate a hardware audio fault — it doesn't
+have it, so that issue is a hardware defect in unit 1, not firmware). With two
+physical chips available for the first time, the "is the key shared?" question
+in this doc is now answered by measurement instead of SDK reading.
+
+**Test:** read raw ciphertext (`rs`, never decrypted) at flash `0x0`
+(`fw0_boot`, 4096 bytes, pure stock code — outside anything this project
+patches) and `0x1000` (`fw0_para`) from the new unit, and diff against unit 1's
+real full-flash dumps (`bf07_flash_full_2026-08-05.bin`,
+`bf07_flash_full_2026-08-14.bin` in `bf07-backups/`, not the partial
+`ground_truth.json` codebook — that file has a stale zero-filled placeholder at
+offset `0x20` that looks like a mismatch until you check the real dumps).
+
+**Result:** `fw0_boot` — all 256 AES blocks byte-for-byte identical ciphertext
+between the two chips. `fw0_para` matched everywhere except a 128-byte window
+at `0x1300`–`0x137f`, which has the shape of per-unit config (calibration /
+serial / counter) rather than a re-keyed partition — a different key would
+have scrambled the whole 4 KB block, not 3% of it.
+
+Same plaintext, same ciphertext, two different chips: **the flash-decryption
+key is shared across units**, consistent with the "Encryption is a build flag"
+finding in `actions-formats.md` — the key comes from the PC-side build tooling
+(`encrypt.bin`), not per-chip eFuse/silicon entropy, so every unit built from
+the same firmware release carries the same one.
+
+**Why it matters:** a decrypted image or patch built from one unit is very
+likely directly portable to another same-firmware-version unit without
+extracting a second key. `bf07.py`'s existing defensive line — "nothing here
+depends on the flash key being shared between units" — was written not
+knowing the answer; it still doesn't *depend* on sharing, but sharing is now
+the measured case, not just a hedge.

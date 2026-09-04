@@ -42,7 +42,7 @@ context is firmware-version-specific, not device-specific, and grows only when
 a hook is added -- not when the reader itself grows. Everything else comes from the device itself: untouched
 blocks are its own ciphertext rewritten verbatim, and our blocks are encrypted
 by its own key on write. **Nothing depends on the flash key being shared between
-units.**
+units** — though on the two chips measured so far, it is; see below.
 
 ## What is deliberately not in this repo
 
@@ -87,6 +87,10 @@ units.**
   "fallback" written as a safety net was itself the crash.
 - The player's USB disk mode exposes the FAT partition only — LUN size equals
   partition size, so the sdfs region below it is unreachable from a host.
+- **The flash-decryption key is shared across units, confirmed on a second
+  physical chip.** `fw0_boot` ciphertext (256 AES blocks, pure stock code) is
+  byte-for-byte identical between two different BF07s. See
+  [adfu-xip.md](adfu-xip.md#confirmed-on-a-second-unit-the-key-is-not-per-chip).
 
 ## Natural next steps
 
