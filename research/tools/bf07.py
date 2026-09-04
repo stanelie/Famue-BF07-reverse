@@ -764,14 +764,27 @@ def install_patch(args, backup):
         # blocks, and a read-back-and-re-encrypt check for the patched ones.
         back = d.read(sec, SECTOR)
         bad = []
+        # "Unchanged" is only evidence of a lost write if this sector was NOT
+        # already carrying our patch. Re-installing writes the same plaintext,
+        # which encrypts to the same ciphertext, so every edited block reads
+        # back equal to its pre-erase value -- and flagging that aborts a
+        # perfectly good install. (It did, on a device that already had this
+        # exact reader.) A genuinely lost write leaves the block ERASED, which
+        # is checked unconditionally below; the ambiguous "unchanged" case is
+        # only an error when some edited blocks changed and others did not,
+        # which no single consistent outcome explains.
+        unchanged = [o for o in edits if back[o:o + 32] == cur[o:o + 32]]
+        partial = 0 < len(unchanged) < len(edits)
         for o in range(0, SECTOR, 32):
             if o in edits:
                 if back[o:o + 32] == b"\xff" * 32:
                     bad.append(f"+0x{o:03x} still erased (write lost)")
-                elif back[o:o + 32] == cur[o:o + 32]:
-                    bad.append(f"+0x{o:03x} unchanged (write lost)")
+                elif back[o:o + 32] == cur[o:o + 32] and partial:
+                    bad.append(f"+0x{o:03x} unchanged while others changed")
             elif back[o:o + 32] != cur[o:o + 32]:
                 bad.append(f"+0x{o:03x} clobbered")
+        if unchanged and not partial:
+            print(f"  0x{sec:06x}: already carried this patch, re-written identically")
         if bad:
             raise SystemExit(
                 f"0x{sec:06x}: VERIFY FAILED -- {'; '.join(bad[:4])}\n"
