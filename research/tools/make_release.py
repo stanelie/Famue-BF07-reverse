@@ -73,7 +73,8 @@ def main():
                 f"  reader-patch.bin: build it with mkpatch.py from a decrypted dump\n"
                 f"  adfus_u_go.bin: from Actions' public LARK SDK, see reference/README.md")
 
-    reader, blocks, ref_sha = mkpatch.load_patch(open(patch_src, "rb").read())
+    reader, blocks, ref_sha, verify, installed = mkpatch.load_patch(
+        open(patch_src, "rb").read())
     print(f"reader-patch.bin: {len(reader)} reader sector(s), {len(blocks)} "
           f"vendor block(s), built from plaintext sha256 {ref_sha.hex()[:16]}...")
 

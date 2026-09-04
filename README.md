@@ -33,11 +33,13 @@ afterward — restoring from it is byte-exact and has been proven on hardware
 repeatedly.
 
 This bundle installs a specific patch, built against **firmware
-`1.00_2506301055`**. It's very likely your device runs exactly this, since
-it's what these devices have shipped with — but if the reader doesn't start
-after the install step, or the device doesn't boot normally, **don't
-experiment further: run the restore command below immediately.** It puts the
-device back exactly as it was.
+`1.00_2506301055`** (build date Jun 30 2025). **At least two BF07 firmware
+builds exist in the wild** — a second unit bought later shipped an older
+May 27 2025 build — and a newer purchase is no guarantee of a newer build.
+
+You don't have to work out which you have: the installer checks before it
+writes and refuses if they don't match, leaving the device untouched. If it
+does refuse, that's it working, not a fault.
 
 Once the install step starts, **do not disconnect the USB cable or power off
 the device** until it prints that it has finished. Interrupting a normal
@@ -118,7 +120,18 @@ and haven't touched since.
 python3 tools/bf07.py install -b mybf07.bin --patch reference/reader-patch.bin
 ```
 
-You'll see a warning:
+Before writing anything, this checks your device against the patch and stops if
+they don't match:
+
+- **`This patch was NOT built for the firmware on this device`** — there is
+  more than one BF07 firmware build in circulation, and this one isn't the one
+  the patch targets. Nothing was written and your device is untouched. Installing
+  anyway would leave it unable to boot, recoverable only by opening the case, so
+  don't use `--force` to get past this.
+- **`already has exactly this patch installed`** — nothing to do, and it skips
+  the write rather than erasing and rewriting for no gain.
+
+Otherwise it proceeds, and you'll see a warning:
 
 ```
 !!  DO NOT DISCONNECT POWER, and do not unplug the USB cable, until this
@@ -159,6 +172,8 @@ if you want it.
 | `The device's storage is still mounted... Unmount it first` | Your OS auto-mounted the device's drive | Run the `udisksctl unmount` (or equivalent) command it prints, then retry |
 | A `verify` or `install` run stalls or every USB transfer times out | ADFU got wedged | **Physically power-cycle the device** (a soft `usb reset` won't clear this) and retry from `backup` |
 | `install` reports a `VERIFY FAILED` and tells you to stay connected | A write didn't take | Do exactly what it says — **stay connected, don't power off** — and immediately run the `restore` command it prints |
+| `This patch was NOT built for the firmware on this device` | Your BF07 runs a different firmware build than this patch targets | Nothing was written — your device is fine. You need a patch built for your firmware; open an issue with the sector addresses it printed. **Don't use `--force`** |
+| `already has exactly this patch installed` | It's already up to date | Nothing to do — this is the tool declining a pointless write |
 | Device won't boot at all after install | Something went wrong during the write | With the device still connected: `python3 tools/bf07.py restore -b mybf07.bin` |
 | None of the above works, device is completely unresponsive | Extremely rare, but recoverable with physical access to the debug UART pads | See [research/docs/flashing.md](research/docs/flashing.md#recovery-of-last-resort-short-tx-and-rx-then-reset) — this is the true last resort and needs opening the case |
 

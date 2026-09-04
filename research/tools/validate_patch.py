@@ -106,7 +106,7 @@ for a in targets:
         if blk != b"\xff"*32: cmd(b"ws", 32, a+off, expect=4, data=blk)
 
 print("3. installing from the patch file", flush=True)
-reader, blocks, _ = load_patch(open(PATCH, "rb").read())
+reader, blocks, _, _, _ = load_patch(open(PATCH, "rb").read())
 by = {}
 for addr, data in blocks: by.setdefault(addr & ~0xfff, {})[addr & 0xfff] = data
 for addr, data in reader:
