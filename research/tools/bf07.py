@@ -89,21 +89,25 @@ def mounted_volumes():
     return found
 
 
-def unmount_volumes(busy):
+def unmount_volumes(busy, attempts=4):
     """Unmount the device's own volumes before switching it into ADFU.
 
-    Doing it for the user rather than printing a command: every operation here
-    needs it, so making them run udisksctl by hand first is pure friction.
+    -> list of (source, error) for whatever is still mounted at the end.
 
-    sync() first. Entering ADFU reboots the device, so anything still sitting in
-    the page cache for that filesystem is simply lost -- and a user who has just
-    copied a book across would have no reason to expect that.
+    Three things this has to cope with, all seen on real hardware:
 
-    udisksctl is tried before umount because these mounts are usually made by
-    udisks for the desktop session, and unmounting one behind its back leaves it
-    convinced the volume is still there. Failures are not fatal here: the caller
-    re-checks what is actually still mounted and only then gives up, so a
-    missing udisksctl or a refused polkit prompt just falls through to umount.
+    * The tool is usually run under sudo, but the mount belongs to the desktop
+      session, so `udisksctl` is run AS THE INVOKING USER via sudo -u. Run as
+      root it talks to udisks with the wrong identity for a session mount.
+    * The device has often just rebooted and re-enumerated, so udisks may
+      auto-mount it again a moment after we unmount. Hence retrying rather than
+      trying once and believing the answer.
+    * Failures were previously discarded, so a user got "could not be unmounted"
+      with no hint why. The actual message is now kept and shown.
+
+    sync() first, because entering ADFU reboots the device: anything still in
+    the page cache for that filesystem is lost, and someone who just copied a
+    book across has no reason to expect that.
     """
     import subprocess
     print("unmounting the device's storage first:")
@@ -113,14 +117,34 @@ def unmount_volumes(busy):
         subprocess.run(["sync"], timeout=30)
     except Exception:
         pass
-    for src, _ in busy:
-        for cmd in (["udisksctl", "unmount", "-b", src], ["umount", src]):
-            try:
-                r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                if r.returncode == 0:
-                    break
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                continue
+
+    # sudo sets SUDO_USER; without it we are already the right user.
+    who = os.environ.get("SUDO_USER")
+    errs = {}
+    for attempt in range(attempts):
+        for src, _ in list(busy):
+            cmds = []
+            if who:
+                cmds.append(["sudo", "-u", who, "udisksctl", "unmount", "-b", src])
+            cmds.append(["udisksctl", "unmount", "-b", src])
+            cmds.append(["umount", src])
+            for cmd in cmds:
+                try:
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    if r.returncode == 0:
+                        errs.pop(src, None)
+                        break
+                    msg = (r.stderr or r.stdout or "").strip().splitlines()
+                    if msg:
+                        errs[src] = msg[-1]
+                except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+                    errs[src] = f"{cmd[0]}: {e.__class__.__name__}"
+        busy = mounted_volumes()
+        if not busy:
+            return []
+        if attempt < attempts - 1:
+            time.sleep(1.0)          # give udisks time to settle after a remount
+    return [(src, errs.get(src, "still mounted")) for src, _ in busy]
 
 
 def enter_adfu(timeout=25):
@@ -138,17 +162,17 @@ def enter_adfu(timeout=25):
 
     busy = mounted_volumes()
     if busy:
-        unmount_volumes(busy)
-        busy = mounted_volumes()
-    if busy:
-        raise SystemExit(
-            "The device's storage is still mounted and could not be unmounted\n"
-            "automatically:\n"
-            + "".join(f"    {src} on {mnt}\n" for src, mnt in busy) +
-            "Entering ADFU detaches usb-storage and reboots the device, which\n"
-            "would pull that filesystem out from under the kernel. Close\n"
-            "anything using the drive, then unmount it by hand:\n"
-            + "".join(f"    udisksctl unmount -b {src}\n" for src, _ in busy))
+        stuck = unmount_volumes(busy)
+        if stuck:
+            raise SystemExit(
+                "The device's storage is still mounted and could not be\n"
+                "unmounted automatically:\n"
+                + "".join(f"    {src}: {why}\n" for src, why in stuck) +
+                "\nEntering ADFU detaches usb-storage and reboots the device,\n"
+                "which would pull that filesystem out from under the kernel.\n"
+                "Close anything using the drive -- a file manager window, or a\n"
+                "terminal sitting in it -- then unmount it by hand:\n"
+                + "".join(f"    udisksctl unmount -b {src}\n" for src, _ in stuck))
 
     # The claim can fail at set_configuration OR at the first transfer,
     # depending on the backend, so the whole exchange is guarded.
@@ -227,6 +251,14 @@ def enter_adfu(timeout=25):
     t0 = time.time()
     while time.time() - t0 < timeout:
         if find(PID_ADFU):
+            # Appearing on the bus is not the same as being ready for a bulk
+            # transfer: the device has just re-enumerated and the host is still
+            # configuring it. Returning the instant it appears makes the very
+            # next thing -- uploading the payload -- fail intermittently. That
+            # race was invisible while commands were typed by hand, and started
+            # firing once the tool began rebooting the device itself and running
+            # the next operation immediately.
+            time.sleep(1.0)
             return True
         time.sleep(0.25)
     raise SystemExit("device did not come back as ADFU")
@@ -417,17 +449,29 @@ def start_payload():
     blob = open(path, "rb").read()
     if len(blob) % 256:
         blob += b"\0" * (256 - len(blob) % 256)
-    try:
-        a = Adfu(timeout=8000)
-        a.write(OP_WRITE, 0x01010000, blob)
-        a.cmd(OP_EXEC1, 0x01010000)
-        usb.util.dispose_resources(a.d)
-        del a
-    except usb.core.USBError:
-        raise SystemExit(
-            "ADFU is not responding. It wedges if the payload is uploaded while\n"
-            "one is already running. Power-cycle the device (reset button) and\n"
-            "run this again -- nothing has been written.")
+    # A device that has only just enumerated can refuse the first transfer, so
+    # a single failure is not proof it is wedged -- retry before giving up and
+    # sending the user to the reset button.
+    last = None
+    for attempt in range(3):
+        try:
+            a = Adfu(timeout=8000)
+            a.write(OP_WRITE, 0x01010000, blob)
+            a.cmd(OP_EXEC1, 0x01010000)
+            usb.util.dispose_resources(a.d)
+            del a
+            break
+        except usb.core.USBError as e:
+            last = e
+            if attempt == 2:
+                raise SystemExit(
+                    f"ADFU is not responding ({e}).\n"
+                    "Two things cause this. Either the device had not finished\n"
+                    "coming up -- in which case simply running this again works --\n"
+                    "or ADFU is wedged, which needs a power-cycle (reset button)\n"
+                    "and only a power-cycle clears.\n"
+                    "Nothing has been written either way.")
+            time.sleep(1.5)
     time.sleep(2.5)
 
 
@@ -455,6 +499,7 @@ def cmd_backup(args):
     print(f"wrote {args.out} in {time.time() - t0:.1f}s")
     print(f"sha256 {h}")
     print("Keep this file. It is the only way back.")
+    reboot_after(d, args)
 
 
 def differing(d, backup):
@@ -476,6 +521,7 @@ def cmd_verify(args):
     for s, n in bad:
         print(f"  0x{s:06x}: differs in {n} block(s)")
     print(f"{len(bad)} sector(s) differ" if bad else "device matches the backup")
+    reboot_after(d, args)
 
 
 DANGER_OPEN = """
@@ -597,19 +643,44 @@ def reboot_after(d, args):
     looks dead: blank screen, no drive, nothing but a bare USB id. Anything
     that finishes a job should hand it back running.
 
-    Not done after backup/verify: those are usually followed by another
-    operation, and returning to normal would make the user pick disk-drive mode
-    on the device again before the next one. The menu reboots on the way out
-    instead, which covers the same gap without the friction.
+    Done after EVERY operation, including the read-only ones. An earlier
+    version skipped backup and verify, reasoning that leaving the device in
+    ADFU saved the user re-selecting disk-drive mode before the next command.
+    That premise was simply wrong -- the device comes back into disk mode by
+    itself when it is on USB -- and the cost of the mistake was real: leaving a
+    payload running means the NEXT operation has to decide whether it is still
+    alive, and a false negative there uploads a second payload and wedges ADFU
+    until a power-cycle. Rebooting makes every operation start from the same
+    clean state instead of inheriting one.
     """
     if getattr(args, "no_reboot", False):
         print(POWER_CYCLE)
         return
     print("rebooting the device...")
-    if d.reboot():
+    if not d.reboot():
+        print(f"  could not reboot it from here -- {POWER_CYCLE.lower()}")
+        return
+    # Leaving ADFU is not the same as being usable again: the device boots for
+    # a good few seconds before it re-appears as a disk. Returning as soon as
+    # it leaves ADFU makes the NEXT operation fail with "No BF07 found" -- which
+    # is what rebooting after every operation caused, and reads to the user as
+    # the tool being broken rather than merely early.
+    if wait_for_normal():
         print("  it is running again.")
     else:
-        print(f"  could not reboot it from here -- {POWER_CYCLE.lower()}")
+        print("  it rebooted, but has not re-appeared over USB yet.")
+        print("  Give it a moment, or pick disk drive mode on the device.")
+
+
+def wait_for_normal(timeout=40):
+    """Wait for the device to finish booting and offer its drive again."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if find(PID_NORMAL):
+            time.sleep(1.0)          # let the host finish configuring it
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def cmd_restore(args):
@@ -1131,11 +1202,11 @@ def menu():
         try:
             if c == "1":
                 out = _ask_path("  save backup as", default="mybf07.bin")
-                cmd_backup(argparse.Namespace(out=out))
+                cmd_backup(argparse.Namespace(out=out, no_reboot=False))
             elif c == "2":
                 b = _ask_path("  backup file", default=(known[0] if known else None),
                               must_exist=True)
-                cmd_verify(argparse.Namespace(backup=b))
+                cmd_verify(argparse.Namespace(backup=b, no_reboot=False))
             elif c == "3":
                 b = _ask_path("  your backup file (required)",
                               default=(known[0] if known else None), must_exist=True)
@@ -1169,8 +1240,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
-    p = sub.add_parser("backup"); p.add_argument("-o", "--out", default="bf07-backup.bin"); p.set_defaults(fn=cmd_backup)
-    p = sub.add_parser("verify"); p.add_argument("-b", "--backup", required=True); p.set_defaults(fn=cmd_verify)
+    p = sub.add_parser("backup")
+    p.add_argument("-o", "--out", default="bf07-backup.bin")
+    p.add_argument("--no-reboot", action="store_true",
+                   help="leave the device in update mode afterwards")
+    p.set_defaults(fn=cmd_backup)
+    p = sub.add_parser("verify")
+    p.add_argument("-b", "--backup", required=True)
+    p.add_argument("--no-reboot", action="store_true",
+                   help="leave the device in update mode afterwards")
+    p.set_defaults(fn=cmd_verify)
     p = sub.add_parser("restore")
     p.add_argument("-b", "--backup", help="this device's own backup (preferred)")
     p.add_argument("--plain", help="plaintext fw0_sys image, e.g. captured from "
