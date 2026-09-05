@@ -138,3 +138,51 @@ tools/mkpatch.py -p <may27 plain> --ref-cipher firmware/stock-full-flash-2025-05
 `patchset.py`'s `BUILDS` table keys the hook sites AND the matching reader
 binary on the decrypted image's sha256, so the two cannot be mismatched by
 hand; an unknown image is a hard failure, not a fallback.
+
+## Maintaining two builds
+
+**The May 27 build is not a fork.** Its `fw.h` and its `main.c` are *generated*
+from the Jun 30 ones by `tools/mkfwh.py`, so a change to the reader propagates
+by rebuilding, not by editing anything twice. Both generated files carry a
+"GENERATED — do not edit" banner; edits there are lost on the next build.
+
+After any change to the reader:
+
+```
+tools/build_all.py [--installed-jun30 <backup>] [--installed-may27 <backup>]
+```
+
+That regenerates every per-build source, compiles each, builds each patch, and
+runs every check that does not need hardware.
+
+### What is checked automatically
+
+| check | catches |
+|---|---|
+| every `fw.h` and inline-asm address resolves on the target | an address with no equivalent on the other build |
+| **materialised-address diff** | an address that was never relocated |
+| binary size | overflowing the 52 KB hole |
+| each patch vs each firmware | a patch that would accept the wrong build |
+
+The second is the one that matters. It disassembles both binaries, extracts
+every vendor address actually built into a register, and requires the target's
+set to be exactly the reference's set *relocated* — no stale entries, none
+missing. It reads the **disassembly**, not the source, because that is the only
+place every address is visible at once: some arrive from `fw.h` through the
+compiler, others are hand-written inside inline asm. Auditing the header alone
+missed seven of the second kind and boot-looped a device.
+
+Verified by planting a `movw`/`movt` pair split across non-consecutive lines —
+a form the generator cannot rewrite — and confirming the check named the stale
+address and refused to continue.
+
+### What is NOT checked, and never can be
+
+None of it proves the reader **runs**. Every address can be correctly relocated
+and the reader can still fault on a structure layout or a vendor function that
+behaves differently between builds. Static analysis got the May 27 port to a
+device that boot-looped; only installing it and opening a book showed it
+working.
+
+**Install on a device of each build before releasing.** Two devices, one per
+firmware, is the minimum bench for this project.
