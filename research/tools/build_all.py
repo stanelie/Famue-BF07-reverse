@@ -173,6 +173,20 @@ def main():
                "-o", os.path.join(RESEARCH, "reference", t["patch"])]
         inst = getattr(args, f"installed_{t['name']}")
         if inst:
+            # A backup taken before the reader changed describes the OLD
+            # install. Shipping that makes the installer say "already
+            # installed" and refuse to write the fix -- silently, and to
+            # exactly the people who need it. Seen for real: a reader fix would
+            # not install because the reference predated it.
+            if os.path.getmtime(inst) < os.path.getmtime(
+                    os.path.join(READER, t["bin"])):
+                raise SystemExit(
+                    f"  {os.path.basename(inst)} is OLDER than {t['bin']}.\n"
+                    f"  It records how the PREVIOUS reader looked once installed,\n"
+                    f"  so the installer would tell users they are already up to\n"
+                    f"  date and skip this build. Install this reader on a device,\n"
+                    f"  take a fresh backup, and pass that instead -- or omit\n"
+                    f"  --installed-{t['name']} to build without the skip table.")
             cmd += ["--ref-installed", inst]
         out = run(cmd)
         nver = "8 verify" if "verify:" in out else "?"

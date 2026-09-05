@@ -141,6 +141,8 @@ struct inj_state {
     int32_t  drawn_start;             /* page offset currently in the labels  */
     uint16_t drawn_lines;
     int32_t  drawn_pm;                /* percent currently in the top bar     */
+    uint8_t  bar_cleared;             /* our text taken out while a popup is up */
+    uint8_t  digits;                  /* digits accepted this entry (max 3)     */
     uint8_t  typing;                  /* the select-page keypad is up and used */
     int32_t  typed;                   /* percent being typed, 0..100           */
     uint32_t touch_n;                 /* every call, including idle polls   */
@@ -1083,25 +1085,57 @@ static void show_percent(void *cont, struct inj_state *S)
        boundary and each turn flipped it. A page is ~267 bytes of a ~500 KB
        book -- about 0.05% -- so tenths actually move. /64 keeps the multiply
        inside int32 for books up to 8 MB. */
-    /* While the keypad is in use, the top line shows the TARGET being typed --
-       that is the number the user is setting, not where they currently are. */
-    int pm = S->typing ? (int)(S->typed * 10)
-                       : (int)((S->cur.start / 64) * 1000 / (size / 64 + 1));
+    /* Get out of the way whenever a popup is up, and take our text with us.
+     *
+     * That counter is the vendor's TEXTAREA (class 0x1012c828); we write into
+     * its label child. The textarea keeps its own buffer and cursor, so:
+     *   - editing the label behind its back desynced the two and its next
+     *     keypress edited from the wrong offset (a garbled glyph, cured by
+     *     backspacing, which resynced it), and
+     *   - anything of ours still sitting there when the keypad OPENS becomes
+     *     its starting content, so typing 65 over our "4%" gave "4%65".
+     * Both are the same mistake: sharing a widget the vendor is driving. So
+     * while a popup is open we clear our text once and write nothing more.
+     * The keypad shows the digits itself, which is what the reader wants to
+     * see anyway; our percent comes back when it closes.
+     *
+     * Popup detection is the same test pointer_body uses -- the page's parent
+     * gains a child -- because geometry and container identity both follow the
+     * popup and agree with it. */
+    uint32_t par = *(volatile uint32_t *)((uint32_t)cont + 4);
+    uint32_t popup = 0;
+    if (par >= HEAP_LO && par < HEAP_HI) {
+        uint32_t sp2 = *(volatile uint32_t *)(par + 8);
+        if (sp2 >= HEAP_LO && sp2 < HEAP_HI) {
+            uint32_t kids = *(volatile uint32_t *)(sp2 + 4);
+            if (S->kid_min != 0xffffffffu && kids > S->kid_min) popup = 1;
+        }
+    }
+    if (!popup) S->bar_cleared = 0;
+    int pm = (int)((S->cur.start / 64) * 1000 / (size / 64 + 1));
     if (pm < 0) pm = 0;
     if (pm > 1000) pm = 1000;
 
-    char buf[10];
+    /* Whole percent on screen. The tenth was never useful to a reader and made
+       a single typed digit read as "4.0%"; pm stays in tenths internally
+       because the position needs that resolution to move at all. */
+    char buf[8];
     int n = 0;
-    int whole = pm / 10, frac = pm % 10;
+    if (popup) {
+        if (S->bar_cleared) return;
+        S->bar_cleared = 1;
+        buf[0] = 0;
+        goto write;
+    }
+    int whole = pm / 10;
     if (whole >= 100) { buf[n++] = '1'; buf[n++] = '0'; buf[n++] = '0'; }
     else {
         if (whole >= 10) buf[n++] = (char)('0' + whole / 10);
         buf[n++] = (char)('0' + whole % 10);
-        buf[n++] = '.';
-        buf[n++] = (char)('0' + frac);
     }
     buf[n++] = '%';
     buf[n] = 0;
+write:;
 
     if (pm != S->last_pm) {
         S->last_pm = pm;
@@ -1150,12 +1184,19 @@ static void show_percent(void *cont, struct inj_state *S)
                 while (buf[i] && cur[i] == buf[i]) i++;
                 if (buf[i] == 0 && cur[i] == 0) continue;   /* identical */
             }
-            /* Only when it actually changed: this is the copying setter, so it
-           reallocates and invalidates on every call. */
-        if (pm != S->drawn_pm) {
+            /* The text comparison above is the whole guard: it is per-label
+               and compares what the widget ACTUALLY shows, so the copying
+               setter still only runs when the content differs.
+               There used to be a second guard here, `if (pm != S->drawn_pm)`,
+               and it was wrong twice over. It is global while the loop is
+               per-label, so the first matching label consumed the change and
+               every later one was skipped holding stale text -- which is what
+               put a leftover digit beside the new value ("44.0%" for a typed
+               4). And it assumes the widget still shows what we last wrote,
+               which is not ours to assume: the vendor writes to this same
+               counter. */
             S->drawn_pm = pm;
             lv_label_set_text_copy(k, buf);
-        }
         }
     }
 }
@@ -2141,11 +2182,27 @@ void pointer_body(void *pt)
             if (ty >= 140 && row <= 2) dig = row * 3 + col + 1;
             else if (row == 3 && col == 1) dig = 0;
             if (dig >= 0) {
-                if (!S->typing) { S->typing = 1; S->typed = 0; }
-                S->typed = S->typed * 10 + dig;
-                if (S->typed > 100) S->typed = dig;   /* rolled over: restart */
+                if (!S->typing) { S->typing = 1; S->typed = 0; S->digits = 0; }
+                /* Ignore anything past the third digit, and anything that
+                   would exceed 100.
+                   The old rule restarted from the offending digit
+                   (`typed > 100` -> `typed = dig`), which silently disagreed
+                   with the screen: the keypad is the vendor's and shows every
+                   key pressed, so typing 6,5,9 displayed "659" while we seeked
+                   to 9%. A destination that differs from the number on screen
+                   is worse than a key that does nothing, because nothing tells
+                   the reader it happened. We cannot stop the display showing
+                   the extra digit -- that widget is not ours -- but we can
+                   refuse to act on it. */
+                if (S->digits < 3) {
+                    int32_t next = S->typed * 10 + dig;
+                    if (next <= 100) { S->typed = next; S->digits++; }
+                }
             } else if (row == 3 && col == 0) {        /* backspace, left of 0 */
-                if (S->typing) S->typed /= 10;
+                if (S->typing) {
+                    S->typed /= 10;
+                    if (S->digits) S->digits--;
+                }
             } else if (row == 3 && col == 2) {        /* enter, right of 0    */
                 int32_t size = (int32_t)*FW_BOOK_SIZE;
                 int32_t pct = S->typed;

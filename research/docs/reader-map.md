@@ -92,3 +92,42 @@ walks back for the `ldr r2, [pc, ...]` feeding its third argument, resolves the
 string, then attributes it to the nearest preceding `push` (the function
 prologue). Several addresses carry more than one name where a function is
 inlined into or shares a prologue with another.
+
+## The select-page keypad's textarea (partially mapped)
+
+The percent counter in the status bar is a **textarea** (class `0x1012c828`),
+not a label. Our reader writes into its label child (class `0x1012c7f0`), and
+that is the source of three separate display bugs: a leftover digit, a garbled
+glyph after the first keypress, and the keypad opening pre-filled with our text
+so that typing appended to it (`4%` + `65` = `4%65`).
+
+All three are the same mistake — sharing a widget the vendor is driving —
+because the textarea keeps its own state *beside* the label:
+
+| offset | meaning | evidence |
+|---|---|---|
+| `+0x24` | the label child holding the text | `ldr r0,[r4,#0x24]` then `bl lv_label_set_text_copy` |
+| `+0x40` | character count | `ldr r1,[r4,#0x40]; subs r1,#1` on the delete path |
+
+Setting the label without updating `+0x40` leaves the two disagreeing, and the
+next edit works from the wrong offset — which is precisely the garbled glyph.
+
+Useful addresses found so far:
+
+| address | what |
+|---|---|
+| `0x100fe944` | `lv_label_set_text_copy` (copying setter, already used) |
+| `0x100ec576` | `lv_label_set_text` (stores the POINTER — do not use on this) |
+| `0x100fee64` | returns a textarea's text; its result is passed straight to a string compare in the keypad handler at `0x10067ccc` |
+| `~0x100feec4` | the delete-a-character path, per the layout above |
+| `0x100fee84` | called on the textarea right after the label is re-set — likely the cursor/refresh follow-up |
+
+**Not yet found: the equivalent of `lv_textarea_set_text`.** It is what would
+let the reader pre-fill the keypad with the current percent and have typing
+overwrite it, instead of avoiding the widget entirely. Two ways in: identify
+the function containing `0x100feec4` and look at its neighbours, or set the
+label *and* `+0x40` directly, which is workable but fragile.
+
+`tools/extract_symbols.py` cannot help here: it recovers names from the
+firmware's own log calls, and LVGL library functions do not log their names.
+None of the 1,410 recovered symbols is a textarea function.
