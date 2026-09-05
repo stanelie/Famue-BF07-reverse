@@ -63,7 +63,11 @@ def main():
     ver = version()
     print(f"version: {ver}")
 
-    patch_src = os.path.join(RESEARCH, "reference", "reader-patch.bin")
+    import glob as _glob
+    patches = sorted(_glob.glob(os.path.join(RESEARCH, "reference", "reader-patch*.bin")))
+    if not patches:
+        raise SystemExit("no reader-patch*.bin in reference/ -- build one with mkpatch.py")
+    patch_src = patches[0]
     payload_src = os.path.join(RESEARCH, "reference", "adfus_u_go.bin")
     for label, path in [("reader-patch.bin", patch_src),
                          ("adfus_u_go.bin", payload_src)]:
@@ -73,10 +77,16 @@ def main():
                 f"  reader-patch.bin: build it with mkpatch.py from a decrypted dump\n"
                 f"  adfus_u_go.bin: from Actions' public LARK SDK, see reference/README.md")
 
-    reader, blocks, ref_sha, verify, installed = mkpatch.load_patch(
-        open(patch_src, "rb").read())
-    print(f"reader-patch.bin: {len(reader)} reader sector(s), {len(blocks)} "
-          f"vendor block(s), built from plaintext sha256 {ref_sha.hex()[:16]}...")
+    # One patch per firmware build: the installer reads the device and picks.
+    # Shipping only one would refuse every user on the other build.
+    for p in patches:
+        reader, blocks, ref_sha, verify, installed = mkpatch.load_patch(open(p, "rb").read())
+        print(f"{os.path.basename(p)}: {len(reader)} reader sector(s), {len(blocks)} "
+              f"vendor block(s), firmware {ref_sha.hex()[:16]}..., "
+              f"{len(verify)} verify, {len(installed)} installed")
+        if not verify:
+            raise SystemExit(f"{os.path.basename(p)} has no firmware-check table; "
+                             f"rebuild it with mkpatch.py --ref-cipher")
 
     dist = os.path.join(ROOT, "dist")
     staging = os.path.join(dist, f"bf07-bundle-{ver}")
@@ -87,7 +97,8 @@ def main():
 
     for name in TOOLS:
         shutil.copy2(os.path.join(HERE, name), os.path.join(staging, "tools", name))
-    shutil.copy2(patch_src, os.path.join(staging, "reference", "reader-patch.bin"))
+    for p in patches:
+        shutil.copy2(p, os.path.join(staging, "reference", os.path.basename(p)))
     shutil.copy2(payload_src, os.path.join(staging, "reference", "adfus_u_go.bin"))
     shutil.copytree(os.path.join(ROOT, "fonts"), os.path.join(staging, "fonts"))
 

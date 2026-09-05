@@ -32,14 +32,12 @@ run without one, and it is the only way back if anything looks wrong
 afterward — restoring from it is byte-exact and has been proven on hardware
 repeatedly.
 
-This bundle installs a specific patch, built against **firmware
-`1.00_2506301055`** (build date Jun 30 2025). **At least two BF07 firmware
-builds exist in the wild** — a second unit bought later shipped an older
-May 27 2025 build — and a newer purchase is no guarantee of a newer build.
-
-You don't have to work out which you have: the installer checks before it
-writes and refuses if they don't match, leaving the device untouched. If it
-does refuse, that's it working, not a fault.
+**At least two BF07 firmware builds exist in the wild** — a unit bought later
+shipped the *older* one, so a newer purchase is no guarantee of newer firmware.
+This bundle carries a patch for each, and the installer reads your device to
+pick the right one. If it recognises neither, it refuses and writes nothing,
+and tells you how to get your build supported. A refusal is it working, not a
+fault.
 
 Once the install step starts, **do not disconnect the USB cable or power off
 the device** until it prints that it has finished. Interrupting a normal
@@ -117,21 +115,26 @@ and haven't touched since.
 ## Step 3 — Install the reader
 
 ```
-python3 tools/bf07.py install -b mybf07.bin --patch reference/reader-patch.bin
+python3 tools/bf07.py install -b mybf07.bin --patch reference
 ```
 
-Before writing anything, this checks your device against the patch and stops if
-they don't match:
+**You don't need to know which firmware your device has.** More than one BF07
+build exists, the bundle ships a patch for each, and the installer reads your
+device and picks the right one. (Don't go by the version shown on the device —
+it isn't reliable: a unit running one build reported the other's version.)
 
-- **`This patch was NOT built for the firmware on this device`** — there is
-  more than one BF07 firmware build in circulation, and this one isn't the one
-  the patch targets. Nothing was written and your device is untouched. Installing
-  anyway would leave it unable to boot, recoverable only by opening the case, so
-  don't use `--force` to get past this.
-- **`already has exactly this patch installed`** — nothing to do, and it skips
-  the write rather than erasing and rewriting for no gain.
+Three possible outcomes, and two of them write nothing:
 
-Otherwise it proceeds, and you'll see a warning:
+- **`firmware recognised -> …`** — it found the matching patch and proceeds.
+- **`already installed on this device -- nothing to do`** — you're up to date,
+  and it skips the write rather than erasing and rewriting for no gain.
+- **`None of the available patches match`** — your device runs a build we
+  haven't seen. Nothing was written. The message explains both ways forward:
+  send us your backup so we can support it, or flash one of the archived stock
+  firmwares and patch that. **Don't use `--force` to get past this** — it would
+  leave the device unable to boot, recoverable only by opening the case.
+
+When it does proceed, you'll see a warning:
 
 ```
 !!  DO NOT DISCONNECT POWER, and do not unplug the USB cable, until this

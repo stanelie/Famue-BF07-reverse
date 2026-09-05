@@ -54,6 +54,35 @@ call every one of them 0x24 bytes off, landing mid-instruction.
 
 **A second build therefore needs the reader RECOMPILED, not just re-hooked.**
 
+### And recompiling against a new fw.h is STILL not enough
+
+The first May 27 build did exactly that — every `fw.h` address relocated and
+verified, zero stale references in the binary — and **boot-looped every 9
+seconds**. `main.c` also carries ten `movw`/`movt` pairs *inside inline-asm
+string literals*: the trampolines that jump back into the vendor function after
+a hook runs. **Seven of the ten still held Jun 30 addresses**, so every hook
+returned into unrelated code.
+
+They were missed because the dependency audit enumerated what the reader
+**declares** (`fw.h`), not everything it **encodes**. An address split across
+two 16-bit halves inside an asm string is invisible both to a header rewrite
+and to a search for 32-bit literals in the built binary — searching
+`reader.bin` for the literal address of a known dependency returns *zero
+occurrences*, which looks like proof of absence and is not.
+
+`tools/mkfwh.py --source/--source-out` now emits a relocated copy of the C
+source alongside the header.
+
+### One thing that did NOT need relocating
+
+The reader places its `.bss` inside the vendor page context at RAM
+`0x18018a4c + 0x2c`. That is a RAM address, so none of the XIP tooling checks
+it — but `0x18018a4c` is referenced from the same two code sites
+(`0x100493c0`, `0x1004a110`) with the same value in both builds, so the
+placement holds. Worth re-checking for any future build: overwriting that
+struct's header once destroyed a live kernel mutex and faulted far from the
+damage.
+
 ## Complete map (Jun 30 -> May 27)
 
 Hook sites, from `tools/retarget.py`:
@@ -87,7 +116,25 @@ May 27 build too**, so it fits.
    99.5% of the 52 KB budget; 18 overflows).
 3. Build the patch with the retargeted hook sites, `--ref-cipher` from
    `firmware/stock-full-flash-2025-05-27.bin`.
-4. Install on the May 27 unit and confirm it boots and pages turn. **Not
-   validated on hardware yet** — everything above is static analysis.
+4. Install on the May 27 unit and confirm it boots and pages turn.
 
-Step 4 is the one that matters. Nothing here has run on a device.
+**Done — the May 27 reader boots and works on hardware.** Clean boot log, no
+fault or assertion, through to `app_manager_init_app`, and the reader renders
+and pages correctly.
+
+Build it with:
+
+```
+tools/mkfwh.py -r <jun30 plain> -t <may27 plain> \
+    -i reader/include/fw.h      -o reader/include-may27/fw.h \
+    --source reader/src/main.c  --source-out reader/src-may27/main.c
+clang-15 ... -Iinclude-may27 -Iinclude -c src-may27/main.c -o src-may27/main.o
+arm-none-eabi-ld -T link.ld src-may27/main.o -o reader-may27.elf
+arm-none-eabi-objcopy -O binary reader-may27.elf reader-may27.bin
+tools/mkpatch.py -p <may27 plain> --ref-cipher firmware/stock-full-flash-2025-05-27.bin \
+    -o reference/reader-patch-may27.bin
+```
+
+`patchset.py`'s `BUILDS` table keys the hook sites AND the matching reader
+binary on the decrypted image's sha256, so the two cannot be mismatched by
+hand; an unknown image is a hard failure, not a fallback.

@@ -615,73 +615,101 @@ def already_installed(d, installed):
     return True
 
 
-def check_firmware(d, verify, blocks, args):
-    """Refuse to install a patch built for a different firmware build.
+def patch_files(spec):
+    """--patch may name one file or a directory of them. More than one BF07
+    firmware build ships, so a release carries a patch per build and the right
+    one is chosen by reading the device, not by asking the user to know which
+    firmware they have -- they cannot tell. The on-device version string is not
+    even reliable: a unit running May-27 code reported the Jun-30 version,
+    because the version metadata lives outside fw0_sys."""
+    if spec is None:
+        here = os.path.join(HERE, os.pardir, "reference")
+        if not os.path.isdir(here):
+            raise SystemExit("give --patch <file or directory>")
+        spec = here
+    if os.path.isdir(spec):
+        found = sorted(glob.glob(os.path.join(spec, "reader-patch*.bin")))
+        if not found:
+            raise SystemExit(f"no reader-patch*.bin in {spec}")
+        return found
+    return [spec]
 
-    At least two BF07 builds ship in the wild (Jun 30 2025 and May 27 2025).
-    They have an identical string set and 465 of 480 differing sectors -- the
-    same code recompiled and relinked. Installing the wrong one puts our hooks
-    at addresses holding unrelated code: the device hangs BEFORE USB comes up,
-    so no software recovery exists and it takes shorting TX/RX with the case
-    open to get back in. That happened once; this function is why it should not
-    happen again.
 
-    The check compares CIPHERTEXT, read with the ordinary `rs` path, because
-    the obvious alternative is a trap: reading plaintext means reconfiguring
-    SPI0 for decryption mid-session, and that wedges the running payload --
-    every later transfer times out and only a physical power-cycle clears it.
-    Measured, on hardware, while building this. usb_plaindump.py may do that
-    because it exits straight afterwards; a tool that then has to WRITE must
-    not touch those registers at all.
+def load_candidate(path):
+    from mkpatch import load_patch
+    reader, blocks, ref_sha, verify, installed = load_patch(open(path, "rb").read())
+    return {"path": path, "reader": reader, "blocks": blocks,
+            "ref_sha": ref_sha, "verify": verify, "installed": installed}
 
-    Comparing ciphertext works because the flash key is not per-device: across
-    two units and two firmware builds, 17,848 of 17,849 shared plaintext blocks
-    encrypt identically. If some unit did have its own key the hashes simply
-    would not match and this refuses to install -- the safe direction. It never
-    green-lights the wrong firmware.
 
-    Only the hook sectors are read (a few 4 KB reads, seconds), not the whole
-    1.9 MB partition -- enough to prove the code we are about to hook is the
-    code the patch was built against.
+UNKNOWN_FIRMWARE = """
+None of the available patches match the firmware on this device.
+
+This is not a fault and nothing has been written -- your device is untouched.
+It means your BF07 runs a build we have not seen. More than one exists: two are
+known so far, and a unit bought LATER shipped the OLDER one, so age tells you
+nothing about which you have.
+
+Two ways forward:
+
+ 1. HELP US SUPPORT YOUR BUILD -- preferred.
+    You already have a backup from `bf07.py backup`. Open an issue at
+    https://github.com/stanelie/Famue-BF07-reverse/issues and attach it, or a
+    link to it -- it is 4 MB. That image is exactly what is needed to build a
+    patch for your build, and it can be flashed onto a development unit to
+    test one safely. Mention roughly when you bought the device.
+
+ 2. FLASH A FIRMWARE WE DO SUPPORT, then patch that.
+    The repository archives stock images for the known builds, under
+    research/firmware/. Writing one replaces fw0_sys only -- your settings,
+    calibration and resources are left alone -- after which the matching patch
+    installs normally:
+        bf07.py restore --plain <a supported stock fw0_sys image>
+    KEEP YOUR OWN BACKUP FIRST. It is the only copy of YOUR build in
+    existence, and the thing that makes option 1 possible for everyone else.
+"""
+
+
+def select_patch(d, cands, args):
+    """Pick the patch built for the firmware actually on this device.
+
+    Decided by reading the device, never by trusting a version string, and an
+    unrecognised build is refused outright: installing a patch whose hooks were
+    computed against different code hangs the device before USB comes up, and
+    the only way back is opening the case to short TX/RX.
     """
-    if not verify:
-        print("!! This patch carries no firmware check (old BF07PAT1 format).")
-        print("!! It CANNOT be confirmed to match your device. If the reader")
-        print("!! does not start after installing, restore immediately:")
-        print(f"!!   bf07.py restore -b {args.backup}\n")
-        return
-    if getattr(args, "force", False):
-        print("!! --force: skipping the firmware check. A mismatch here hangs")
-        print("!! the device before USB and needs the TX/RX short to recover.\n")
-        return
+    for c in cands:
+        if c["installed"] and already_installed(d, c["installed"]):
+            print(f"\n{os.path.basename(c['path'])} is already installed on this "
+                  f"device -- nothing to do.")
+            print("Not erasing or rewriting anything.")
+            raise SystemExit(0)
 
-    print(f"checking this device runs the firmware the patch was built for "
-          f"({len(verify)} sector(s))...")
-    # Which blocks this patch overwrites, per sector -- excluded from the hash
-    # so an already-patched device still matches on the surrounding context.
-    edited = {}
-    for addr, _ in blocks:
-        edited.setdefault(addr & ~0xfff, set()).add(addr & 0xfff)
-    bad = []
-    for addr, want in verify:
-        sec = d.read(addr, SECTOR)
-        if len(sec) != SECTOR:
-            raise SystemExit(f"short read at 0x{addr:06x} -- cannot verify the "
-                             f"firmware, refusing to write")
-        if mkpatch_context_digest(sec, edited.get(addr, set())) != want:
-            bad.append(addr)
+    matched = []
+    for c in cands:
+        if not c["verify"]:
+            continue                      # BF07PAT1: carries no way to check
+        edited = {}
+        for a, _ in c["blocks"]:
+            edited.setdefault(a & ~0xfff, set()).add(a & 0xfff)
+        if all(mkpatch_context_digest(d.read(a, SECTOR), edited.get(a, set())) == w
+               for a, w in c["verify"]):
+            matched.append(c)
 
-    if bad:
-        raise SystemExit(
-            "This patch was NOT built for the firmware on this device.\n"
-            f"  {len(bad)} of {len(verify)} hook sector(s) differ: "
-            + ", ".join(f"0x{a:06x}" for a in bad) + "\n"
-            "Installing it would hang the device at boot, recoverable only by\n"
-            "opening the case and shorting the debug UART's TX and RX pads.\n"
-            "\nNothing has been written -- your device is untouched.\n"
-            "There is more than one BF07 firmware build; you need the patch\n"
-            "built for yours.")
-    print(f"  ok: all {len(verify)} hook sector(s) match\n")
+    if len(matched) == 1:
+        print(f"\nfirmware recognised -> {os.path.basename(matched[0]['path'])}")
+        return matched[0]
+    if len(matched) > 1:
+        raise SystemExit("more than one patch claims this firmware -- refusing "
+                         "to guess:\n" +
+                         "".join(f"  {os.path.basename(c['path'])}\n" for c in matched))
+
+    unchecked = [c for c in cands if not c["verify"]]
+    if unchecked and getattr(args, "force", False):
+        print("!! --force with an uncheckable (BF07PAT1) patch. If the reader")
+        print("!! does not start, restore immediately.\n")
+        return unchecked[0]
+    raise SystemExit(UNKNOWN_FIRMWARE)
 
 
 def install_patch(args, backup):
@@ -694,23 +722,26 @@ def install_patch(args, backup):
     of stock context the patch carries -- and it works whether the flash key is
     per-device or global, because nothing here assumes anything about the key.
     """
-    from mkpatch import load_patch
-    reader, blocks, ref_sha, verify, installed = load_patch(
-        open(args.patch, "rb").read())
-    print(f"patch: {len(reader)} reader sector(s), {len(blocks)} vendor block(s)")
-    print(f"       built from plaintext sha256 {ref_sha.hex()[:16]}...")
+    paths = patch_files(args.patch)
+    print(f"{len(paths)} patch file(s) available:")
+    cands = []
+    for p in paths:
+        c = load_candidate(p)
+        cands.append(c)
+        print(f"  {os.path.basename(p)}: {len(c['reader'])} reader sector(s), "
+              f"for firmware {c['ref_sha'].hex()[:12]}...")
+
+    d = connect()
+    chosen = select_patch(d, cands, args)
+    reader, blocks = chosen["reader"], chosen["blocks"]
+    verify, installed = chosen["verify"], chosen["installed"]
+    print(f"\nusing {os.path.basename(chosen['path'])}")
 
     # group the named vendor blocks by their containing sector
     by_sector = {}
     for addr, data in blocks:
         by_sector.setdefault(addr & ~0xfff, {})[addr & 0xfff] = data
 
-    d = connect()
-    if already_installed(d, installed):
-        print("This device already has exactly this patch installed -- nothing")
-        print("to do. Not erasing or rewriting anything.")
-        return
-    check_firmware(d, verify, blocks, args)
     print(DANGER_OPEN)
 
     # reader sectors: pure ours, write plaintext, leave 0xFF erased
@@ -814,7 +845,8 @@ def main():
     p.set_defaults(fn=cmd_restore)
     p = sub.add_parser("install")
     p.add_argument("-b", "--backup", required=True)
-    p.add_argument("--patch", help="reader-patch.bin (ADFU only, no serial/image)")
+    p.add_argument("--patch", help="reader-patch*.bin, or a DIRECTORY of them; the one matching your firmware is chosen automatically "
+                                "(default: the bundle's reference/ directory)")
     p.add_argument("-p", "--plain", help="decrypted fw0_sys image (legacy path)")
     p.add_argument("--force", action="store_true",
                    help="install even if the patch was built for a different "
