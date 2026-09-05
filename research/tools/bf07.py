@@ -49,6 +49,7 @@ FLASH_SIZE = 0x400000
 FW0_START, FW0_END, SECTOR = 0x14000, 0x200000, 0x1000
 FW0_SYS_END = 0x1F4000          # fw0_sdfs begins here
 HERE = os.path.dirname(os.path.abspath(__file__))
+IN_MENU = False        # set by menu(): changes how errors tell you to recover
 PAYLOAD = os.environ.get("BF07_PAYLOAD", os.path.join(HERE, os.pardir, "reference", "adfus_u_go.bin"))
 
 
@@ -524,17 +525,15 @@ def cmd_verify(args):
     reboot_after(d, args)
 
 
+# Why losing power here is the dangerous case, for anyone reading the source:
+# the firmware is incomplete between the first erase and the verify, and the
+# flag that would let the tool back in lives in RTC_REMAIN3, which does NOT
+# survive a power cycle (measured: set it, power cycle, reads back 0). The
+# device would boot the half-written firmware, and mbrec does not check it.
+# The user does not need any of that -- they need to know not to unplug it.
 DANGER_OPEN = """
 !!  DO NOT DISCONNECT POWER, and do not unplug the USB cable, until this
 !!  command prints that it is finished.
-!!
-!!  From the first erase until the verify passes, fw0_sys is incomplete. A
-!!  failed verify is harmless -- run the command again. Losing power in that
-!!  window is not: the GOTO_ADFU flag that would let you back in lives in
-!!  RTC_REMAIN3, and it does NOT survive a power cycle (measured: set, power
-!!  cycled, read back 0x00000000). The device would boot the half-written
-!!  firmware instead, and mbrec does not check it -- there is no automatic
-!!  recovery on this board.
 """
 
 DANGER_CLOSED = "verified -- safe to disconnect now."
@@ -750,7 +749,11 @@ def cmd_install(args):
                    if back[i:i + 32] != backup[addr + i:addr + i + 32]]
         print(f"  0x{addr:06x}: {len(changed)} block(s) changed")
     print(DANGER_CLOSED + " " + POWER_CYCLE)
-    print(f"If anything is wrong: bf07.py restore -b {args.backup}")
+    if IN_MENU:
+        print("If anything is wrong, restore from your backup (option 5).")
+    else:
+        print(f"If anything is wrong, restore from your backup:\n"
+              f"  bf07.py restore -b {args.backup}")
 
 
 def mkpatch_context_digest(sector_bytes, edited_offsets):
@@ -1038,14 +1041,17 @@ def install_patch(args, backup):
         if bad:
             raise SystemExit(
                 f"0x{sec:06x}: VERIFY FAILED -- {'; '.join(bad[:4])}\n"
-                f"The device is in an unknown state. STAY IN ADFU and do not\n"
-                f"power off -- the way back in does not survive a power cycle.\n"
-                f"Restore now:\n"
-                f"  bf07.py restore -b {args.backup}")
+                f"The device is in an unknown state. Do not power it off.\n" +
+                ("Restore now, from the menu: option 5." if IN_MENU
+                 else f"Restore now:\n  bf07.py restore -b {args.backup}"))
         print(f"  0x{sec:06x}: {len(edits)} block(s) patched, "
               f"{SECTOR//32 - len(edits)} preserved, verified")
     print("\n" + DANGER_CLOSED)
-    print(f"If anything is wrong: bf07.py restore -b {args.backup}")
+    if IN_MENU:
+        print("If anything is wrong, restore from your backup (option 5).")
+    else:
+        print(f"If anything is wrong, restore from your backup:\n"
+              f"  bf07.py restore -b {args.backup}")
     # Only here, i.e. only once every sector has been written AND read back and
     # compared. A reboot on any other path would boot a half-written fw0_sys.
     if not getattr(args, "no_reboot", False):
@@ -1120,11 +1126,7 @@ MENU_HEADER = """
 
     Getting back from that means OPENING THE CASE, shorting the two debug
     UART pads (TX and RX) together, and pressing reset. A jumper wire or
-    tweezers will do; no soldering. This happened twice while developing
-    this tool and recovery worked both times, so treat it as a real
-    possibility, not a theoretical one.
-
-    If you would not be willing to open the case, use options 1 and 2 only.
+    tweezers will do; no soldering.
 """
 
 
@@ -1180,6 +1182,8 @@ def menu():
     single command line. The risk warning lives here, once, above the choices:
     the user reads it before picking anything rather than being interrupted by
     it after they have already decided."""
+    global IN_MENU
+    IN_MENU = True
     print(MENU_HEADER)
     while True:
         known = _backups_here()
