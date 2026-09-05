@@ -89,6 +89,40 @@ def mounted_volumes():
     return found
 
 
+def unmount_volumes(busy):
+    """Unmount the device's own volumes before switching it into ADFU.
+
+    Doing it for the user rather than printing a command: every operation here
+    needs it, so making them run udisksctl by hand first is pure friction.
+
+    sync() first. Entering ADFU reboots the device, so anything still sitting in
+    the page cache for that filesystem is simply lost -- and a user who has just
+    copied a book across would have no reason to expect that.
+
+    udisksctl is tried before umount because these mounts are usually made by
+    udisks for the desktop session, and unmounting one behind its back leaves it
+    convinced the volume is still there. Failures are not fatal here: the caller
+    re-checks what is actually still mounted and only then gives up, so a
+    missing udisksctl or a refused polkit prompt just falls through to umount.
+    """
+    import subprocess
+    print("unmounting the device's storage first:")
+    for src, mnt in busy:
+        print(f"  {src} on {mnt}")
+    try:
+        subprocess.run(["sync"], timeout=30)
+    except Exception:
+        pass
+    for src, _ in busy:
+        for cmd in (["udisksctl", "unmount", "-b", src], ["umount", src]):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if r.returncode == 0:
+                    break
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                continue
+
+
 def enter_adfu(timeout=25):
     """Switch a normally-running device into ADFU, over USB alone.
 
@@ -104,12 +138,16 @@ def enter_adfu(timeout=25):
 
     busy = mounted_volumes()
     if busy:
+        unmount_volumes(busy)
+        busy = mounted_volumes()
+    if busy:
         raise SystemExit(
-            "The device's storage is still mounted:\n"
+            "The device's storage is still mounted and could not be unmounted\n"
+            "automatically:\n"
             + "".join(f"    {src} on {mnt}\n" for src, mnt in busy) +
             "Entering ADFU detaches usb-storage and reboots the device, which\n"
-            "would pull that filesystem out from under the kernel. Unmount it\n"
-            "first:\n"
+            "would pull that filesystem out from under the kernel. Close\n"
+            "anything using the drive, then unmount it by hand:\n"
             + "".join(f"    udisksctl unmount -b {src}\n" for src, _ in busy))
 
     # The claim can fail at set_configuration OR at the first transfer,

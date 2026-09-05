@@ -172,7 +172,7 @@ if you want it.
 | Message / symptom | What it means | What to do |
 |---|---|---|
 | `No BF07 found. Connect it over USB and choose disk drive mode on the boot menu` | The device isn't visible yet | Reconnect the cable, pick disk-drive mode on the device's own boot menu, try again |
-| `The device's storage is still mounted... Unmount it first` | Your OS auto-mounted the device's drive | Run the `udisksctl unmount` (or equivalent) command it prints, then retry |
+| `still mounted and could not be unmounted automatically` | The tool unmounts the device's drive for you, but something is still using it | Close anything open on the drive (file manager, terminal sitting in it), then retry. It prints the manual command if you need it |
 | A `verify` or `install` run stalls or every USB transfer times out | ADFU got wedged | **Physically power-cycle the device** (a soft `usb reset` won't clear this) and retry from `backup` |
 | `install` reports a `VERIFY FAILED` and tells you to stay connected | A write didn't take | Do exactly what it says — **stay connected, don't power off** — and immediately run the `restore` command it prints |
 | `This patch was NOT built for the firmware on this device` | Your BF07 runs a different firmware build than this patch targets | Nothing was written — your device is fine. You need a patch built for your firmware; open an issue with the sector addresses it printed. **Don't use `--force`** |
