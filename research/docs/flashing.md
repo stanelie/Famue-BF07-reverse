@@ -237,6 +237,25 @@ part of the normal write path.
 Restoring is the same operation in reverse: erase and rewrite the affected sectors
 from the backup. Reverting to stock has been done twice with zero differing blocks.
 
+## Entering ADFU from the serial shell
+
+With the UART wired, `dbg reboot adfu` puts the device straight into ADFU, and
+`bf07.py` takes it from there -- `enter_adfu()` returns immediately when the
+device is already `10d6:10d6`. No disk-drive mode, no touching the cable:
+
+```
+echo 'dbg reboot adfu' > /dev/ttyUSB0     # (at 2000000 baud)
+bf07.py install -b <backup> --patch <patch> --yes --no-reboot
+```
+
+This matters for a develop/flash/test loop, because **the device does not
+enumerate USB at all while the reader is running** -- only in the USB view or
+in ADFU. So a cable that looks disconnected from the host may be perfectly
+well connected; `lsusb` showing nothing means "not in a USB-presenting mode",
+not "unplugged". Diagnosing that as an unplugged cable wastes a round trip.
+
+`--no-reboot` then leaves it in ADFU so the next step is yours to choose.
+
 ## Recovery
 
 | symptom | cause | fix |

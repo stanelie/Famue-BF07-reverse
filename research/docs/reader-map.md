@@ -122,7 +122,46 @@ Useful addresses found so far:
 | `~0x100feec4` | the delete-a-character path, per the layout above |
 | `0x100fee84` | called on the textarea right after the label is re-set — likely the cursor/refresh follow-up |
 
-**Not yet found: the equivalent of `lv_textarea_set_text`.** It is what would
+### Layout, read off a live widget
+
+Measured by copying the struct **in process** (the reader holds a verified
+pointer) and dumping our own `.bss` afterwards. Reading the object directly
+over the shell does not work: each `dbg mdw` is a ~1s round trip while LVGL
+churns the heap, so the address is stale by the time it is read -- twice the
+dump came back with a RAM pointer where the class pointer must be, and once
+`ta_obj` moved between two consecutive reads.
+
+| offset | meaning | how it was established |
+|---|---|---|
+| `+0x00` | class pointer (`0x1012c808` May27 / `0x1012c828` Jun30) | unchanged across the test; the -0x20 delta matches the data-table shift |
+| `+0x24` | the label child holding the text | our own writes land here |
+| `+0x2c` | password buffer | `get_text` returns it when `+0x5c` bit 2 is set |
+| `+0x3c` | cursor X, pixels | `23 -> 40` on one character |
+| **`+0x40`** | **cursor position, characters** | **`0 -> 1` on one character** |
+| `+0x44` | cursor X again | tracks `+0x3c` |
+| `+0x48` | packed (y,x) of the cursor area | `0013001c -> 0013002a` |
+| `+0x4c` | second character counter | tracks `+0x40` |
+| `+0x5c` | flags (bit 2 = password mode) | read by `get_text` |
+
+Adding one character changes exactly `+0x3c`, `+0x40`, `+0x44`, `+0x48`,
+`+0x4c` -- nothing else in the first 0x68 bytes.
+
+### What this makes possible
+
+Pre-filling the keypad and having typing overwrite needs three steps, all now
+available without finding `lv_textarea_set_text`:
+
+1. `lv_label_set_text_copy(ta[+0x24], text)` -- already used by the reader
+2. set `ta[+0x40]` (and `+0x4c`) to the new character count
+3. call `0x100fee84(ta)` to recompute the pixel fields (`+0x3c/+0x44/+0x48`),
+   which is what it appears to exist for -- it reads `+0x24`, works with a
+   `0xffff` sentinel, and is called right after the label is re-set on the
+   delete path
+
+Step 2 is exactly what our earlier writes omitted, which is why the widget
+desynced and the next keypress edited from the wrong offset.
+
+**Still not found: the equivalent of `lv_textarea_set_text`.** It is what would
 let the reader pre-fill the keypad with the current percent and have typing
 overwrite it, instead of avoiding the widget entirely. Two ways in: identify
 the function containing `0x100feec4` and look at its neighbours, or set the

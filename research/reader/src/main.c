@@ -143,6 +143,12 @@ struct inj_state {
     int32_t  drawn_pm;                /* percent currently in the top bar     */
     uint8_t  bar_cleared;             /* our text taken out while a popup is up */
     uint8_t  digits;                  /* digits accepted this entry (max 3)     */
+    uint32_t ta_obj;                  /* diag: the status-bar textarea          */
+    uint32_t ta_label;                /* diag: its label child we write to      */
+    uint32_t ta_snap[26];             /* diag: the textarea's first words, copied
+                                         IN PROCESS -- reading them over the shell
+                                         afterwards races LVGL's heap and returns
+                                         whatever now occupies the address */
     uint8_t  typing;                  /* the select-page keypad is up and used */
     int32_t  typed;                   /* percent being typed, 0..100           */
     uint32_t touch_n;                 /* every call, including idle polls   */
@@ -1121,8 +1127,9 @@ static void show_percent(void *cont, struct inj_state *S)
        because the position needs that resolution to move at all. */
     char buf[8];
     int n = 0;
+    int skip_write = 0;
     if (popup) {
-        if (S->bar_cleared) return;
+        if (S->bar_cleared) skip_write = 1;   /* clear once, then leave it be */
         S->bar_cleared = 1;
         buf[0] = 0;
         goto write;
@@ -1137,13 +1144,12 @@ static void show_percent(void *cont, struct inj_state *S)
     buf[n] = 0;
 write:;
 
-    if (pm != S->last_pm) {
-        S->last_pm = pm;
-        static const char pf[] = "%s%s: PCT tenths=%d\n";
-        fw_log(pf, "", "inj", pm);
-        static const char po[] = "%s%s: PCT off=%d\n";
-        fw_log(po, "", "inj", S->cur.start);
-    }
+    /* No fw_log here. Its output never reaches the UART on this device (see
+       docs/dead-ends.md), so these two calls and their format strings were
+       code that could not be read by anyone -- and this function is on the
+       render path. last_pm is still updated: tools/state.py reads it, and that
+       IS observable. */
+    S->last_pm = pm;
 
     uint32_t sn = lv_obj_child_cnt((void *)scr);
     if (sn > 16) sn = 16;
@@ -1174,6 +1180,17 @@ write:;
                crash came from using the static-text variant (which stores a
                pointer and sets a flag) on a widget of a different class. */
             if (*(volatile uint32_t *)k != LV_CLASS_COUNTER_IN) continue;
+            /* Diagnostic only: publish both objects so tools/state.py can
+               point `dbg mdw` at the real struct. Reading the layout off a
+               live widget beats guessing instruction encodings -- two static
+               scans for the cursor field found nothing, because +0x24 is the
+               text pointer on a LABEL and the label child on a TEXTAREA, so
+               no static filter separates them. */
+            S->ta_obj = o;
+            S->ta_label = (uint32_t)k;
+            for (int q = 0; q < 26; q++)
+                S->ta_snap[q] = *(volatile uint32_t *)(o + q * 4);
+            if (skip_write) continue;
             /* Only when it actually differs. This setter strlens and REALLOCS,
                and calling it on every render churned the LVGL heap about three
                times a second -- the same heap our own state is allocated from.
