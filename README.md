@@ -72,102 +72,60 @@ Get the latest bundle from the [Releases page](../../releases) — download
 the release page if you want to confirm nothing got corrupted in transit.
 Unzip it, then open a terminal in the folder it created.
 
-## Step 1 — Back up
+## Run it
 
 ```
-python3 tools/bf07.py backup -o mybf07.bin
+python3 tools/bf07.py
 ```
 
-Expect something like:
+That's the whole thing. It opens a menu, explains the risks once at the top,
+and walks you through everything:
 
 ```
-reading 4096 KB ...
-wrote mybf07.bin in 7.5s
-sha256 82f09263...
-Keep this file. It is the only way back.
+  1) Back up this device to a file      (safe, reads only)
+  2) Check a backup against the device  (safe, reads only)
+  3) Install the reader                 (WRITES to the device)
+  4) Copy the custom font to the drive  (safe, just a file copy)
+  5) Restore from a backup / go stock   (WRITES to the device)
+  6) Quit
 ```
 
-**Copy `mybf07.bin` somewhere off the device** — a USB drive, cloud storage,
-anywhere else. If your computer's drive fails, you want this file to still
-exist.
+**Do 1 first, then 2, then 3.** Options 1 and 2 only read from the device.
 
-## Step 2 — Verify
+- **1 — Back up.** Writes your device's firmware to a file (default
+  `mybf07.bin`). **Keep a copy somewhere other than this computer.** It is the
+  only way back, and the only copy of your particular firmware build.
+- **2 — Check.** Re-reads the device and compares it against that file, so you
+  know the whole chain works before anything is written. Expect
+  `device matches the backup`.
+- **3 — Install.** Reads your device, picks the matching patch automatically,
+  writes 21 sectors, verifies each one, and reboots the device. You don't need
+  to know which firmware you have — and shouldn't trust the version shown on
+  the device, which isn't reliable.
+- **4 — Font.** Copies `custom.font` onto the drive. Then pick it in the
+  reader's font menu on the device. This is the one option that needs the
+  drive *mounted*; the others unmount it for you.
+- **5 — Restore.** Puts the device back exactly as your backup found it —
+  stock reader and all. Works as many times as you like.
+
+If option 3 says **`None of the available patches match`**, your device runs a
+firmware build we haven't seen. Nothing was written. It explains how to get it
+supported — please do send the backup, it's how the next build gets added.
+
+### Or drive it from the command line
+
+Every option is also a subcommand, for scripting or if you prefer:
 
 ```
-python3 tools/bf07.py verify -b mybf07.bin
-```
-
-Expect:
-
-```
-comparing 0x014000-0x200000 against mybf07.bin ...
-device matches the backup
-```
-
-This doesn't change anything — it just re-reads the device and checks it
-against the file you just saved, confirming your computer, cable, and the
-tool can all talk to the device reliably before step 3 writes anything.
-
-If it reports sectors that differ, **stop and get in touch** (open an issue)
-rather than continuing — that shouldn't happen on a device you just backed up
-and haven't touched since.
-
-## Step 3 — Install the reader
-
-```
+python3 tools/bf07.py backup  -o mybf07.bin
+python3 tools/bf07.py verify  -b mybf07.bin
 python3 tools/bf07.py install -b mybf07.bin --patch reference
+python3 tools/bf07.py font
+python3 tools/bf07.py restore -b mybf07.bin
 ```
 
-**You don't need to know which firmware your device has.** More than one BF07
-build exists, the bundle ships a patch for each, and the installer reads your
-device and picks the right one. (Don't go by the version shown on the device —
-it isn't reliable: a unit running one build reported the other's version.)
-
-Three possible outcomes, and two of them write nothing:
-
-- **`firmware recognised -> …`** — it found the matching patch and proceeds.
-- **`already installed on this device -- nothing to do`** — you're up to date,
-  and it skips the write rather than erasing and rewriting for no gain.
-- **`None of the available patches match`** — your device runs a build we
-  haven't seen. Nothing was written. The message explains both ways forward:
-  send us your backup so we can support it, or flash one of the archived stock
-  firmwares and patch that. **Don't use `--force` to get past this** — it would
-  leave the device unable to boot, recoverable only by opening the case.
-
-When it does proceed, it explains what is about to happen and **asks you to
-type `YES`** before writing anything. Read that text — it covers the one
-failure the backup can't rescue you from: if a write leaves the device unable
-to boot far enough to appear over USB, restoring is impossible and getting back
-means opening the case to short two pads together. Nothing has been written at
-that point, so stopping there costs nothing.
-
-After confirming, you'll see:
-
-```
-!!  DO NOT DISCONNECT POWER, and do not unplug the USB cable, until this
-!!  command prints that it is finished.
-```
-
-**Respect it.** It normally takes well under a minute. When it's done, you'll
-see:
-
-```
-verified -- safe to disconnect now.
-If anything is wrong: bf07.py restore -b mybf07.bin
-
-rebooting the device...
-  it is booting the new reader now.
-```
-
-It reboots the device for you once every sector has been verified. Open a book
-and try turning a few pages.
-
-## Step 4 (optional) — Custom font
-
-Drop [`fonts/custom.font`](fonts/custom.font) onto the drive the device
-exposes over USB, then pick **Custom** in the reader's font menu. That's the
-whole step — no tool involved. See [fonts/README.md](fonts/README.md) if you
-want to build your own from a different font file.
+`install` asks for confirmation before writing; `--yes` skips it, `--no-reboot`
+leaves the device in update mode afterwards.
 
 ## Advanced (optional, needs a serial cable) — the "Custom" label
 
@@ -190,14 +148,17 @@ if you want it.
 | Device won't boot at all after install | Something went wrong during the write | With the device still connected: `python3 tools/bf07.py restore -b mybf07.bin` |
 | None of the above works, device is completely unresponsive | Extremely rare, but recoverable with physical access to the debug UART pads | See [research/docs/flashing.md](research/docs/flashing.md#recovery-of-last-resort-short-tx-and-rx-then-reset) — this is the true last resort and needs opening the case |
 
-## Rolling back
+## Rolling back / returning to stock
+
+Menu option **5**, or:
 
 ```
 python3 tools/bf07.py restore -b mybf07.bin
 ```
 
-This works at any time, as many times as you like, and is byte-exact — it
-puts the device back precisely as `backup` found it, stock reader included.
+Works at any time, as many times as you like, and is byte-exact — it puts the
+device back precisely as your backup found it, stock reader included. Use the
+backup you took *before* installing.
 
 ## How this works
 

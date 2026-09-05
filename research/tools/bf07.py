@@ -958,10 +958,168 @@ def install_patch(args, backup):
             print("  could not reboot it from here -- press reset on the device.")
 
 
+def cmd_font(args):
+    """Copy the user font onto the drive the device already exposes.
+
+    Note this is the ONE operation that needs the volume MOUNTED -- everything
+    else here unmounts it to enter ADFU. Nothing is flashed: the reader opens
+    this file itself at runtime, so a bad or missing font is a cosmetic problem,
+    not a recoverable-only-with-a-jumper one.
+    """
+    src = args.font
+    if not src:
+        # fonts/ sits beside tools/ in a release bundle, but one level higher
+        # in the source tree (research/tools -> repo root). Try both rather
+        # than working only where it happened to be developed.
+        for cand in (os.path.join(HERE, os.pardir, "fonts", "custom.font"),
+                     os.path.join(HERE, os.pardir, os.pardir, "fonts", "custom.font")):
+            if os.path.isfile(cand):
+                src = cand
+                break
+    if not src or not os.path.isfile(src):
+        raise SystemExit("no bundled font found -- pass one with --font <file.font>")
+    vols = mounted_volumes()
+    if not vols:
+        raise SystemExit(
+            "The device's drive is not mounted, so there is nowhere to copy to.\n"
+            "Connect the BF07 over USB and choose disk drive mode on its own\n"
+            "boot menu, wait for the drive to appear, then try again.\n"
+            "(Every other option here needs the drive UNMOUNTED -- this one is\n"
+            "the exception, because it copies a file rather than flashing.)")
+    if len(vols) > 1:
+        raise SystemExit("more than one volume from this device is mounted:\n"
+                         + "".join(f"    {s} on {m}\n" for s, m in vols))
+    _, mnt = vols[0]
+    dst = os.path.join(mnt, "custom.font")
+    import shutil
+    shutil.copy2(src, dst)
+    try:
+        import subprocess
+        subprocess.run(["sync"], timeout=30)
+    except Exception:
+        pass
+    print(f"copied {os.path.basename(src)} -> {dst} ({os.path.getsize(dst)} bytes)")
+    print("Now pick the custom font in the reader's font menu on the device.")
+    print("(The row is named \"Fangsong Small Font\" unless the optional")
+    print(" serial-only relabel step has been run -- it is the right row.)")
+
+
+MENU_HEADER = """
+==============================================================================
+  BF07 reader installer
+==============================================================================
+
+  This installs a replacement ebook reader on a Famue BF07, over USB.
+
+  BACK UP FIRST. Option 1 saves your device's firmware to a file. That file
+  is the only way back, so keep a copy somewhere other than this computer.
+
+  BEFORE YOU INSTALL, understand the one risk a backup does not cover:
+
+    Restoring needs the device to still show up over USB. If a write leaves
+    it unable to boot far enough to do that, NO software recovery is
+    possible -- including the restore option below.
+
+    Getting back from that means OPENING THE CASE, shorting the two debug
+    UART pads (TX and RX) together, and pressing reset. A jumper wire or
+    tweezers will do; no soldering. This happened twice while developing
+    this tool and recovery worked both times, so treat it as a real
+    possibility, not a theoretical one.
+
+    If you would not be willing to open the case, use options 1 and 2 only.
+"""
+
+
+def _ask_path(prompt, default=None, must_exist=False):
+    while True:
+        d = f" [{default}]" if default else ""
+        try:
+            v = input(f"{prompt}{d}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("\ncancelled.")
+        v = v or (default or "")
+        if not v:
+            print("  give a filename.")
+            continue
+        v = os.path.expanduser(v)
+        if must_exist and not os.path.isfile(v):
+            print(f"  no such file: {v}")
+            continue
+        return v
+
+
+def _backups_here():
+    """Existing backups, newest first -- so restore/verify can offer the one
+    they almost certainly mean instead of asking them to remember a path."""
+    found = [f for f in glob.glob("*.bin") if os.path.getsize(f) == FLASH_SIZE]
+    return sorted(found, key=os.path.getmtime, reverse=True)
+
+
+def menu():
+    """Interactive front end, so the whole job is doable without composing a
+    single command line. The risk warning lives here, once, above the choices:
+    the user reads it before picking anything rather than being interrupted by
+    it after they have already decided."""
+    print(MENU_HEADER)
+    while True:
+        known = _backups_here()
+        if known:
+            print(f"\n  backups found here: {', '.join(known[:3])}"
+                  + (" ..." if len(known) > 3 else ""))
+        print("""
+  1) Back up this device to a file      (safe, reads only)
+  2) Check a backup against the device  (safe, reads only)
+  3) Install the reader                 (WRITES to the device)
+  4) Copy the custom font to the drive  (safe, just a file copy)
+  5) Restore from a backup / go stock   (WRITES to the device)
+  6) Quit
+""")
+        try:
+            c = input("  choice: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        print()
+        try:
+            if c == "1":
+                out = _ask_path("  save backup as", default="mybf07.bin")
+                cmd_backup(argparse.Namespace(out=out))
+            elif c == "2":
+                b = _ask_path("  backup file", default=(known[0] if known else None),
+                              must_exist=True)
+                cmd_verify(argparse.Namespace(backup=b))
+            elif c == "3":
+                b = _ask_path("  your backup file (required)",
+                              default=(known[0] if known else None), must_exist=True)
+                cmd_install(argparse.Namespace(
+                    backup=b, patch=None, plain=None,
+                    yes=True,          # the warning above IS the consent
+                    force=False, no_reboot=False))
+            elif c == "4":
+                cmd_font(argparse.Namespace(font=None))
+            elif c == "5":
+                b = _ask_path("  backup to restore from",
+                              default=(known[0] if known else None), must_exist=True)
+                cmd_restore(argparse.Namespace(
+                    backup=b, plain=None, no_erase_detect=False))
+            elif c == "6":
+                return
+            else:
+                print("  pick 1-6.")
+                continue
+        except SystemExit as e:
+            # A refusal is information, not a reason to close the program --
+            # "your firmware is not recognised" should leave the user at the
+            # menu able to take a backup and send it in, not staring at a shell.
+            if str(e) and str(e) != "0":
+                print(f"\n{e}")
+        print("\n" + "-" * 78)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("backup"); p.add_argument("-o", "--out", default="bf07-backup.bin"); p.set_defaults(fn=cmd_backup)
     p = sub.add_parser("verify"); p.add_argument("-b", "--backup", required=True); p.set_defaults(fn=cmd_verify)
     p = sub.add_parser("restore")
@@ -972,6 +1130,9 @@ def main():
                    help="write every block, even ones that look like erased "
                         "flash decrypted through XIP (rarely correct)")
     p.set_defaults(fn=cmd_restore)
+    p = sub.add_parser("font")
+    p.add_argument("-f", "--font", help="a .font file (default: the bundled one)")
+    p.set_defaults(fn=cmd_font)
     p = sub.add_parser("install")
     p.add_argument("-b", "--backup", required=True)
     p.add_argument("--patch", help="reader-patch*.bin, or a DIRECTORY of them; the one matching your firmware is chosen automatically "
@@ -989,6 +1150,8 @@ def main():
                         "short to recover)")
     p.set_defaults(fn=cmd_install)
     args = ap.parse_args()
+    if not getattr(args, "cmd", None):
+        return menu()            # no arguments at all -> interactive
     args.fn(args)
 
 
