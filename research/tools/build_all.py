@@ -178,10 +178,15 @@ def main():
             # installed" and refuse to write the fix -- silently, and to
             # exactly the people who need it. Seen for real: a reader fix would
             # not install because the reference predated it.
-            if os.path.getmtime(inst) < os.path.getmtime(
-                    os.path.join(READER, t["bin"])):
+            # Compare against the SOURCE, not the built binary: this script
+            # rebuilds the binary before it gets here, so the binary is always
+            # newer and the check would reject every backup, including one
+            # taken a minute ago.
+            newest_src = max(os.path.getmtime(os.path.join(READER, f))
+                             for f in ("src/main.c", "include/fw.h"))
+            if os.path.getmtime(inst) < newest_src:
                 raise SystemExit(
-                    f"  {os.path.basename(inst)} is OLDER than {t['bin']}.\n"
+                    f"  {os.path.basename(inst)} predates the current reader source.\n"
                     f"  It records how the PREVIOUS reader looked once installed,\n"
                     f"  so the installer would tell users they are already up to\n"
                     f"  date and skip this build. Install this reader on a device,\n"
