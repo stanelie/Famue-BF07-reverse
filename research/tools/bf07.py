@@ -1177,6 +1177,47 @@ def leave_device_running():
     print(f"  could not reboot it from here -- {POWER_CYCLE.lower()}")
 
 
+def install_all_in_one(known):
+    """Back up, check the backup, then install -- as one choice.
+
+    These three were separate menu entries, but they are never useful apart:
+    the installer refuses to run without a backup, and a backup nobody checked
+    is not yet a way back. Splitting them asked the user to know the order and
+    to not stop halfway, which is exactly the sort of thing a person does once
+    and regrets.
+
+    Stops at the first failure. A backup that does not verify is a reason NOT
+    to write to the device, so the install never starts.
+    """
+    out = _ask_path("  save your backup as", default="mybf07.bin")
+    if os.path.exists(out):
+        try:
+            ans = input(f"  {out} exists. Overwrite it? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            raise SystemExit("\ncancelled.")
+        if ans not in ("y", "yes"):
+            raise SystemExit("kept the existing file -- nothing was done.")
+
+    print("\n--- 1/3  backing up ---")
+    cmd_backup(argparse.Namespace(out=out, no_reboot=False))
+
+    print("\n--- 2/3  checking that backup ---")
+    cmd_verify(argparse.Namespace(backup=out, no_reboot=False))
+    # cmd_verify prints its own verdict; re-read it here so a mismatch STOPS us.
+    d = connect()
+    bad = differing(d, open(out, "rb").read())
+    reboot_after(d, argparse.Namespace(no_reboot=False))
+    if bad:
+        raise SystemExit(
+            f"\nThe backup does not match the device ({len(bad)} sector(s) "
+            f"differ).\nNot installing: a backup you cannot trust is not a way "
+            f"back.\nTry again, and if it keeps happening please open an issue.")
+
+    print("\n--- 3/3  installing ---")
+    cmd_install(argparse.Namespace(backup=out, patch=None, plain=None,
+                                   yes=True, force=False, no_reboot=False))
+
+
 def menu():
     """Interactive front end, so the whole job is doable without composing a
     single command line. The risk warning lives here, once, above the choices:
@@ -1191,9 +1232,9 @@ def menu():
             print(f"\n  backups found here: {', '.join(known[:3])}"
                   + (" ..." if len(known) > 3 else ""))
         print("""
-  1) Back up this device to a file      (safe, reads only)
-  2) Check a backup against the device  (safe, reads only)
-  3) Install the reader                 (WRITES to the device)
+  1) INSTALL THE READER  -- backs up, checks the backup, then installs
+  2) Back up only                       (safe, reads only)
+  3) Check a backup against the device  (safe, reads only)
   4) Copy the custom font to the drive  (safe, just a file copy)
   5) Restore from a backup / go stock   (WRITES to the device)
   6) Quit
@@ -1207,19 +1248,14 @@ def menu():
         print()
         try:
             if c == "1":
+                install_all_in_one(known)
+            elif c == "2":
                 out = _ask_path("  save backup as", default="mybf07.bin")
                 cmd_backup(argparse.Namespace(out=out, no_reboot=False))
-            elif c == "2":
+            elif c == "3":
                 b = _ask_path("  backup file", default=(known[0] if known else None),
                               must_exist=True)
                 cmd_verify(argparse.Namespace(backup=b, no_reboot=False))
-            elif c == "3":
-                b = _ask_path("  your backup file (required)",
-                              default=(known[0] if known else None), must_exist=True)
-                cmd_install(argparse.Namespace(
-                    backup=b, patch=None, plain=None,
-                    yes=True,          # the warning above IS the consent
-                    force=False, no_reboot=False))
             elif c == "4":
                 cmd_font(argparse.Namespace(font=None))
             elif c == "5":

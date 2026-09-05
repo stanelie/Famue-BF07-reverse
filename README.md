@@ -92,26 +92,28 @@ That's the whole thing. It opens a menu, explains the risks once at the top,
 and walks you through everything:
 
 ```
-  1) Back up this device to a file      (safe, reads only)
-  2) Check a backup against the device  (safe, reads only)
-  3) Install the reader                 (WRITES to the device)
+  1) INSTALL THE READER  -- backs up, checks the backup, then installs
+  2) Back up only                       (safe, reads only)
+  3) Check a backup against the device  (safe, reads only)
   4) Copy the custom font to the drive  (safe, just a file copy)
   5) Restore from a backup / go stock   (WRITES to the device)
   6) Quit
 ```
 
-**Do 1 first, then 2, then 3.** Options 1 and 2 only read from the device.
+**Pick 1.** It does the whole job in the right order and stops at the first
+sign of trouble:
 
-- **1 — Back up.** Writes your device's firmware to a file (default
-  `mybf07.bin`). **Keep a copy somewhere other than this computer.** It is the
-  only way back, and the only copy of your particular firmware build.
-- **2 — Check.** Re-reads the device and compares it against that file, so you
-  know the whole chain works before anything is written. Expect
-  `device matches the backup`.
-- **3 — Install.** Reads your device, picks the matching patch automatically,
-  writes 21 sectors, verifies each one, and reboots the device. You don't need
-  to know which firmware you have — and shouldn't trust the version shown on
-  the device, which isn't reliable.
+- **Backs up** your firmware to a file (default `mybf07.bin`). **Keep a copy
+  somewhere other than this computer** — it is the only way back, and the only
+  copy of your particular firmware build.
+- **Checks that backup** against the device. If it doesn't match, it stops
+  there and does not install: a backup you can't trust isn't a way back.
+- **Installs**, picking the patch that matches your firmware automatically,
+  writing 21 sectors, verifying each one, and rebooting the device. You don't
+  need to know which firmware you have — and shouldn't trust the version shown
+  on the device, which isn't reliable.
+
+Options 2 and 3 do those steps individually if you want them separately.
 - **4 — Font.** Copies `custom.font` onto the drive. Then pick it in the
   reader's font menu on the device. This is the one option that needs the
   drive *mounted*; the others unmount it for you.
