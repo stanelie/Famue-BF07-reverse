@@ -169,3 +169,16 @@ typedef struct { uint8_t opaque[20]; } fs_file_t;
 /* Widget classes, read live from the running scene. */
 #define LV_CLASS_OUR_LINES   0x10129b54u   /* the 18 reading labels        */
 #define LV_CLASS_COUNTER_IN  0x1012c7f0u   /* leaf inside the page counter */
+
+/* Recompute a textarea's cursor pixel fields (+0x3c/+0x44/+0x48) after its
+   text or cursor index has changed. [OBSERVED] the delete path calls this on
+   the textarea immediately after re-setting the label, and it reads +0x24 and
+   works with a 0xffff sentinel. Setting the label WITHOUT this (and without
+   +0x40) is what desynced the widget and made the next keypress edit from the
+   wrong offset. */
+#define fw_ta_refresh ((void (*)(void *))0x100fee85)
+
+/* Cursor position, in characters, at textarea+0x40; a second counter tracks it
+   at +0x4c. Measured: adding one character moved 0 -> 1 in both. */
+#define TA_CURSOR   0x40
+#define TA_CURSOR2  0x4c

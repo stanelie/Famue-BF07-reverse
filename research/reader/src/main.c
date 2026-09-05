@@ -143,12 +143,6 @@ struct inj_state {
     int32_t  drawn_pm;                /* percent currently in the top bar     */
     uint8_t  bar_cleared;             /* our text taken out while a popup is up */
     uint8_t  digits;                  /* digits accepted this entry (max 3)     */
-    uint32_t ta_obj;                  /* diag: the status-bar textarea          */
-    uint32_t ta_label;                /* diag: its label child we write to      */
-    uint32_t ta_snap[26];             /* diag: the textarea's first words, copied
-                                         IN PROCESS -- reading them over the shell
-                                         afterwards races LVGL's heap and returns
-                                         whatever now occupies the address */
     uint8_t  typing;                  /* the select-page keypad is up and used */
     int32_t  typed;                   /* percent being typed, 0..100           */
     uint32_t touch_n;                 /* every call, including idle polls   */
@@ -1117,8 +1111,39 @@ static void show_percent(void *cont, struct inj_state *S)
             if (S->kid_min != 0xffffffffu && kids > S->kid_min) popup = 1;
         }
     }
-    if (!popup) S->bar_cleared = 0;
-    int pm = (int)((S->cur.start / 64) * 1000 / (size / 64 + 1));
+    int pm;
+    if (popup) {
+        /* Seed once, and NEVER over a value the reader has typed.
+           Without the S->typing test this re-seeded whenever the popup
+           detection dropped for a single frame: bar_cleared reset, the next
+           frame overwrote `typed` with the current position, and enter then
+           committed that instead of the number on screen. Once the reader had
+           landed at 0% every re-seed wrote 0, so every entry went to 0%.
+           The render may own the DISPLAY while the keypad is up; it must not
+           own the reader's input. */
+        if (!S->bar_cleared && !S->typing) {
+            /* First render with the keypad up: seed from where the reader is,
+               and take ownership of the number. */
+            int here = (int)((S->cur.start / 64) * 1000 / (size / 64 + 1)) / 10;
+            if (here < 0) here = 0;
+            if (here > 100) here = 100;
+            /* Seed the DISPLAYED value only. Deliberately not S->typing:
+               that flag means "the reader has actually typed something", and
+               the commit-on-close path is armed by it. Setting it here armed a
+               seek the user never asked for -- closing the keypad then jumped
+               to whatever `typed` happened to hold, which was 0 in the window
+               right after the first key resets it. The first keypress sets it,
+               through the !S->typing branch, which also zeroes `typed` and so
+               gives the overwrite for free. */
+            S->typed = here;
+            S->digits = here >= 100 ? 3 : (here >= 10 ? 2 : 1);
+            S->bar_cleared = 1;
+        }
+        pm = (int)S->typed * 10;          /* show what we will actually seek to */
+    } else {
+        S->bar_cleared = 0;
+        pm = (int)((S->cur.start / 64) * 1000 / (size / 64 + 1));
+    }
     if (pm < 0) pm = 0;
     if (pm > 1000) pm = 1000;
 
@@ -1127,22 +1152,19 @@ static void show_percent(void *cont, struct inj_state *S)
        because the position needs that resolution to move at all. */
     char buf[8];
     int n = 0;
-    int skip_write = 0;
-    if (popup) {
-        if (S->bar_cleared) skip_write = 1;   /* clear once, then leave it be */
-        S->bar_cleared = 1;
-        buf[0] = 0;
-        goto write;
-    }
+    /* Popup open: pre-fill the keypad with where the reader currently IS, once,
+       then leave the widget to the vendor. Written like any other value below,
+       but the cursor has to be set with it -- see the write site. */
     int whole = pm / 10;
     if (whole >= 100) { buf[n++] = '1'; buf[n++] = '0'; buf[n++] = '0'; }
     else {
         if (whole >= 10) buf[n++] = (char)('0' + whole / 10);
         buf[n++] = (char)('0' + whole % 10);
     }
-    buf[n++] = '%';
+    /* No '%' while the keypad is up: the reader is about to type a number into
+       this field, and a stray sign would be part of it. */
+    if (!popup) buf[n++] = '%';
     buf[n] = 0;
-write:;
 
     /* No fw_log here. Its output never reaches the UART on this device (see
        docs/dead-ends.md), so these two calls and their format strings were
@@ -1180,17 +1202,6 @@ write:;
                crash came from using the static-text variant (which stores a
                pointer and sets a flag) on a widget of a different class. */
             if (*(volatile uint32_t *)k != LV_CLASS_COUNTER_IN) continue;
-            /* Diagnostic only: publish both objects so tools/state.py can
-               point `dbg mdw` at the real struct. Reading the layout off a
-               live widget beats guessing instruction encodings -- two static
-               scans for the cursor field found nothing, because +0x24 is the
-               text pointer on a LABEL and the label child on a TEXTAREA, so
-               no static filter separates them. */
-            S->ta_obj = o;
-            S->ta_label = (uint32_t)k;
-            for (int q = 0; q < 26; q++)
-                S->ta_snap[q] = *(volatile uint32_t *)(o + q * 4);
-            if (skip_write) continue;
             /* Only when it actually differs. This setter strlens and REALLOCS,
                and calling it on every render churned the LVGL heap about three
                times a second -- the same heap our own state is allocated from.
@@ -1214,6 +1225,25 @@ write:;
                counter. */
             S->drawn_pm = pm;
             lv_label_set_text_copy(k, buf);
+            /* The label is only half of a textarea. Its cursor index lives at
+               +0x40 (a second counter tracks it at +0x4c), and the pixel
+               fields are derived. Setting the text alone left the two
+               disagreeing, so the vendor's next keypress edited from the wrong
+               offset -- the garbled glyph. Set the index, then let the vendor's
+               own helper recompute the pixels. */
+            if (popup) {
+                *(volatile uint32_t *)(o + TA_CURSOR)  = (uint32_t)n;
+                *(volatile uint32_t *)(o + TA_CURSOR2) = (uint32_t)n;
+                fw_ta_refresh((void *)o);
+                /* Nothing else. Seeding happens ONCE at the top of this
+                   function, guarded by !bar_cleared && !typing. A duplicate
+                   seed lived here and ran on EVERY render while the keypad was
+                   open, so after the enter key cleared the flags the next
+                   render set typing=1 again with typed=0 -- and the
+                   commit-on-close path then seeked to 0%. Every entry went to
+                   0% for exactly this reason. The render owns the DISPLAY; it
+                   must never write the input state. */
+            }
         }
     }
 }
@@ -2199,7 +2229,15 @@ void pointer_body(void *pt)
             if (ty >= 140 && row <= 2) dig = row * 3 + col + 1;
             else if (row == 3 && col == 1) dig = 0;
             if (dig >= 0) {
+                /* No LVGL calls from here. This runs inside the touch
+                   driver's callback, and set_text_copy reallocs and
+                   invalidates -- doing that on the input path is the kind of
+                   thing that costs the next sample. Overwrite-on-first-digit
+                   was implemented here and is removed again while an
+                   intermittent lost-keypress fault is isolated; the display is
+                   the vendor's while the keypad is open. */
                 if (!S->typing) { S->typing = 1; S->typed = 0; S->digits = 0; }
+
                 /* Ignore anything past the third digit, and anything that
                    would exceed 100.
                    The old rule restarted from the offending digit
@@ -2223,7 +2261,15 @@ void pointer_body(void *pt)
             } else if (row == 3 && col == 2) {        /* enter, right of 0    */
                 int32_t size = (int32_t)*FW_BOOK_SIZE;
                 int32_t pct = S->typed;
-                if (S->typing && size > 0 && pct >= 0 && pct <= 100) {
+                /* DISARM BEFORE ACTING. Setting want/want_snap while typing is
+                   still 1 arms the seek, and the very render that services it
+                   also runs the commit-on-close path -- which by then reads
+                   `typed` as 0 and overwrites the seek with 0%. Clearing the
+                   flags first means only one commit can ever fire. */
+                int armed = S->typing;
+                S->typing = 0;
+                S->typed = 0;
+                if (armed && size > 0 && pct >= 0 && pct <= 100) {
                     /* Clear the history rather than pushing the old spot.
                        Pushing it made the first back tap teleport to where the
                        jump came FROM; after a deliberate jump, back should mean
@@ -2235,8 +2281,6 @@ void pointer_body(void *pt)
                     S->want_snap = 1;
                     S->need_prep = 1;
                 }
-                S->typing = 0;
-                S->typed = 0;
             }
             return;                                   /* never turn a page */
         }
