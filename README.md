@@ -134,7 +134,14 @@ Three possible outcomes, and two of them write nothing:
   firmwares and patch that. **Don't use `--force` to get past this** — it would
   leave the device unable to boot, recoverable only by opening the case.
 
-When it does proceed, you'll see a warning:
+When it does proceed, it explains what is about to happen and **asks you to
+type `YES`** before writing anything. Read that text — it covers the one
+failure the backup can't rescue you from: if a write leaves the device unable
+to boot far enough to appear over USB, restoring is impossible and getting back
+means opening the case to short two pads together. Nothing has been written at
+that point, so stopping there costs nothing.
+
+After confirming, you'll see:
 
 ```
 !!  DO NOT DISCONNECT POWER, and do not unplug the USB cable, until this
@@ -145,12 +152,15 @@ When it does proceed, you'll see a warning:
 see:
 
 ```
-verified -- safe to disconnect now. Power-cycle the device to boot it.
+verified -- safe to disconnect now.
 If anything is wrong: bf07.py restore -b mybf07.bin
+
+rebooting the device...
+  it is booting the new reader now.
 ```
 
-Press the reset button (or power-cycle) to boot into the new reader. Open a
-book and try turning a few pages.
+It reboots the device for you once every sector has been verified. Open a book
+and try turning a few pages.
 
 ## Step 4 (optional) — Custom font
 

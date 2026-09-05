@@ -331,6 +331,29 @@ class Device:
                 return
         raise SystemExit(f"block at 0x{addr:06x} would not program")
 
+    def reboot(self):
+        """Leave ADFU and boot the firmware, without a button press.
+
+        ADFU has no working software reset (its SCSI reset opcode does
+        nothing), so this goes the long way round: clear the reboot type in
+        RTC_REMAIN3 to magic|NORMAL -- otherwise the boot ROM re-reads
+        GOTO_ADFU and lands straight back here -- then let the watchdog fire.
+
+        The second write resets the chip mid-command, so no ACK comes back and
+        none is waited for. Returns True if the device left ADFU.
+        """
+        try:
+            self.cmd(b"wm", 4, 0x4000C03C, expect=4,
+                     data=struct.pack("<I", 0x42520000))
+            self.cmd(b"wm", 4, 0x4000C020, expect=4, data=struct.pack("<I", 0x5F))
+        except Exception:
+            pass
+        for _ in range(20):
+            time.sleep(0.25)
+            if find(PID_ADFU) is None:
+                return True
+        return False
+
     def _write(self, addr, data, encrypt, skip_blank=True):
         blank = b"\xff" * 32
         for off in range(0, len(data), 32):          # 32-byte transactions only
@@ -468,8 +491,8 @@ DANGER_OPEN = """
 !!  recovery on this board.
 """
 
-DANGER_CLOSED = ("verified -- safe to disconnect now. "
-                 "Power-cycle the device to boot it.")
+DANGER_CLOSED = "verified -- safe to disconnect now."
+POWER_CYCLE = "Power-cycle the device to boot it."
 
 
 def erased_sentinel(img):
@@ -563,7 +586,7 @@ def restore_plain(args):
                 f"attempts. STAY IN ADFU, do not power off.")
         if (i // SECTOR) % 32 == 0 or i + SECTOR >= len(img):
             print(f"  0x{addr:06x}  {i // SECTOR + 1}/{n}", flush=True)
-    print(DANGER_CLOSED)
+    print(DANGER_CLOSED + " " + POWER_CYCLE)
 
 
 def cmd_restore(args):
@@ -594,7 +617,7 @@ def cmd_restore(args):
             f"{len(failed)} sector(s) did not verify: "
             + ", ".join(f"0x{s:06x}" for s in failed)
             + "\nSTAY IN ADFU and run this command again -- do not power off.")
-    print(DANGER_CLOSED)
+    print(DANGER_CLOSED + " " + POWER_CYCLE)
 
 
 def cmd_install(args):
@@ -628,7 +651,7 @@ def cmd_install(args):
         changed = [i for i in range(0, SECTOR, 32)
                    if back[i:i + 32] != backup[addr + i:addr + i + 32]]
         print(f"  0x{addr:06x}: {len(changed)} block(s) changed")
-    print(DANGER_CLOSED)
+    print(DANGER_CLOSED + " " + POWER_CYCLE)
     print(f"If anything is wrong: bf07.py restore -b {args.backup}")
 
 
@@ -750,6 +773,65 @@ def select_patch(d, cands, args):
     raise SystemExit(UNKNOWN_FIRMWARE)
 
 
+INSTALL_RISK = """
+About to modify the firmware on your BF07.
+--------------------------------------------------------------------
+This is the only step that writes to the device. Read this first.
+
+WHAT NORMALLY HAPPENS
+  21 sectors are written and each one read back and checked. If a check
+  fails the tool stops and tells you to restore, and
+      bf07.py restore -b {backup}
+  puts the device back byte-for-byte. That path has been used many times
+  and always worked.
+
+THE RISK THAT IS NOT COVERED BY THAT
+  Restoring needs the device to still appear over USB. If a write leaves
+  it unable to boot far enough to bring USB up, it will not appear at
+  all -- and then NO software recovery is possible, including the
+  command above.
+
+  Getting back from that state means OPENING THE CASE, shorting the two
+  debug UART pads (TX and RX) together, and pressing reset. That forces
+  the device into firmware-update mode before it tries to boot, after
+  which restoring works normally. It needs a jumper wire or tweezers,
+  not soldering -- but it does need the case open.
+
+  This happened twice while developing this tool, and recovery worked
+  both times. It is a real possibility, not a theoretical one.
+
+  If you are not willing or able to open the case should it come to
+  that, stop here. Your device is completely untouched so far.
+--------------------------------------------------------------------
+"""
+
+
+def confirm_install(args):
+    """Informed consent before the only step that writes.
+
+    The firmware check makes a wrong-firmware install very unlikely, but
+    "unlikely" is not the same as "recoverable over USB". The failure that
+    matters is a device that will not enumerate, because every software
+    recovery path -- including restore -- needs USB. That one needs the case
+    open, and the user deserves to know before the first erase, not after.
+    """
+    if getattr(args, "yes", False):
+        return
+    print(INSTALL_RISK.format(backup=args.backup))
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "Not running interactively, so this cannot be confirmed. Re-run "
+            "with --yes if you have read the above and accept it.")
+    try:
+        ans = input("Type YES to install, anything else to stop: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit("\naborted -- nothing was written.")
+    if ans != "YES":
+        raise SystemExit("aborted -- nothing was written, your device is "
+                         "untouched.")
+    print()
+
+
 def install_patch(args, backup):
     """Install a distributable patch file -- ADFU only, no serial, no image.
 
@@ -780,6 +862,7 @@ def install_patch(args, backup):
     for addr, data in blocks:
         by_sector.setdefault(addr & ~0xfff, {})[addr & 0xfff] = data
 
+    confirm_install(args)
     print(DANGER_OPEN)
 
     # reader sectors: pure ours, write plaintext, leave 0xFF erased
@@ -865,6 +948,14 @@ def install_patch(args, backup):
               f"{SECTOR//32 - len(edits)} preserved, verified")
     print("\n" + DANGER_CLOSED)
     print(f"If anything is wrong: bf07.py restore -b {args.backup}")
+    # Only here, i.e. only once every sector has been written AND read back and
+    # compared. A reboot on any other path would boot a half-written fw0_sys.
+    if not getattr(args, "no_reboot", False):
+        print("\nrebooting the device...")
+        if d.reboot():
+            print("  it is booting the new reader now.")
+        else:
+            print("  could not reboot it from here -- press reset on the device.")
 
 
 def main():
@@ -886,6 +977,12 @@ def main():
     p.add_argument("--patch", help="reader-patch*.bin, or a DIRECTORY of them; the one matching your firmware is chosen automatically "
                                 "(default: the bundle's reference/ directory)")
     p.add_argument("-p", "--plain", help="decrypted fw0_sys image (legacy path)")
+    p.add_argument("--no-reboot", action="store_true",
+                   help="leave the device in ADFU after installing instead of "
+                        "rebooting it")
+    p.add_argument("--yes", action="store_true",
+                   help="skip the confirmation prompt (you have read the "
+                        "recovery warning and accept it)")
     p.add_argument("--force", action="store_true",
                    help="install even if the patch was built for a different "
                         "firmware build (hangs the device; needs the TX/RX "
