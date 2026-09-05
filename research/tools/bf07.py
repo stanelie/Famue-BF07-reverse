@@ -721,13 +721,15 @@ def cmd_install(args):
         raise SystemExit("refusing to install without a backup: run `backup` first")
     backup = open(args.backup, "rb").read()
     sys.path.insert(0, HERE)
-    from patchset import build          # the reader's patch table
 
-    if args.patch:
-        return install_patch(args, backup)
+    # No --patch means "use the ones shipped alongside me", which is what a
+    # release bundle always wants; patch_files() resolves that and fails with
+    # a useful message if there are none. Demanding the flag here made
+    # `install -b backup.bin` fail for the very users the default exists for.
     if not args.plain:
-        raise SystemExit("give --patch reader-patch.bin (recommended) or "
-                         "-p <decrypted image> (legacy)")
+        return install_patch(args, backup)
+
+    from patchset import build          # legacy path only: needs a full image
 
     # Legacy path: needs the full decrypted image (one serial dump).
     plain = open(args.plain, "rb").read()

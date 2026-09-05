@@ -67,15 +67,25 @@ unplug/replug the device once. (No rule yet? Just run the commands below with
 
 ## Download
 
-Get the latest bundle from the [Releases page](../../releases) — download
-`bf07-bundle-<version>.zip`, and check its sha256 against the one printed on
-the release page if you want to confirm nothing got corrupted in transit.
-Unzip it, then open a terminal in the folder it created.
+Get it from the [Releases page](../../releases) — one file,
+`bf07-installer-<version>.py`. Nothing to unpack.
+
+```
+python3 bf07-installer-<version>.py
+```
+
+Everything the installer needs is inside that file. It unpacks into a
+temporary directory while it runs and removes it on exit, so nothing is left
+in your folder. Check its sha256 against the release page if you want to
+confirm the download.
+
+(A `.zip` of the same thing is also attached, if you would rather see the
+individual files.)
 
 ## Run it
 
 ```
-python3 tools/bf07.py
+python3 bf07-installer-<version>.py
 ```
 
 That's the whole thing. It opens a menu, explains the risks once at the top,
@@ -117,12 +127,15 @@ supported — please do send the backup, it's how the next build gets added.
 Every option is also a subcommand, for scripting or if you prefer:
 
 ```
-python3 tools/bf07.py backup  -o mybf07.bin
-python3 tools/bf07.py verify  -b mybf07.bin
-python3 tools/bf07.py install -b mybf07.bin --patch reference
-python3 tools/bf07.py font
-python3 tools/bf07.py restore -b mybf07.bin
+python3 bf07-installer-<version>.py backup  -o mybf07.bin
+python3 bf07-installer-<version>.py verify  -b mybf07.bin
+python3 bf07-installer-<version>.py install -b mybf07.bin
+python3 bf07-installer-<version>.py font
+python3 bf07-installer-<version>.py restore -b mybf07.bin
 ```
+
+`install` finds the bundled patches by itself; `--patch` is only needed to
+point it somewhere else.
 
 `install` asks for confirmation before writing; `--yes` skips it, `--no-reboot`
 leaves the device in update mode afterwards.

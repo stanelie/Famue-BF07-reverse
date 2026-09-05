@@ -55,6 +55,74 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+SINGLE_STUB = '''#!/usr/bin/env python3
+"""BF07 reader installer %(ver)s -- everything in one file.
+
+Run it:      python3 %(name)s
+
+No unpacking, no folders, nothing to install. Everything the installer needs is
+embedded below and unpacked into a temporary directory each run, which is
+removed on exit; nothing is left behind on your machine.
+
+Full instructions: https://github.com/stanelie/Famue-BF07-reverse
+"""
+import atexit, base64, os, shutil, sys, tempfile, zlib
+
+_BLOBS = {
+%(blobs)s}
+
+
+def _unpack():
+    d = tempfile.mkdtemp(prefix="bf07-")
+    atexit.register(shutil.rmtree, d, True)
+    for name, b64 in _BLOBS.items():
+        path = os.path.join(d, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(zlib.decompress(base64.b64decode(b64)))
+    return d
+
+
+if __name__ == "__main__":
+    root = _unpack()
+    sys.path.insert(0, os.path.join(root, "tools"))
+    import bf07
+    sys.exit(bf07.main())
+'''
+
+
+def build_single_file(staging, dist, ver):
+    """Pack the whole bundle into one runnable .py.
+
+    A zip asks the user to find it, unpack it, and know which file inside to
+    run. A single script is `python3 <file>` and done -- which matters when the
+    audience is a device owner, not a developer.
+
+    Layout is preserved on unpack (tools/ beside reference/ and fonts/) because
+    the installer locates the ADFU payload and the font relative to itself.
+    Unpacking to a temp dir that is deleted on exit keeps the "one file" promise
+    literal: nothing is scattered into the working directory.
+    """
+    import base64, zlib
+    name = f"bf07-installer-{ver}.py"
+    out = os.path.join(dist, name)
+    lines = []
+    for dirpath, _, filenames in os.walk(staging):
+        for fn in sorted(filenames):
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, staging).replace(os.sep, "/")
+            blob = base64.b64encode(zlib.compress(open(full, "rb").read(), 9)).decode()
+            lines.append(f'    "{rel}": (')
+            for i in range(0, len(blob), 76):
+                lines.append(f'        "{blob[i:i + 76]}"')
+            lines.append("    ),")
+    src = SINGLE_STUB % {"ver": ver, "name": name, "blobs": "\n".join(lines) + "\n"}
+    with open(out, "w") as f:
+        f.write(src)
+    os.chmod(out, 0o755)
+    return out
+
+
 def main():
     # Pre-flight: fail fast if a module is broken, before anything is copied.
     import patchset          # noqa: F401  (imports patch_lines transitively)
@@ -117,9 +185,13 @@ def main():
                 z.write(full, os.path.join(f"bf07-bundle-{ver}",
                                             os.path.relpath(full, staging)))
 
+    single = build_single_file(staging, dist, ver)
+
     print(f"\nwrote {staging}/")
     print(f"wrote {zip_path}")
-    print(f"sha256 {sha256_file(zip_path)}")
+    print(f"     sha256 {sha256_file(zip_path)}")
+    print(f"wrote {single}")
+    print(f"     sha256 {sha256_file(single)}")
 
 
 if __name__ == "__main__":
