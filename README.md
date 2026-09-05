@@ -106,7 +106,7 @@ and walks you through everything:
   reader's font menu on the device. This is the one option that needs the
   drive *mounted*; the others unmount it for you.
 - **5 — Restore.** Puts the device back exactly as your backup found it —
-  stock reader and all. Works as many times as you like.
+  stock reader and all, then reboots it. Works as many times as you like.
 
 If option 3 says **`None of the available patches match`**, your device runs a
 firmware build we haven't seen. Nothing was written. It explains how to get it
@@ -157,8 +157,8 @@ python3 tools/bf07.py restore -b mybf07.bin
 ```
 
 Works at any time, as many times as you like, and is byte-exact — it puts the
-device back precisely as your backup found it, stock reader included. Use the
-backup you took *before* installing.
+device back precisely as your backup found it, stock reader included, then
+reboots it. Use the backup you took *before* installing.
 
 ## How this works
 

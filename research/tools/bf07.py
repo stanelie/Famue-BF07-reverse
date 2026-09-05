@@ -586,7 +586,30 @@ def restore_plain(args):
                 f"attempts. STAY IN ADFU, do not power off.")
         if (i // SECTOR) % 32 == 0 or i + SECTOR >= len(img):
             print(f"  0x{addr:06x}  {i // SECTOR + 1}/{n}", flush=True)
-    print(DANGER_CLOSED + " " + POWER_CYCLE)
+    print(DANGER_CLOSED)
+    reboot_after(d, args)
+
+
+def reboot_after(d, args):
+    """Bring the device back to normal after an operation that ends a session.
+
+    Entering ADFU is a reboot into a mode with no UI, so a device left there
+    looks dead: blank screen, no drive, nothing but a bare USB id. Anything
+    that finishes a job should hand it back running.
+
+    Not done after backup/verify: those are usually followed by another
+    operation, and returning to normal would make the user pick disk-drive mode
+    on the device again before the next one. The menu reboots on the way out
+    instead, which covers the same gap without the friction.
+    """
+    if getattr(args, "no_reboot", False):
+        print(POWER_CYCLE)
+        return
+    print("rebooting the device...")
+    if d.reboot():
+        print("  it is running again.")
+    else:
+        print(f"  could not reboot it from here -- {POWER_CYCLE.lower()}")
 
 
 def cmd_restore(args):
@@ -601,6 +624,7 @@ def cmd_restore(args):
     bad = differing(d, backup)
     if not bad:
         print("device already matches the backup")
+        reboot_after(d, args)
         return
     print(f"restoring {len(bad)} sector(s)")
     print(DANGER_OPEN)
@@ -617,7 +641,8 @@ def cmd_restore(args):
             f"{len(failed)} sector(s) did not verify: "
             + ", ".join(f"0x{s:06x}" for s in failed)
             + "\nSTAY IN ADFU and run this command again -- do not power off.")
-    print(DANGER_CLOSED + " " + POWER_CYCLE)
+    print(DANGER_CLOSED)
+    reboot_after(d, args)
 
 
 def cmd_install(args):
@@ -1055,6 +1080,28 @@ def _backups_here():
     return sorted(found, key=os.path.getmtime, reverse=True)
 
 
+def leave_device_running():
+    """Never end a session with the device parked in ADFU.
+
+    backup and verify deliberately leave it there, because the next menu choice
+    would otherwise need the user to pick disk-drive mode on the device again.
+    That is fine mid-session and not fine at the end: ADFU has no UI, so a
+    device abandoned in it looks broken -- blank screen, no drive -- and the
+    way out is a button press the user has no reason to know about.
+    """
+    if find(PID_ADFU) is None:
+        return
+    print("the device is still in update mode -- rebooting it...")
+    try:
+        d = Device()
+        if d.reboot():
+            print("  it is running again.")
+            return
+    except Exception:
+        pass
+    print(f"  could not reboot it from here -- {POWER_CYCLE.lower()}")
+
+
 def menu():
     """Interactive front end, so the whole job is doable without composing a
     single command line. The risk warning lives here, once, above the choices:
@@ -1078,6 +1125,7 @@ def menu():
             c = input("  choice: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
+            leave_device_running()
             return
         print()
         try:
@@ -1103,6 +1151,7 @@ def menu():
                 cmd_restore(argparse.Namespace(
                     backup=b, plain=None, no_erase_detect=False))
             elif c == "6":
+                leave_device_running()
                 return
             else:
                 print("  pick 1-6.")
@@ -1126,6 +1175,8 @@ def main():
     p.add_argument("-b", "--backup", help="this device's own backup (preferred)")
     p.add_argument("--plain", help="plaintext fw0_sys image, e.g. captured from "
                                    "a second working unit (no backup needed)")
+    p.add_argument("--no-reboot", action="store_true",
+                   help="leave the device in update mode instead of rebooting it")
     p.add_argument("--no-erase-detect", action="store_true",
                    help="write every block, even ones that look like erased "
                         "flash decrypted through XIP (rarely correct)")
