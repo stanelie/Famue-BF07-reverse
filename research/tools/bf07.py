@@ -966,6 +966,19 @@ def install_patch(args, backup):
     confirm_install(args)
     print(DANGER_OPEN)
 
+    # Clear the WHOLE reader region first, not just the sectors this patch
+    # fills. Otherwise a smaller reader than the one already installed leaves
+    # live code in the tail sectors -- still branched to by nothing, but present
+    # and indistinguishable from ours to anyone reading the flash later. The
+    # development flasher already rewrites historical hook sites for the same
+    # reason. Erasing is cheap and the region is ours by definition: it is the
+    # erased tail of fw0_sys, blank in every stock image.
+    import patchset as _ps
+    for a in range(_ps.CODE_BASE, _ps.CODE_LIMIT, SECTOR):
+        cur = d.read(a, SECTOR)
+        if cur != b"\xff" * SECTOR:
+            d.erase(a)
+
     # reader sectors: pure ours, write plaintext, leave 0xFF erased
     for addr, data in reader:
         d.erase(addr)
